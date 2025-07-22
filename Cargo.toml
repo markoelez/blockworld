@@ -1,0 +1,15 @@
+[package]
+name = "blockworld"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+winit = "0.28"
+wgpu = "0.17"
+cgmath = "0.18"
+bytemuck = { version = "1.14", features = ["derive"] }
+env_logger = "0.11"
+log = "0.4"
+noise = "0.8"
+image = "0.23"
+pollster = "0.3"
