@@ -3,6 +3,7 @@ struct VertexInput {
     @location(1) tex_coords: vec2<f32>,
     @location(2) normal: vec3<f32>,
     @location(3) block_type: f32,
+    @location(4) damage: f32,
 }
 
 struct VertexOutput {
@@ -11,6 +12,7 @@ struct VertexOutput {
     @location(1) world_position: vec3<f32>,
     @location(2) normal: vec3<f32>,
     @location(3) block_type: f32,
+    @location(4) damage: f32,
 }
 
 struct Uniform {
@@ -37,6 +39,10 @@ var t_wood: texture_2d<f32>;
 var t_leaves: texture_2d<f32>;
 @group(1) @binding(7)
 var t_water: texture_2d<f32>;
+@group(1) @binding(8)
+var t_sand: texture_2d<f32>;
+@group(1) @binding(9)
+var t_snow: texture_2d<f32>;
 @group(1) @binding(6)
 var s_diffuse: sampler;
 
@@ -48,6 +54,7 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.world_position = in.position;
     out.normal = in.normal;
     out.block_type = in.block_type;
+    out.damage = in.damage;
     return out;
 }
 
@@ -73,6 +80,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let wood_color = textureSample(t_wood, s_diffuse, in.tex_coords);
     let leaves_color = textureSample(t_leaves, s_diffuse, in.tex_coords);
     let water_color = textureSample(t_water, s_diffuse, in.tex_coords);
+    let sand_color = textureSample(t_sand, s_diffuse, in.tex_coords);
+    let snow_color = textureSample(t_snow, s_diffuse, in.tex_coords);
     
     // Select appropriate texture using smooth interpolation
     let bt = floor(in.block_type + 0.5);
@@ -90,9 +99,48 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     texture_color = mix(texture_color, leaves_color, step(3.5, bt));
     texture_color = mix(texture_color, water_color, step(4.5, bt));
     
+    // Sand texture
+    if (bt == 7.0) {
+        texture_color = sand_color;
+    }
+    // Snow texture
+    else if (bt == 8.0) {
+        texture_color = snow_color;
+    }
+    
+    // Arm color
     if (bt == 6.0) {
         texture_color = vec4<f32>(0.804, 0.498, 0.196, 1.0);
     }
+    // Ice (light blue)
+    else if (bt == 9.0) {
+        texture_color = vec4<f32>(0.678, 0.847, 0.902, 1.0);
+    }
+    // Cobblestone (gray)
+    else if (bt == 10.0) {
+        texture_color = vec4<f32>(0.5, 0.5, 0.5, 1.0);
+    }
+    // Coal (dark gray/black)
+    else if (bt == 11.0) {
+        texture_color = vec4<f32>(0.2, 0.2, 0.2, 1.0);
+    }
+    // Iron (metallic gray)
+    else if (bt == 12.0) {
+        texture_color = vec4<f32>(0.7, 0.7, 0.7, 1.0);
+    }
+    // Gold (golden yellow)
+    else if (bt == 13.0) {
+        texture_color = vec4<f32>(1.0, 0.843, 0.0, 1.0);
+    }
+    // Diamond (light blue/cyan)
+    else if (bt == 14.0) {
+        texture_color = vec4<f32>(0.678, 0.847, 0.902, 1.0);
+    }
+    
+    // Crack effect
+    let crack_intensity = step(1.0 - in.damage, noise(in.tex_coords * 20.0)) * step(0.01, in.damage);
+    let crack_color = vec4<f32>(0.0, 0.0, 1.0, 1.0);
+    texture_color = mix(texture_color, crack_color, crack_intensity * 0.7);
     
     var base_color = texture_color.rgb;
     
@@ -110,5 +158,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     var lit_color = base_color * lighting;
     let final_color = mix(fog_color, lit_color, fog_factor);
     let alpha = select(1.0, 0.7, bt == 5.0);
-    return vec4<f32>(final_color, alpha);
+    // Make dummy vertices (negative block type) fully transparent
+    let final_alpha = select(alpha, 0.0, in.block_type < 0.0);
+    return vec4<f32>(final_color, final_alpha);
+}
+
+fn noise(p: vec2<f32>) -> f32 {
+    return fract(sin(dot(p, vec2<f32>(12.9898, 78.233))) * 43758.5453);
 }

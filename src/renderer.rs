@@ -17,7 +17,8 @@ struct Vertex {
     position: [f32; 3],
     tex_coords: [f32; 2],
     normal: [f32; 3],
-    block_type: f32, // 0=grass, 1=dirt, 2=stone, 3=wood, 4=leaves
+    block_type: f32,
+    damage: f32,  // 0.0 to 1.0 normalized damage
 }
 
 #[repr(C)]
@@ -58,11 +59,11 @@ pub struct Renderer {
     outline_pipeline: wgpu::RenderPipeline,
     sky_pipeline: wgpu::RenderPipeline,
     cloud_pipeline: wgpu::RenderPipeline,
+    held_item_pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
     texture_bind_group: wgpu::BindGroup,
     depth_texture: wgpu::TextureView,
-    chunk_meshes: HashMap<(i32, i32), ChunkMesh>, // Chunk position -> mesh
     ui_renderer: UIRenderer,
     outline_vertex_buffer: wgpu::Buffer,
     outline_index_buffer: wgpu::Buffer,
@@ -76,10 +77,10 @@ pub struct Renderer {
     chunk_meshes_opaque: HashMap<(i32, i32), ChunkMesh>,
     chunk_meshes_transparent: HashMap<(i32, i32), ChunkMesh>,
     arm_swing_progress: f32,
-    held_item_vertex_buffer: wgpu::Buffer,
-    held_item_index_buffer: wgpu::Buffer,
     held_item_index_count: u32,
     last_render: Instant,
+    held_item_vertex_buffer: wgpu::Buffer,
+    held_item_index_buffer: wgpu::Buffer,
 }
 
 impl Renderer {
@@ -238,6 +239,11 @@ impl Renderer {
             source: wgpu::ShaderSource::Wgsl(include_str!("cloud_shader.wgsl").into()),
         });
         
+        let held_item_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Held Item Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("held_item_shader.wgsl").into()),
+        });
+        
         let uniform_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -333,6 +339,26 @@ impl Renderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 8,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 9,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
             ],
             label: Some("texture_bind_group_layout"),
         });
@@ -360,26 +386,11 @@ impl Renderer {
                     array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
-                        wgpu::VertexAttribute {
-                            offset: 0,
-                            shader_location: 0,
-                            format: wgpu::VertexFormat::Float32x3,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                            shader_location: 1,
-                            format: wgpu::VertexFormat::Float32x2,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: std::mem::size_of::<[f32; 5]>() as wgpu::BufferAddress,
-                            shader_location: 2,
-                            format: wgpu::VertexFormat::Float32x3,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: std::mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
-                            shader_location: 3,
-                            format: wgpu::VertexFormat::Float32,
-                        },
+                        wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
+                        wgpu::VertexAttribute { offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress, shader_location: 1, format: wgpu::VertexFormat::Float32x2 },
+                        wgpu::VertexAttribute { offset: std::mem::size_of::<[f32; 5]>() as wgpu::BufferAddress, shader_location: 2, format: wgpu::VertexFormat::Float32x3 },
+                        wgpu::VertexAttribute { offset: std::mem::size_of::<[f32; 8]>() as wgpu::BufferAddress, shader_location: 3, format: wgpu::VertexFormat::Float32 },
+                        wgpu::VertexAttribute { offset: std::mem::size_of::<[f32; 9]>() as wgpu::BufferAddress, shader_location: 4, format: wgpu::VertexFormat::Float32 },
                     ],
                 }],
             },
@@ -430,26 +441,11 @@ impl Renderer {
                     array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &[
-                        wgpu::VertexAttribute {
-                            offset: 0,
-                            shader_location: 0,
-                            format: wgpu::VertexFormat::Float32x3,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                            shader_location: 1,
-                            format: wgpu::VertexFormat::Float32x2,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: std::mem::size_of::<[f32; 5]>() as wgpu::BufferAddress,
-                            shader_location: 2,
-                            format: wgpu::VertexFormat::Float32x3,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: std::mem::size_of::<[f32; 8]>() as wgpu::BufferAddress,
-                            shader_location: 3,
-                            format: wgpu::VertexFormat::Float32,
-                        },
+                        wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
+                        wgpu::VertexAttribute { offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress, shader_location: 1, format: wgpu::VertexFormat::Float32x2 },
+                        wgpu::VertexAttribute { offset: std::mem::size_of::<[f32; 5]>() as wgpu::BufferAddress, shader_location: 2, format: wgpu::VertexFormat::Float32x3 },
+                        wgpu::VertexAttribute { offset: std::mem::size_of::<[f32; 8]>() as wgpu::BufferAddress, shader_location: 3, format: wgpu::VertexFormat::Float32 },
+                        wgpu::VertexAttribute { offset: std::mem::size_of::<[f32; 9]>() as wgpu::BufferAddress, shader_location: 4, format: wgpu::VertexFormat::Float32 },
                     ],
                 }],
             },
@@ -660,6 +656,62 @@ impl Renderer {
             multiview: None,
         });
         
+        // Create held item render pipeline
+        let held_item_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Held Item Render Pipeline"),
+            layout: Some(&render_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &held_item_shader,
+                entry_point: "vs_main",
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
+                        wgpu::VertexAttribute { offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress, shader_location: 1, format: wgpu::VertexFormat::Float32x2 },
+                        wgpu::VertexAttribute { offset: std::mem::size_of::<[f32; 5]>() as wgpu::BufferAddress, shader_location: 2, format: wgpu::VertexFormat::Float32x3 },
+                        wgpu::VertexAttribute { offset: std::mem::size_of::<[f32; 8]>() as wgpu::BufferAddress, shader_location: 3, format: wgpu::VertexFormat::Float32 },
+                        wgpu::VertexAttribute { offset: std::mem::size_of::<[f32; 9]>() as wgpu::BufferAddress, shader_location: 4, format: wgpu::VertexFormat::Float32 },
+                    ],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &held_item_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: 0,
+                    slope_scale: 0.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+        });
+        
         // Create outline buffers with proper size for triangulated edges
         let outline_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Outline Vertex Buffer"),
@@ -709,6 +761,10 @@ impl Renderer {
         let leaves_texture = Self::load_texture(&device, &queue, "src/textures/leaves.jpg")
             .unwrap_or_else(|_| Self::create_fallback_texture(&device, &queue, [64, 115, 64, 255]));
         let water_texture = Self::create_fallback_texture(&device, &queue, [63, 118, 228, 255]);
+        let sand_texture = Self::load_texture(&device, &queue, "src/textures/sand.jpg")
+            .unwrap_or_else(|_| Self::create_fallback_texture(&device, &queue, [244, 205, 140, 255]));
+        let snow_texture = Self::load_texture(&device, &queue, "src/textures/snow.png")
+            .unwrap_or_else(|_| Self::create_fallback_texture(&device, &queue, [250, 250, 250, 255]));
         
         // Create texture views
         let grass_view = grass_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -718,6 +774,8 @@ impl Renderer {
         let wood_view = wood_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let leaves_view = leaves_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let water_view = water_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sand_view = sand_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let snow_view = snow_texture.create_view(&wgpu::TextureViewDescriptor::default());
         
         // Create sampler
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -766,6 +824,14 @@ impl Renderer {
                     binding: 7,
                     resource: wgpu::BindingResource::TextureView(&water_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(&sand_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 9,
+                    resource: wgpu::BindingResource::TextureView(&snow_view),
+                },
             ],
             label: Some("texture_bind_group"),
         });
@@ -805,8 +871,11 @@ impl Renderer {
         let depth_texture = Self::create_depth_texture(&device, &config);
         let ui_renderer = UIRenderer::new(&device, &queue, &config, &texture_bind_group, &texture_bind_group_layout);
         
+        // Create indices for up to 2 cubes (item + arm)
         let mut held_indices: Vec<u16> = vec![];
         let face_indices = &[0u16, 1, 2, 2, 3, 0];
+        
+        // Always create indices for 2 cubes worth of vertices
         for cube in 0..2 {
             let vert_base = (cube * 24) as u16;
             for face in 0..6 {
@@ -818,17 +887,17 @@ impl Renderer {
         }
         let held_item_index_count = held_indices.len() as u32;
 
-        let held_item_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Held Item Vertex Buffer"),
-            size: (48 * std::mem::size_of::<Vertex>()) as u64,
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         let held_item_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Held Item Index Buffer"),
             contents: bytemuck::cast_slice(&held_indices),
             usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let held_item_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Held Item Vertex Buffer"),
+            size: (48 * std::mem::size_of::<Vertex>()) as u64, // 2 cubes * 24 vertices each
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
         let arm_swing_progress = 0.0;
@@ -843,11 +912,11 @@ impl Renderer {
             outline_pipeline,
             sky_pipeline,
             cloud_pipeline,
+            held_item_pipeline,
             uniform_buffer,
             uniform_bind_group,
             texture_bind_group,
             depth_texture,
-            chunk_meshes: HashMap::new(),
             ui_renderer,
             outline_vertex_buffer,
             outline_index_buffer,
@@ -861,10 +930,10 @@ impl Renderer {
             chunk_meshes_opaque: HashMap::new(),
             chunk_meshes_transparent: HashMap::new(),
             arm_swing_progress,
-            held_item_vertex_buffer,
-            held_item_index_buffer,
             held_item_index_count,
             last_render,
+            held_item_vertex_buffer,
+            held_item_index_buffer,
         }
     }
     
@@ -1124,13 +1193,13 @@ impl Renderer {
             let vertices = Self::create_held_item_vertices(camera, opt_block_type, self.arm_swing_progress);
             self.queue.write_buffer(&self.held_item_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
 
-            render_pass.set_pipeline(&self.render_pipeline);  // Always opaque for arm
+            // Use the held item pipeline for view-space rendering
+            render_pass.set_pipeline(&self.held_item_pipeline);
             render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.held_item_vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.held_item_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            let draw_count = if opt_block_type.is_some() { self.held_item_index_count } else { self.held_item_index_count / 2 };
-            render_pass.draw_indexed(0..draw_count, 0, 0..1);
+            render_pass.draw_indexed(0..self.held_item_index_count, 0, 0..1);
         }
         
         // Render UI in a separate pass (no depth testing, renders on top)
@@ -1148,7 +1217,7 @@ impl Renderer {
                 depth_stencil_attachment: None, // No depth testing for UI
             });
             
-            self.ui_renderer.update_inventory_selection(&self.device, &self.queue, inventory);
+            self.ui_renderer.update_inventory_selection(&self.device, &inventory);
             self.ui_renderer.render(&mut ui_render_pass, &self.texture_bind_group);
         }
         
@@ -1244,7 +1313,11 @@ impl Renderer {
                     }
                     
                     let world_x = chunk.position.x * World::CHUNK_SIZE as i32 + x as i32;
+                    let world_y = y as i32;
                     let world_z = chunk.position.z * World::CHUNK_SIZE as i32 + z as i32;
+                    
+                    let damage = world.get_block_damage(world_x, world_y, world_z);
+                    let normalized_damage = if crate::world::World::get_hardness(block_type) > 0.0 { damage / crate::world::World::get_hardness(block_type) } else { 0.0 };
                     
                     let pos = Vector3::new(world_x as f32, y as f32, world_z as f32);
                     
@@ -1254,24 +1327,23 @@ impl Renderer {
                         (&mut opaque_vertices, &mut opaque_indices)
                     };
                     
-                    // Only render faces that are exposed (face culling optimization)
-                    if Self::is_face_exposed(world, world_x, y as i32 + 1, world_z, block_type) {
-                        Self::add_face(vertices, indices, pos, Face::Top, block_type);
+                    if Self::is_face_exposed(world, world_x, world_y + 1, world_z, block_type) {
+                        Self::add_face(vertices, indices, pos, Face::Top, block_type, normalized_damage);
                     }
-                    if Self::is_face_exposed(world, world_x, y as i32 - 1, world_z, block_type) {
-                        Self::add_face(vertices, indices, pos, Face::Bottom, block_type);
+                    if Self::is_face_exposed(world, world_x, world_y - 1, world_z, block_type) {
+                        Self::add_face(vertices, indices, pos, Face::Bottom, block_type, normalized_damage);
                     }
-                    if Self::is_face_exposed(world, world_x + 1, y as i32, world_z, block_type) {
-                        Self::add_face(vertices, indices, pos, Face::Right, block_type);
+                    if Self::is_face_exposed(world, world_x + 1, world_y, world_z, block_type) {
+                        Self::add_face(vertices, indices, pos, Face::Right, block_type, normalized_damage);
                     }
-                    if Self::is_face_exposed(world, world_x - 1, y as i32, world_z, block_type) {
-                        Self::add_face(vertices, indices, pos, Face::Left, block_type);
+                    if Self::is_face_exposed(world, world_x - 1, world_y, world_z, block_type) {
+                        Self::add_face(vertices, indices, pos, Face::Left, block_type, normalized_damage);
                     }
-                    if Self::is_face_exposed(world, world_x, y as i32, world_z + 1, block_type) {
-                        Self::add_face(vertices, indices, pos, Face::Front, block_type);
+                    if Self::is_face_exposed(world, world_x, world_y, world_z + 1, block_type) {
+                        Self::add_face(vertices, indices, pos, Face::Front, block_type, normalized_damage);
                     }
-                    if Self::is_face_exposed(world, world_x, y as i32, world_z - 1, block_type) {
-                        Self::add_face(vertices, indices, pos, Face::Back, block_type);
+                    if Self::is_face_exposed(world, world_x, world_y, world_z - 1, block_type) {
+                        Self::add_face(vertices, indices, pos, Face::Back, block_type, normalized_damage);
                     }
                 }
             }
@@ -1280,7 +1352,7 @@ impl Renderer {
         (opaque_vertices, opaque_indices, trans_vertices, trans_indices)
     }
 
-    fn create_held_item_vertices(camera: &Camera, opt_block_type: Option<BlockType>, progress: f32) -> Vec<Vertex> {
+    fn create_held_item_vertices(_camera: &Camera, opt_block_type: Option<BlockType>, progress: f32) -> Vec<Vertex> {
         let block_type_f = opt_block_type.map_or(6.0, Self::block_type_to_float);
         let size = 0.4;
 
@@ -1294,8 +1366,9 @@ impl Renderer {
         ];
 
         let mut verts: Vec<Vertex> = vec![];
-        if let Some(block_type) = opt_block_type {
-            let mut item_verts: Vec<Vertex> = vec![];
+
+        // Generate item vertices if a block is selected
+        if opt_block_type.is_some() {
             for &face_vert in face_verts.iter() {
                 for v in face_vert.iter() {
                     let mut new_v = *v;
@@ -1303,13 +1376,25 @@ impl Renderer {
                     new_v.position[1] = (new_v.position[1] - 0.5) * size;
                     new_v.position[2] = (new_v.position[2] - 0.5) * size;
                     new_v.block_type = block_type_f;
-                    item_verts.push(new_v);
+                    new_v.damage = 0.0;
+                    verts.push(new_v);
                 }
             }
-            verts.extend(item_verts);
+        } else {
+            // Add dummy vertices for the item cube if no block is selected
+            let dummy = Vertex {
+                position: [0.0, 0.0, 0.0],
+                tex_coords: [0.0, 0.0],
+                normal: [0.0, 0.0, 0.0],
+                block_type: -1.0,
+                damage: 0.0,
+            };
+            for _ in 0..24 {
+                verts.push(dummy);
+            }
         }
 
-        let mut arm_verts: Vec<Vertex> = vec![];
+        // Generate arm vertices
         let arm_size_x = 0.25;
         let arm_size_y = 0.5;
         let arm_size_z = 0.25;
@@ -1321,28 +1406,27 @@ impl Renderer {
                 new_v.position[1] = (new_v.position[1] - 0.5) * arm_size_y + arm_offset[1];
                 new_v.position[2] = (new_v.position[2] - 0.5) * arm_size_z + arm_offset[2];
                 new_v.block_type = 6.0;
-                arm_verts.push(new_v);
+                new_v.damage = 0.0;
+                verts.push(new_v);
             }
         }
 
-        verts.extend(arm_verts);
-
-        let front = camera.get_look_direction();
-        let up = Vector3::unit_y();
-        let right = front.cross(up).normalize();
-        let true_up = right.cross(front).normalize();
-
-        let item_offset = right * 0.5 - true_up * 0.8 + front * 0.2;
-        let item_pos = camera.position + item_offset;
-
+        // Position in view space
+        let view_offset = Vector3::new(0.8, -0.6, -1.5);
+        
+        // Apply swing animation rotation
         let angle = -progress.powi(2) * 80.0;
-        let rotation = Matrix4::from_axis_angle(right, Deg(angle));
-
-        let tilt_rotation = Matrix4::from_axis_angle(right, Deg(-30.0)) * Matrix4::from_axis_angle(front, Deg(20.0));
-
-        let model = Matrix4::from_translation(item_pos.to_vec()) * rotation * tilt_rotation;
+        let rotation = Matrix4::from_axis_angle(Vector3::unit_x(), Deg(angle));
+        
+        // Apply base tilt
+        let tilt_rotation = Matrix4::from_axis_angle(Vector3::unit_x(), Deg(-30.0)) * 
+                          Matrix4::from_axis_angle(Vector3::unit_y(), Deg(20.0));
+        
+        // Combine transformations in view space
+        let model = Matrix4::from_translation(view_offset) * rotation * tilt_rotation;
         let normal_mat = model.invert().unwrap().transpose();
 
+        // Transform all vertices to view space
         for v in verts.iter_mut() {
             let local_pos = Vector3::from(v.position);
             let transformed = (model * Vector4::new(local_pos.x, local_pos.y, local_pos.z, 1.0)).truncate();
@@ -1468,11 +1552,19 @@ impl Renderer {
             BlockType::Wood => 3.0,
             BlockType::Leaves => 4.0,
             BlockType::Water => 5.0,
+            BlockType::Sand => 7.0,
+            BlockType::Snow => 8.0,
+            BlockType::Ice => 9.0,
+            BlockType::Cobblestone => 10.0,
+            BlockType::Coal => 11.0,
+            BlockType::Iron => 12.0,
+            BlockType::Gold => 13.0,
+            BlockType::Diamond => 14.0,
             _ => 0.0,
         }
     }
     
-    fn add_face(vertices: &mut Vec<Vertex>, indices: &mut Vec<u16>, pos: Vector3<f32>, face: Face, block_type: BlockType) {
+    fn add_face(vertices: &mut Vec<Vertex>, indices: &mut Vec<u16>, pos: Vector3<f32>, face: Face, block_type: BlockType, damage: f32) {
         let base_index = vertices.len() as u16;
         let block_type_f = Self::block_type_to_float(block_type);
         
@@ -1495,6 +1587,7 @@ impl Renderer {
                 tex_coords: v.tex_coords,
                 normal: v.normal,
                 block_type: block_type_f,
+                damage,
             });
         }
         
@@ -1514,45 +1607,45 @@ enum Face {
 }
 
 const TOP_FACE_VERTICES: &[Vertex] = &[
-    Vertex { position: [0.0, 1.0, 0.0], tex_coords: [0.0, 0.0], normal: [0.0, 1.0, 0.0], block_type: 0.0 },
-    Vertex { position: [1.0, 1.0, 0.0], tex_coords: [1.0, 0.0], normal: [0.0, 1.0, 0.0], block_type: 0.0 },
-    Vertex { position: [1.0, 1.0, 1.0], tex_coords: [1.0, 1.0], normal: [0.0, 1.0, 0.0], block_type: 0.0 },
-    Vertex { position: [0.0, 1.0, 1.0], tex_coords: [0.0, 1.0], normal: [0.0, 1.0, 0.0], block_type: 0.0 },
+    Vertex { position: [0.0, 1.0, 0.0], tex_coords: [0.0, 0.0], normal: [0.0, 1.0, 0.0], block_type: 0.0, damage: 0.0 },
+    Vertex { position: [1.0, 1.0, 0.0], tex_coords: [1.0, 0.0], normal: [0.0, 1.0, 0.0], block_type: 0.0, damage: 0.0 },
+    Vertex { position: [1.0, 1.0, 1.0], tex_coords: [1.0, 1.0], normal: [0.0, 1.0, 0.0], block_type: 0.0, damage: 0.0 },
+    Vertex { position: [0.0, 1.0, 1.0], tex_coords: [0.0, 1.0], normal: [0.0, 1.0, 0.0], block_type: 0.0, damage: 0.0 },
 ];
 
 const BOTTOM_FACE_VERTICES: &[Vertex] = &[
-    Vertex { position: [0.0, 0.0, 0.0], tex_coords: [0.0, 0.0], normal: [0.0, -1.0, 0.0], block_type: 0.0 },
-    Vertex { position: [0.0, 0.0, 1.0], tex_coords: [0.0, 1.0], normal: [0.0, -1.0, 0.0], block_type: 0.0 },
-    Vertex { position: [1.0, 0.0, 1.0], tex_coords: [1.0, 1.0], normal: [0.0, -1.0, 0.0], block_type: 0.0 },
-    Vertex { position: [1.0, 0.0, 0.0], tex_coords: [1.0, 0.0], normal: [0.0, -1.0, 0.0], block_type: 0.0 },
+    Vertex { position: [0.0, 0.0, 0.0], tex_coords: [0.0, 0.0], normal: [0.0, -1.0, 0.0], block_type: 0.0, damage: 0.0 },
+    Vertex { position: [0.0, 0.0, 1.0], tex_coords: [0.0, 1.0], normal: [0.0, -1.0, 0.0], block_type: 0.0, damage: 0.0 },
+    Vertex { position: [1.0, 0.0, 1.0], tex_coords: [1.0, 1.0], normal: [0.0, -1.0, 0.0], block_type: 0.0, damage: 0.0 },
+    Vertex { position: [1.0, 0.0, 0.0], tex_coords: [1.0, 0.0], normal: [0.0, -1.0, 0.0], block_type: 0.0, damage: 0.0 },
 ];
 
 const RIGHT_FACE_VERTICES: &[Vertex] = &[
-    Vertex { position: [1.0, 0.0, 0.0], tex_coords: [0.0, 1.0], normal: [1.0, 0.0, 0.0], block_type: 0.0 },
-    Vertex { position: [1.0, 0.0, 1.0], tex_coords: [1.0, 1.0], normal: [1.0, 0.0, 0.0], block_type: 0.0 },
-    Vertex { position: [1.0, 1.0, 1.0], tex_coords: [1.0, 0.0], normal: [1.0, 0.0, 0.0], block_type: 0.0 },
-    Vertex { position: [1.0, 1.0, 0.0], tex_coords: [0.0, 0.0], normal: [1.0, 0.0, 0.0], block_type: 0.0 },
+    Vertex { position: [1.0, 0.0, 0.0], tex_coords: [0.0, 1.0], normal: [1.0, 0.0, 0.0], block_type: 0.0, damage: 0.0 },
+    Vertex { position: [1.0, 0.0, 1.0], tex_coords: [1.0, 1.0], normal: [1.0, 0.0, 0.0], block_type: 0.0, damage: 0.0 },
+    Vertex { position: [1.0, 1.0, 1.0], tex_coords: [1.0, 0.0], normal: [1.0, 0.0, 0.0], block_type: 0.0, damage: 0.0 },
+    Vertex { position: [1.0, 1.0, 0.0], tex_coords: [0.0, 0.0], normal: [1.0, 0.0, 0.0], block_type: 0.0, damage: 0.0 },
 ];
 
 const LEFT_FACE_VERTICES: &[Vertex] = &[
-    Vertex { position: [0.0, 0.0, 0.0], tex_coords: [1.0, 1.0], normal: [-1.0, 0.0, 0.0], block_type: 0.0 },
-    Vertex { position: [0.0, 1.0, 0.0], tex_coords: [1.0, 0.0], normal: [-1.0, 0.0, 0.0], block_type: 0.0 },
-    Vertex { position: [0.0, 1.0, 1.0], tex_coords: [0.0, 0.0], normal: [-1.0, 0.0, 0.0], block_type: 0.0 },
-    Vertex { position: [0.0, 0.0, 1.0], tex_coords: [0.0, 1.0], normal: [-1.0, 0.0, 0.0], block_type: 0.0 },
+    Vertex { position: [0.0, 0.0, 0.0], tex_coords: [1.0, 1.0], normal: [-1.0, 0.0, 0.0], block_type: 0.0, damage: 0.0 },
+    Vertex { position: [0.0, 1.0, 0.0], tex_coords: [1.0, 0.0], normal: [-1.0, 0.0, 0.0], block_type: 0.0, damage: 0.0 },
+    Vertex { position: [0.0, 1.0, 1.0], tex_coords: [0.0, 0.0], normal: [-1.0, 0.0, 0.0], block_type: 0.0, damage: 0.0 },
+    Vertex { position: [0.0, 0.0, 1.0], tex_coords: [0.0, 1.0], normal: [-1.0, 0.0, 0.0], block_type: 0.0, damage: 0.0 },
 ];
 
 const FRONT_FACE_VERTICES: &[Vertex] = &[
-    Vertex { position: [0.0, 0.0, 1.0], tex_coords: [0.0, 1.0], normal: [0.0, 0.0, 1.0], block_type: 0.0 },
-    Vertex { position: [0.0, 1.0, 1.0], tex_coords: [0.0, 0.0], normal: [0.0, 0.0, 1.0], block_type: 0.0 },
-    Vertex { position: [1.0, 1.0, 1.0], tex_coords: [1.0, 0.0], normal: [0.0, 0.0, 1.0], block_type: 0.0 },
-    Vertex { position: [1.0, 0.0, 1.0], tex_coords: [1.0, 1.0], normal: [0.0, 0.0, 1.0], block_type: 0.0 },
+    Vertex { position: [0.0, 0.0, 1.0], tex_coords: [0.0, 1.0], normal: [0.0, 0.0, 1.0], block_type: 0.0, damage: 0.0 },
+    Vertex { position: [0.0, 1.0, 1.0], tex_coords: [0.0, 0.0], normal: [0.0, 0.0, 1.0], block_type: 0.0, damage: 0.0 },
+    Vertex { position: [1.0, 1.0, 1.0], tex_coords: [1.0, 0.0], normal: [0.0, 0.0, 1.0], block_type: 0.0, damage: 0.0 },
+    Vertex { position: [1.0, 0.0, 1.0], tex_coords: [1.0, 1.0], normal: [0.0, 0.0, 1.0], block_type: 0.0, damage: 0.0 },
 ];
 
 const BACK_FACE_VERTICES: &[Vertex] = &[
-    Vertex { position: [0.0, 0.0, 0.0], tex_coords: [1.0, 1.0], normal: [0.0, 0.0, -1.0], block_type: 0.0 },
-    Vertex { position: [1.0, 0.0, 0.0], tex_coords: [0.0, 1.0], normal: [0.0, 0.0, -1.0], block_type: 0.0 },
-    Vertex { position: [1.0, 1.0, 0.0], tex_coords: [0.0, 0.0], normal: [0.0, 0.0, -1.0], block_type: 0.0 },
-    Vertex { position: [0.0, 1.0, 0.0], tex_coords: [1.0, 0.0], normal: [0.0, 0.0, -1.0], block_type: 0.0 },
+    Vertex { position: [0.0, 0.0, 0.0], tex_coords: [1.0, 1.0], normal: [0.0, 0.0, -1.0], block_type: 0.0, damage: 0.0 },
+    Vertex { position: [1.0, 0.0, 0.0], tex_coords: [0.0, 1.0], normal: [0.0, 0.0, -1.0], block_type: 0.0, damage: 0.0 },
+    Vertex { position: [1.0, 1.0, 0.0], tex_coords: [0.0, 0.0], normal: [0.0, 0.0, -1.0], block_type: 0.0, damage: 0.0 },
+    Vertex { position: [0.0, 1.0, 0.0], tex_coords: [1.0, 0.0], normal: [0.0, 0.0, -1.0], block_type: 0.0, damage: 0.0 },
 ];
 
 const TOP_FACE_INDICES: &[u16] = &[0, 1, 2, 2, 3, 0];

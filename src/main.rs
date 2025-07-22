@@ -70,23 +70,25 @@ fn main() {
                                     VirtualKeyCode::Key5 => inventory.select_slot(4),
                                     VirtualKeyCode::Key6 => inventory.select_slot(5),
                                     VirtualKeyCode::E => {
-                                        // Place block - get selected block from inventory
                                         if let Some(block_type) = inventory.get_selected_block() {
                                             if let Some(placement_pos) = camera.get_block_placement_position(&world, 5.0) {
                                                 let (x, y, z) = placement_pos;
                                                 if world.place_block(x, y, z, block_type) {
+                                                    inventory.decrement_selected();
                                                     println!("Placed {:?} block at ({}, {}, {})", block_type, x, y, z);
                                                 }
                                             }
                                         }
                                     },
                                     VirtualKeyCode::R => {
-                                        // Destroy block - target the block we're looking at
                                         if let Some((x, y, z)) = targeted_block {
-                                            if world.destroy_block(x, y, z) {
+                                            if let Some(broken_type) = world.damage_block(x, y, z) {
+                                                inventory.add_block(broken_type);
                                                 println!("Destroyed block at ({}, {}, {})", x, y, z);
-                                                renderer.start_arm_swing();
+                                            } else {
+                                                println!("Hit block at ({}, {}, {})", x, y, z);
                                             }
+                                            renderer.start_arm_swing();
                                         }
                                     },
                                     _ => {}
@@ -115,8 +117,6 @@ fn main() {
                 // Update world chunks based on camera position
                 world.update_loaded_chunks(camera.position);
                 camera.update(dt, &world);
-                
-                // Get targeted block for highlighting
                 targeted_block = camera.get_targeted_block(&world, 5.0);
                 
                 window.request_redraw();

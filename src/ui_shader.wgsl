@@ -26,6 +26,10 @@ var t_wood: texture_2d<f32>;
 var t_leaves: texture_2d<f32>;
 @group(0) @binding(7)
 var t_water: texture_2d<f32>;
+@group(0) @binding(8)
+var t_sand: texture_2d<f32>;
+@group(0) @binding(9)
+var t_snow: texture_2d<f32>;
 @group(0) @binding(6)
 var s_diffuse: sampler;
 
@@ -48,6 +52,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let wood_color = textureSample(t_wood, s_diffuse, in.tex_coords);
     let leaves_color = textureSample(t_leaves, s_diffuse, in.tex_coords);
     let water_color = textureSample(t_water, s_diffuse, in.tex_coords);
+    let sand_color = textureSample(t_sand, s_diffuse, in.tex_coords);
+    let snow_color = textureSample(t_snow, s_diffuse, in.tex_coords);
     
     let block_type = floor(in.use_texture);
     
@@ -58,6 +64,13 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     texture_color = mix(texture_color, wood_color, step(3.5, block_type));
     texture_color = mix(texture_color, leaves_color, step(4.5, block_type));
     texture_color = mix(texture_color, water_color, step(5.5, block_type));
+    
+    // Handle sand and snow blocks specifically
+    if (block_type == 7.0) {
+        texture_color = sand_color;
+    } else if (block_type == 8.0) {
+        texture_color = snow_color;
+    }
     
     // Mix between color and texture based on use_texture flag
     let use_tex = step(0.5, in.use_texture);
