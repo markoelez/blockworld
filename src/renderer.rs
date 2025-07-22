@@ -1120,17 +1120,17 @@ impl Renderer {
                 render_pass.draw_indexed(0..72, 0, 0..1); // 12 edges * 6 indices each (2 triangles)
             }
 
-            if let Some(block_type) = inventory.get_selected_block() {
-                let vertices = Self::create_held_item_vertices(camera, block_type, self.arm_swing_progress);
-                self.queue.write_buffer(&self.held_item_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+            let opt_block_type = inventory.get_selected_block();
+            let vertices = Self::create_held_item_vertices(camera, opt_block_type, self.arm_swing_progress);
+            self.queue.write_buffer(&self.held_item_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
 
-                render_pass.set_pipeline(if Self::is_transparent(block_type) { &self.transparent_pipeline } else { &self.render_pipeline });
-                render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-                render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
-                render_pass.set_vertex_buffer(0, self.held_item_vertex_buffer.slice(..));
-                render_pass.set_index_buffer(self.held_item_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                render_pass.draw_indexed(0..self.held_item_index_count, 0, 0..1);
-            }
+            render_pass.set_pipeline(&self.render_pipeline);  // Always opaque for arm
+            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.held_item_vertex_buffer.slice(..));
+            render_pass.set_index_buffer(self.held_item_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            let draw_count = if opt_block_type.is_some() { self.held_item_index_count } else { self.held_item_index_count / 2 };
+            render_pass.draw_indexed(0..draw_count, 0, 0..1);
         }
         
         // Render UI in a separate pass (no depth testing, renders on top)
@@ -1280,8 +1280,8 @@ impl Renderer {
         (opaque_vertices, opaque_indices, trans_vertices, trans_indices)
     }
 
-    fn create_held_item_vertices(camera: &Camera, block_type: BlockType, progress: f32) -> Vec<Vertex> {
-        let block_type_f = Self::block_type_to_float(block_type);
+    fn create_held_item_vertices(camera: &Camera, opt_block_type: Option<BlockType>, progress: f32) -> Vec<Vertex> {
+        let block_type_f = opt_block_type.map_or(6.0, Self::block_type_to_float);
         let size = 0.4;
 
         let face_verts = [
@@ -1293,16 +1293,20 @@ impl Renderer {
             BACK_FACE_VERTICES,
         ];
 
-        let mut item_verts: Vec<Vertex> = vec![];
-        for &face_vert in face_verts.iter() {
-            for v in face_vert.iter() {
-                let mut new_v = *v;
-                new_v.position[0] = (new_v.position[0] - 0.5) * size;
-                new_v.position[1] = (new_v.position[1] - 0.5) * size;
-                new_v.position[2] = (new_v.position[2] - 0.5) * size;
-                new_v.block_type = block_type_f;
-                item_verts.push(new_v);
+        let mut verts: Vec<Vertex> = vec![];
+        if let Some(block_type) = opt_block_type {
+            let mut item_verts: Vec<Vertex> = vec![];
+            for &face_vert in face_verts.iter() {
+                for v in face_vert.iter() {
+                    let mut new_v = *v;
+                    new_v.position[0] = (new_v.position[0] - 0.5) * size;
+                    new_v.position[1] = (new_v.position[1] - 0.5) * size;
+                    new_v.position[2] = (new_v.position[2] - 0.5) * size;
+                    new_v.block_type = block_type_f;
+                    item_verts.push(new_v);
+                }
             }
+            verts.extend(item_verts);
         }
 
         let mut arm_verts: Vec<Vertex> = vec![];
@@ -1321,8 +1325,6 @@ impl Renderer {
             }
         }
 
-        let mut verts = vec![];
-        verts.extend(item_verts);
         verts.extend(arm_verts);
 
         let front = camera.get_look_direction();
