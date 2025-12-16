@@ -28,6 +28,13 @@ fn main() {
     let mut camera = Camera::new(&renderer.config);
     let mut inventory = Inventory::new();
     
+    // Find a valid spawn position on solid ground
+    let spawn_pos = world.find_spawn_position();
+    camera.set_spawn_position(spawn_pos);
+    
+    // Force load chunks around spawn position before first render
+    world.force_load_chunks_at(spawn_pos);
+    
     let mut last_frame = std::time::Instant::now();
     let mut mouse_captured = true;
     let mut targeted_block: Option<(i32, i32, i32)> = None;

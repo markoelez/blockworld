@@ -15,6 +15,7 @@ pub struct Camera {
     
     velocity: Vector3<f32>,
     on_ground: bool,
+    spawn_locked: bool, // Skip physics until first movement input
     
     moving_forward: bool,
     moving_backward: bool,
@@ -26,17 +27,10 @@ pub struct Camera {
 
 impl Camera {
     pub fn new(config: &SurfaceConfiguration) -> Self {
-        // Spawn player in air at origin - gravity will drop them to ground
-        let spawn_x = 0.5;
-        let spawn_z = 0.5;
-        let spawn_y = 40.0; // High enough to be above most terrain
-        
-        println!("Spawning at ({}, {}, {}) - player will fall to ground", spawn_x, spawn_y, spawn_z);
-        
         let mut camera = Self {
-            position: Point3::new(spawn_x, spawn_y, spawn_z),
+            position: Point3::new(0.5, 50.0, 0.5), // Temporary, will be set by set_spawn_position
             yaw: 0.0,
-            pitch: -20.0,
+            pitch: 0.0,
             aspect: config.width as f32 / config.height as f32,
             fovy: 70.0,
             znear: 0.1,
@@ -44,7 +38,8 @@ impl Camera {
             view_proj: Matrix4::from_scale(1.0),
             
             velocity: Vector3::new(0.0, 0.0, 0.0),
-            on_ground: false,
+            on_ground: true,
+            spawn_locked: true,
             
             moving_forward: false,
             moving_backward: false,
@@ -55,6 +50,14 @@ impl Camera {
         };
         camera.update_view_proj();
         camera
+    }
+    
+    pub fn set_spawn_position(&mut self, position: Point3<f32>) {
+        self.position = position;
+        self.velocity = Vector3::new(0.0, 0.0, 0.0);
+        self.on_ground = true;
+        self.spawn_locked = true;
+        self.update_view_proj();
     }
     
     pub fn resize(&mut self, config: &SurfaceConfiguration) {
@@ -85,6 +88,18 @@ impl Camera {
     }
     
     pub fn update(&mut self, dt: f32, world: &World) {
+        // Unlock spawn lock when player tries to move
+        if self.spawn_locked {
+            if self.moving_forward || self.moving_backward || self.moving_left || 
+               self.moving_right || self.jump_pressed {
+                self.spawn_locked = false;
+            } else {
+                // Stay in place until player moves
+                self.update_view_proj();
+                return;
+            }
+        }
+        
         self.bob_time += dt;
         let yaw_rad = self.yaw.to_radians();
         

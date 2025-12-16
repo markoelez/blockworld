@@ -88,31 +88,42 @@ impl World {
         
         // Only update if player moved to a different chunk
         if new_player_chunk != self.player_chunk_pos {
-            self.player_chunk_pos = new_player_chunk;
-            
-            // Load chunks in render distance
-            for x in (chunk_x - self.render_distance)..=(chunk_x + self.render_distance) {
-                for z in (chunk_z - self.render_distance)..=(chunk_z + self.render_distance) {
-                    let chunk_key = (x, z);
-                    if !self.chunks.contains_key(&chunk_key) {
-                        self.load_chunk(x, z);
-                    }
+            self.load_chunks_around(chunk_x, chunk_z);
+        }
+    }
+    
+    /// Force load chunks around a position (used for initial spawn)
+    pub fn force_load_chunks_at(&mut self, pos: Point3<f32>) {
+        let chunk_x = (pos.x as i32).div_euclid(Self::CHUNK_SIZE as i32);
+        let chunk_z = (pos.z as i32).div_euclid(Self::CHUNK_SIZE as i32);
+        self.load_chunks_around(chunk_x, chunk_z);
+    }
+    
+    fn load_chunks_around(&mut self, chunk_x: i32, chunk_z: i32) {
+        self.player_chunk_pos = (chunk_x, chunk_z);
+        
+        // Load chunks in render distance
+        for x in (chunk_x - self.render_distance)..=(chunk_x + self.render_distance) {
+            for z in (chunk_z - self.render_distance)..=(chunk_z + self.render_distance) {
+                let chunk_key = (x, z);
+                if !self.chunks.contains_key(&chunk_key) {
+                    self.load_chunk(x, z);
                 }
             }
-            
-            // Unload chunks outside render distance
-            let chunks_to_unload: Vec<(i32, i32)> = self.chunks.keys()
-                .filter(|(x, z)| {
-                    let dx = (*x - chunk_x).abs();
-                    let dz = (*z - chunk_z).abs();
-                    dx > self.render_distance + 1 || dz > self.render_distance + 1
-                })
-                .cloned()
-                .collect();
-            
-            for chunk_key in chunks_to_unload {
-                self.chunks.remove(&chunk_key);
-            }
+        }
+        
+        // Unload chunks outside render distance
+        let chunks_to_unload: Vec<(i32, i32)> = self.chunks.keys()
+            .filter(|(x, z)| {
+                let dx = (*x - chunk_x).abs();
+                let dz = (*z - chunk_z).abs();
+                dx > self.render_distance + 1 || dz > self.render_distance + 1
+            })
+            .cloned()
+            .collect();
+        
+        for chunk_key in chunks_to_unload {
+            self.chunks.remove(&chunk_key);
         }
     }
     
@@ -867,5 +878,64 @@ impl World {
 
     pub fn get_block_damage(&self, x: i32, y: i32, z: i32) -> f32 {
         self.block_damage.get(&(x, y, z)).cloned().unwrap_or(0.0)
+    }
+
+    /// Find a valid spawn position on solid ground with clearance above
+    pub fn find_spawn_position(&self) -> Point3<f32> {
+        // Search in a spiral pattern from origin to find a good spawn spot
+        for radius in 0i32..30 {
+            for dx in -radius..=radius {
+                for dz in -radius..=radius {
+                    // Only check the edge of each radius (spiral pattern)
+                    if radius > 0 && dx.abs() < radius && dz.abs() < radius {
+                        continue;
+                    }
+                    
+                    let x = dx;
+                    let z = dz;
+                    
+                    // Find the highest solid, walkable block (search from top down)
+                    for y in (1..Self::CHUNK_HEIGHT as i32 - 4).rev() {
+                        if let Some(block) = self.get_block(x, y, z) {
+                            // Must be solid ground (not air, water, trees, etc.)
+                            let is_solid_ground = matches!(block, 
+                                BlockType::Grass | BlockType::Dirt | BlockType::Stone | 
+                                BlockType::Sand | BlockType::Snow | BlockType::Cobblestone
+                            );
+                            
+                            if is_solid_ground {
+                                // Check for 3 blocks of air above for player clearance
+                                let mut has_clearance = true;
+                                for check_y in 1..=3 {
+                                    if let Some(above) = self.get_block(x, y + check_y, z) {
+                                        if above != BlockType::Air {
+                                            has_clearance = false;
+                                            break;
+                                        }
+                                    } else {
+                                        // Block not loaded, skip this position
+                                        has_clearance = false;
+                                        break;
+                                    }
+                                }
+                                
+                                if has_clearance {
+                                    // Found valid spawn - position player standing on the block
+                                    // Ground block top is at y+1, player feet at y+1, eyes at y+1+1.8
+                                    return Point3::new(
+                                        x as f32 + 0.5,
+                                        y as f32 + 1.0 + 1.8, // Stand on top of block
+                                        z as f32 + 0.5
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Fallback: spawn at a safe default position
+        Point3::new(0.5, 35.0, 0.5)
     }
 }
