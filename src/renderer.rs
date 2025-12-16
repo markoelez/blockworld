@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use image::GenericImageView;
 use cgmath::SquareMatrix;
 use std::time::Instant;
-use cgmath::{Matrix4, Deg, Vector3, Vector4, InnerSpace, EuclideanSpace, Matrix};
+use cgmath::{Matrix4, Deg, Vector3, Vector4, InnerSpace, Matrix};
 
 use crate::camera::Camera;
 use crate::world::{World, BlockType};
