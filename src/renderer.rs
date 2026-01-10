@@ -1567,16 +1567,16 @@ impl Renderer {
     fn add_face(vertices: &mut Vec<Vertex>, indices: &mut Vec<u16>, pos: Vector3<f32>, face: Face, block_type: BlockType, damage: f32) {
         let base_index = vertices.len() as u16;
         let block_type_f = Self::block_type_to_float(block_type);
-        
-        let (face_vertices, face_indices) = match face {
-            Face::Top => (TOP_FACE_VERTICES, TOP_FACE_INDICES),
-            Face::Bottom => (BOTTOM_FACE_VERTICES, BOTTOM_FACE_INDICES),
-            Face::Right => (RIGHT_FACE_VERTICES, RIGHT_FACE_INDICES),
-            Face::Left => (LEFT_FACE_VERTICES, LEFT_FACE_INDICES),
-            Face::Front => (FRONT_FACE_VERTICES, FRONT_FACE_INDICES),
-            Face::Back => (BACK_FACE_VERTICES, BACK_FACE_INDICES),
+
+        let face_vertices = match face {
+            Face::Top => TOP_FACE_VERTICES,
+            Face::Bottom => BOTTOM_FACE_VERTICES,
+            Face::Right => RIGHT_FACE_VERTICES,
+            Face::Left => LEFT_FACE_VERTICES,
+            Face::Front => FRONT_FACE_VERTICES,
+            Face::Back => BACK_FACE_VERTICES,
         };
-        
+
         for v in face_vertices {
             vertices.push(Vertex {
                 position: [
@@ -1590,8 +1590,8 @@ impl Renderer {
                 damage,
             });
         }
-        
-        for i in face_indices {
+
+        for i in FACE_INDICES {
             indices.push(base_index + i);
         }
     }
@@ -1648,9 +1648,4 @@ const BACK_FACE_VERTICES: &[Vertex] = &[
     Vertex { position: [0.0, 1.0, 0.0], tex_coords: [1.0, 0.0], normal: [0.0, 0.0, -1.0], block_type: 0.0, damage: 0.0 },
 ];
 
-const TOP_FACE_INDICES: &[u16] = &[0, 1, 2, 2, 3, 0];
-const BOTTOM_FACE_INDICES: &[u16] = &[0, 1, 2, 2, 3, 0];
-const RIGHT_FACE_INDICES: &[u16] = &[0, 1, 2, 2, 3, 0];
-const LEFT_FACE_INDICES: &[u16] = &[0, 1, 2, 2, 3, 0];
-const FRONT_FACE_INDICES: &[u16] = &[0, 1, 2, 2, 3, 0];
-const BACK_FACE_INDICES: &[u16] = &[0, 1, 2, 2, 3, 0];
+const FACE_INDICES: &[u16] = &[0, 1, 2, 2, 3, 0];

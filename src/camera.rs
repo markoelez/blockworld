@@ -3,6 +3,11 @@ use winit::event::VirtualKeyCode;
 use wgpu::SurfaceConfiguration;
 use crate::world::{World, BlockType};
 
+const PLAYER_HEIGHT: f32 = 1.8;
+const PLAYER_WIDTH: f32 = 0.6;
+const GRAVITY: f32 = 32.0;
+const JUMP_VELOCITY: f32 = 10.0;
+
 pub struct Camera {
     pub position: Point3<f32>,
     pub yaw: f32,
@@ -87,19 +92,21 @@ impl Camera {
         self.update_view_proj();
     }
     
+    fn has_movement_input(&self) -> bool {
+        self.moving_forward || self.moving_backward || self.moving_left || self.moving_right || self.jump_pressed
+    }
+
     pub fn update(&mut self, dt: f32, world: &World) {
         // Unlock spawn lock when player tries to move
         if self.spawn_locked {
-            if self.moving_forward || self.moving_backward || self.moving_left || 
-               self.moving_right || self.jump_pressed {
+            if self.has_movement_input() {
                 self.spawn_locked = false;
             } else {
-                // Stay in place until player moves
                 self.update_view_proj();
                 return;
             }
         }
-        
+
         self.bob_time += dt;
         let yaw_rad = self.yaw.to_radians();
         
@@ -156,9 +163,6 @@ impl Camera {
         }
         
         // Apply gravity
-        const GRAVITY: f32 = 32.0; // Blocks per second squared
-        const JUMP_VELOCITY: f32 = 10.0; // Initial jump velocity
-        
         self.velocity.y -= GRAVITY * dt;
         
         if is_in_water {
@@ -171,11 +175,7 @@ impl Camera {
         if self.jump_pressed && (self.on_ground || is_in_water) {
             self.velocity.y = if is_in_water { 5.0 } else { JUMP_VELOCITY };
         }
-        
-        // Collision detection constants
-        const PLAYER_HEIGHT: f32 = 1.8;
-        const PLAYER_WIDTH: f32 = 0.6;
-        
+
         // Apply movement with collision detection
         let mut new_position = self.position;
         

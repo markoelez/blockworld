@@ -1,7 +1,7 @@
 use winit::{
     event::{Event, WindowEvent, ElementState, VirtualKeyCode, DeviceEvent},
     event_loop::{ControlFlow, EventLoop},
-    window::{WindowBuilder, CursorGrabMode},
+    window::{Window, WindowBuilder, CursorGrabMode},
 };
 
 mod world;
@@ -13,6 +13,18 @@ use world::World;
 use camera::Camera;
 use renderer::Renderer;
 use ui::Inventory;
+
+fn set_cursor_captured(window: &Window, captured: bool) {
+    if captured {
+        if window.set_cursor_grab(CursorGrabMode::Locked).is_err() {
+            window.set_cursor_grab(CursorGrabMode::Confined).ok();
+        }
+        window.set_cursor_visible(false);
+    } else {
+        window.set_cursor_grab(CursorGrabMode::None).ok();
+        window.set_cursor_visible(true);
+    }
+}
 
 fn main() {
     env_logger::init();
@@ -40,10 +52,7 @@ fn main() {
     let mut targeted_block: Option<(i32, i32, i32)> = None;
     
     // Start with mouse captured
-    if let Err(_) = window.set_cursor_grab(CursorGrabMode::Locked) {
-        window.set_cursor_grab(CursorGrabMode::Confined).ok();
-    }
-    window.set_cursor_visible(false);
+    set_cursor_captured(&window, true);
     
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
@@ -57,15 +66,7 @@ fn main() {
                         
                         if is_pressed && keycode == VirtualKeyCode::Escape {
                             mouse_captured = !mouse_captured;
-                            if mouse_captured {
-                                if let Err(_) = window.set_cursor_grab(CursorGrabMode::Locked) {
-                                    window.set_cursor_grab(CursorGrabMode::Confined).ok();
-                                }
-                                window.set_cursor_visible(false);
-                            } else {
-                                window.set_cursor_grab(CursorGrabMode::None).ok();
-                                window.set_cursor_visible(true);
-                            }
+                            set_cursor_captured(&window, mouse_captured);
                         } else {
                             // Handle inventory slot selection and block actions (only on press)
                             if is_pressed {

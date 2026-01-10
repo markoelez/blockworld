@@ -849,35 +849,33 @@ impl World {
     }
 
     pub fn damage_block(&mut self, x: i32, y: i32, z: i32) -> Option<BlockType> {
-        if self.can_destroy_block_at(x, y, z) {
-            let pos = (x, y, z);
-            if let Some(block_type) = self.get_block(x, y, z) {
-                let current_damage = self.block_damage.get(&pos).cloned().unwrap_or(0.0);
-                let new_damage = current_damage + 1.0;
-                let hardness = Self::get_hardness(block_type);
-                if new_damage >= hardness {
-                    self.set_block(x, y, z, BlockType::Air);
-                    self.block_damage.remove(&pos);
-                    Some(block_type)
-                } else {
-                    self.block_damage.insert(pos, new_damage);
-                    let chunk_x = x.div_euclid(Self::CHUNK_SIZE as i32);
-                    let chunk_z = z.div_euclid(Self::CHUNK_SIZE as i32);
-                    if let Some(chunk) = self.chunks.get_mut(&(chunk_x, chunk_z)) {
-                        chunk.dirty = true;
-                    }
-                    None
-                }
-            } else {
-                None
-            }
+        if !self.can_destroy_block_at(x, y, z) {
+            return None;
+        }
+
+        let block_type = self.get_block(x, y, z)?;
+        let pos = (x, y, z);
+        let current_damage = self.block_damage.get(&pos).copied().unwrap_or(0.0);
+        let new_damage = current_damage + 1.0;
+        let hardness = Self::get_hardness(block_type);
+
+        if new_damage >= hardness {
+            self.set_block(x, y, z, BlockType::Air);
+            self.block_damage.remove(&pos);
+            Some(block_type)
         } else {
+            self.block_damage.insert(pos, new_damage);
+            let chunk_x = x.div_euclid(Self::CHUNK_SIZE as i32);
+            let chunk_z = z.div_euclid(Self::CHUNK_SIZE as i32);
+            if let Some(chunk) = self.chunks.get_mut(&(chunk_x, chunk_z)) {
+                chunk.dirty = true;
+            }
             None
         }
     }
 
     pub fn get_block_damage(&self, x: i32, y: i32, z: i32) -> f32 {
-        self.block_damage.get(&(x, y, z)).cloned().unwrap_or(0.0)
+        self.block_damage.get(&(x, y, z)).copied().unwrap_or(0.0)
     }
 
     /// Find a valid spawn position on solid ground with clearance above

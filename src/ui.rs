@@ -66,6 +66,13 @@ impl Inventory {
     }
 }
 
+// Hotbar layout constants
+const HOTBAR_SLOT_SIZE: f32 = 0.04;
+const HOTBAR_NUM_SLOTS: usize = 6;
+const HOTBAR_DIVIDER_WIDTH: f32 = 0.002;
+const HOTBAR_Y: f32 = -0.92;
+const HOTBAR_BG_PADDING: f32 = 0.006;
+
 pub struct UIRenderer {
     ui_render_pipeline: wgpu::RenderPipeline,
     crosshair_vertex_buffer: wgpu::Buffer,
@@ -252,24 +259,46 @@ impl UIRenderer {
         }
     }
     
+    fn hotbar_total_width() -> f32 {
+        HOTBAR_NUM_SLOTS as f32 * (HOTBAR_SLOT_SIZE * 2.0) + (HOTBAR_NUM_SLOTS - 1) as f32 * HOTBAR_DIVIDER_WIDTH
+    }
+
+    fn hotbar_start_x() -> f32 {
+        -Self::hotbar_total_width() / 2.0 + HOTBAR_SLOT_SIZE
+    }
+
+    fn block_type_to_ui_index(block_type: BlockType) -> f32 {
+        match block_type {
+            BlockType::Grass => 1.0,
+            BlockType::Dirt => 2.0,
+            BlockType::Stone => 3.0,
+            BlockType::Wood => 4.0,
+            BlockType::Leaves => 5.0,
+            BlockType::Water => 6.0,
+            BlockType::Sand => 7.0,
+            BlockType::Snow => 8.0,
+            BlockType::Ice => 9.0,
+            BlockType::Cobblestone => 10.0,
+            BlockType::Coal => 11.0,
+            BlockType::Iron => 12.0,
+            BlockType::Gold => 13.0,
+            BlockType::Diamond => 14.0,
+            BlockType::Air | BlockType::Barrier => 0.0,
+        }
+    }
+
     fn create_minecraft_hotbar() -> (Vec<UIVertex>, Vec<u16>) {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
-        
-        // Clean minimal hotbar
-        let slot_size = 0.04;
-        let num_slots = 6;
-        let divider_width = 0.002;
-        let total_width = num_slots as f32 * (slot_size * 2.0) + (num_slots - 1) as f32 * divider_width;
-        let start_x = -total_width / 2.0 + slot_size;
-        let hotbar_y = -0.92;
-        
+
+        let total_width = Self::hotbar_total_width();
+        let start_x = Self::hotbar_start_x();
+
         // Pure black background
-        let bg_padding = 0.006;
-        let bg_left = start_x - slot_size - bg_padding;
-        let bg_right = start_x + total_width - slot_size + bg_padding;
-        let bg_top = hotbar_y + slot_size + bg_padding;
-        let bg_bottom = hotbar_y - slot_size - bg_padding;
+        let bg_left = start_x - HOTBAR_SLOT_SIZE - HOTBAR_BG_PADDING;
+        let bg_right = start_x + total_width - HOTBAR_SLOT_SIZE + HOTBAR_BG_PADDING;
+        let bg_top = HOTBAR_Y + HOTBAR_SLOT_SIZE + HOTBAR_BG_PADDING;
+        let bg_bottom = HOTBAR_Y - HOTBAR_SLOT_SIZE - HOTBAR_BG_PADDING;
         let bg_color = [0.0, 0.0, 0.0, 0.85];
 
         let bg_base = vertices.len() as u16;
@@ -283,18 +312,18 @@ impl UIRenderer {
 
         // White dividers between slots
         let divider_color = [1.0, 1.0, 1.0, 0.3];
-        for i in 1..num_slots {
-            let div_x = start_x - slot_size + i as f32 * (slot_size * 2.0 + divider_width) - divider_width / 2.0;
+        for i in 1..HOTBAR_NUM_SLOTS {
+            let div_x = start_x - HOTBAR_SLOT_SIZE + i as f32 * (HOTBAR_SLOT_SIZE * 2.0 + HOTBAR_DIVIDER_WIDTH) - HOTBAR_DIVIDER_WIDTH / 2.0;
             let div_base = vertices.len() as u16;
             vertices.extend_from_slice(&[
-                UIVertex { position: [div_x - divider_width / 2.0, bg_bottom + 0.004], tex_coords: [0.0, 0.0], color: divider_color, use_texture: 0.0 },
-                UIVertex { position: [div_x + divider_width / 2.0, bg_bottom + 0.004], tex_coords: [0.0, 0.0], color: divider_color, use_texture: 0.0 },
-                UIVertex { position: [div_x + divider_width / 2.0, bg_top - 0.004], tex_coords: [0.0, 0.0], color: divider_color, use_texture: 0.0 },
-                UIVertex { position: [div_x - divider_width / 2.0, bg_top - 0.004], tex_coords: [0.0, 0.0], color: divider_color, use_texture: 0.0 },
+                UIVertex { position: [div_x - HOTBAR_DIVIDER_WIDTH / 2.0, bg_bottom + 0.004], tex_coords: [0.0, 0.0], color: divider_color, use_texture: 0.0 },
+                UIVertex { position: [div_x + HOTBAR_DIVIDER_WIDTH / 2.0, bg_bottom + 0.004], tex_coords: [0.0, 0.0], color: divider_color, use_texture: 0.0 },
+                UIVertex { position: [div_x + HOTBAR_DIVIDER_WIDTH / 2.0, bg_top - 0.004], tex_coords: [0.0, 0.0], color: divider_color, use_texture: 0.0 },
+                UIVertex { position: [div_x - HOTBAR_DIVIDER_WIDTH / 2.0, bg_top - 0.004], tex_coords: [0.0, 0.0], color: divider_color, use_texture: 0.0 },
             ]);
             indices.extend_from_slice(&[div_base, div_base + 1, div_base + 2, div_base, div_base + 2, div_base + 3]);
         }
-        
+
         (vertices, indices)
     }
     
@@ -343,54 +372,17 @@ impl UIRenderer {
     }
     
     pub fn update_inventory_selection(&mut self, device: &wgpu::Device, inventory: &Inventory) {
-        let mut vertices: Vec<UIVertex> = Vec::new();
-        let mut indices: Vec<u16> = Vec::new();
+        let (mut vertices, mut indices) = Self::create_minecraft_hotbar();
 
-        // Clean minimal hotbar
-        let slot_size = 0.04;
-        let num_slots = 6;
-        let divider_width = 0.002;
-        let total_width = num_slots as f32 * (slot_size * 2.0) + (num_slots - 1) as f32 * divider_width;
-        let start_x = -total_width / 2.0 + slot_size;
-        let hotbar_y = -0.92;
-
-        // Pure black background
-        let bg_padding = 0.006;
-        let bg_left = start_x - slot_size - bg_padding;
-        let bg_right = start_x + total_width - slot_size + bg_padding;
-        let bg_top = hotbar_y + slot_size + bg_padding;
-        let bg_bottom = hotbar_y - slot_size - bg_padding;
-        let bg_color = [0.0, 0.0, 0.0, 0.85];
-
-        let bg_base = vertices.len() as u16;
-        vertices.extend_from_slice(&[
-            UIVertex { position: [bg_left, bg_bottom], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 },
-            UIVertex { position: [bg_right, bg_bottom], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 },
-            UIVertex { position: [bg_right, bg_top], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 },
-            UIVertex { position: [bg_left, bg_top], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 },
-        ]);
-        indices.extend_from_slice(&[bg_base, bg_base + 1, bg_base + 2, bg_base, bg_base + 2, bg_base + 3]);
-
-        // White dividers between slots
-        let divider_color = [1.0, 1.0, 1.0, 0.3];
-        for i in 1..num_slots {
-            let div_x = start_x - slot_size + i as f32 * (slot_size * 2.0 + divider_width) - divider_width / 2.0;
-            let div_base = vertices.len() as u16;
-            vertices.extend_from_slice(&[
-                UIVertex { position: [div_x - divider_width / 2.0, bg_bottom + 0.004], tex_coords: [0.0, 0.0], color: divider_color, use_texture: 0.0 },
-                UIVertex { position: [div_x + divider_width / 2.0, bg_bottom + 0.004], tex_coords: [0.0, 0.0], color: divider_color, use_texture: 0.0 },
-                UIVertex { position: [div_x + divider_width / 2.0, bg_top - 0.004], tex_coords: [0.0, 0.0], color: divider_color, use_texture: 0.0 },
-                UIVertex { position: [div_x - divider_width / 2.0, bg_top - 0.004], tex_coords: [0.0, 0.0], color: divider_color, use_texture: 0.0 },
-            ]);
-            indices.extend_from_slice(&[div_base, div_base + 1, div_base + 2, div_base, div_base + 2, div_base + 3]);
-        }
+        let start_x = Self::hotbar_start_x();
+        let bg_bottom = HOTBAR_Y - HOTBAR_SLOT_SIZE - HOTBAR_BG_PADDING;
 
         let selected = inventory.selected_slot;
-        let icon_size = slot_size * 0.8;
+        let icon_size = HOTBAR_SLOT_SIZE * 0.8;
         let icon_color = [1.0, 1.0, 1.0, 1.0];
 
-        for i in 0..num_slots {
-            let slot_x = start_x + i as f32 * (slot_size * 2.0 + divider_width);
+        for i in 0..HOTBAR_NUM_SLOTS {
+            let slot_x = start_x + i as f32 * (HOTBAR_SLOT_SIZE * 2.0 + HOTBAR_DIVIDER_WIDTH);
             let is_selected = i == selected;
 
             // Selection highlight - subtle white underline
@@ -398,10 +390,10 @@ impl UIRenderer {
                 let highlight_color = [1.0, 1.0, 1.0, 0.9];
                 let hl_base = vertices.len() as u16;
                 vertices.extend_from_slice(&[
-                    UIVertex { position: [slot_x - slot_size + 0.005, bg_bottom], tex_coords: [0.0, 0.0], color: highlight_color, use_texture: 0.0 },
-                    UIVertex { position: [slot_x + slot_size - 0.005, bg_bottom], tex_coords: [0.0, 0.0], color: highlight_color, use_texture: 0.0 },
-                    UIVertex { position: [slot_x + slot_size - 0.005, bg_bottom + 0.003], tex_coords: [0.0, 0.0], color: highlight_color, use_texture: 0.0 },
-                    UIVertex { position: [slot_x - slot_size + 0.005, bg_bottom + 0.003], tex_coords: [0.0, 0.0], color: highlight_color, use_texture: 0.0 },
+                    UIVertex { position: [slot_x - HOTBAR_SLOT_SIZE + 0.005, bg_bottom], tex_coords: [0.0, 0.0], color: highlight_color, use_texture: 0.0 },
+                    UIVertex { position: [slot_x + HOTBAR_SLOT_SIZE - 0.005, bg_bottom], tex_coords: [0.0, 0.0], color: highlight_color, use_texture: 0.0 },
+                    UIVertex { position: [slot_x + HOTBAR_SLOT_SIZE - 0.005, bg_bottom + 0.003], tex_coords: [0.0, 0.0], color: highlight_color, use_texture: 0.0 },
+                    UIVertex { position: [slot_x - HOTBAR_SLOT_SIZE + 0.005, bg_bottom + 0.003], tex_coords: [0.0, 0.0], color: highlight_color, use_texture: 0.0 },
                 ]);
                 indices.extend_from_slice(&[hl_base, hl_base + 1, hl_base + 2, hl_base, hl_base + 2, hl_base + 3]);
             }
@@ -409,41 +401,25 @@ impl UIRenderer {
             // Slot content
             if let Some((block_type, qty)) = inventory.slots[i] {
                 if qty > 0 {
-                    let block_type_val = match block_type {
-                        BlockType::Grass => 1.0,
-                        BlockType::Dirt => 2.0,
-                        BlockType::Stone => 3.0,
-                        BlockType::Wood => 4.0,
-                        BlockType::Leaves => 5.0,
-                        BlockType::Water => 6.0,
-                        BlockType::Sand => 7.0,
-                        BlockType::Snow => 8.0,
-                        BlockType::Ice => 9.0,
-                        BlockType::Cobblestone => 10.0,
-                        BlockType::Coal => 11.0,
-                        BlockType::Iron => 12.0,
-                        BlockType::Gold => 13.0,
-                        BlockType::Diamond => 14.0,
-                        BlockType::Air | BlockType::Barrier => 0.0,
-                    };
+                    let block_type_val = Self::block_type_to_ui_index(block_type);
                     let icon_base = vertices.len() as u16;
                     vertices.extend_from_slice(&[
-                        UIVertex { position: [slot_x - icon_size, hotbar_y - icon_size], tex_coords: [0.0, 1.0], color: icon_color, use_texture: block_type_val },
-                        UIVertex { position: [slot_x + icon_size, hotbar_y - icon_size], tex_coords: [1.0, 1.0], color: icon_color, use_texture: block_type_val },
-                        UIVertex { position: [slot_x + icon_size, hotbar_y + icon_size], tex_coords: [1.0, 0.0], color: icon_color, use_texture: block_type_val },
-                        UIVertex { position: [slot_x - icon_size, hotbar_y + icon_size], tex_coords: [0.0, 0.0], color: icon_color, use_texture: block_type_val },
+                        UIVertex { position: [slot_x - icon_size, HOTBAR_Y - icon_size], tex_coords: [0.0, 1.0], color: icon_color, use_texture: block_type_val },
+                        UIVertex { position: [slot_x + icon_size, HOTBAR_Y - icon_size], tex_coords: [1.0, 1.0], color: icon_color, use_texture: block_type_val },
+                        UIVertex { position: [slot_x + icon_size, HOTBAR_Y + icon_size], tex_coords: [1.0, 0.0], color: icon_color, use_texture: block_type_val },
+                        UIVertex { position: [slot_x - icon_size, HOTBAR_Y + icon_size], tex_coords: [0.0, 0.0], color: icon_color, use_texture: block_type_val },
                     ]);
                     indices.extend_from_slice(&[icon_base, icon_base + 1, icon_base + 2, icon_base, icon_base + 2, icon_base + 3]);
 
                     // Quantity in corner
                     if qty > 1 {
                         let digit_color = [1.0, 1.0, 1.0, 0.9];
-                        let digit_size = slot_size * 0.35;
+                        let digit_size = HOTBAR_SLOT_SIZE * 0.35;
                         let qty_str = qty.to_string();
                         let digit_width = digit_size * 0.6;
                         let total_w = digit_width * qty_str.len() as f32;
-                        let mut digit_x = slot_x + slot_size - total_w - 0.003;
-                        let digit_y = hotbar_y - slot_size + 0.003;
+                        let mut digit_x = slot_x + HOTBAR_SLOT_SIZE - total_w - 0.003;
+                        let digit_y = HOTBAR_Y - HOTBAR_SLOT_SIZE + 0.003;
                         for ch in qty_str.chars() {
                             let dig = ch.to_digit(10).unwrap() as usize;
                             let (mut dig_verts, dig_inds) = Self::get_digit_vertices(dig, digit_x, digit_y, digit_size, digit_color);
