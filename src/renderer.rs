@@ -166,6 +166,9 @@ struct PostProcessUniform {
     sun_screen_pos: [f32; 2],  // Sun position in screen space for god rays
     god_ray_intensity: f32,
     god_ray_decay: f32,
+    screen_size: [f32; 2],    // Screen dimensions for SSAO
+    ssao_intensity: f32,
+    ssao_radius: f32,
 }
 
 #[repr(C)]
@@ -610,6 +613,24 @@ impl Renderer {
                         has_dynamic_offset: false,
                         min_binding_size: None,
                     },
+                    count: None,
+                },
+                // Depth texture for SSAO (non-filtering)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Depth,
+                    },
+                    count: None,
+                },
+                // Non-filtering sampler for depth
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                     count: None,
                 },
             ],
@@ -1399,6 +1420,18 @@ impl Renderer {
             ..Default::default()
         });
 
+        // Create nearest sampler for depth (non-filtering)
+        let nearest_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Nearest Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
         // Shadow uniform buffer
         let shadow_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Shadow Uniform Buffer"),
@@ -1444,6 +1477,9 @@ impl Renderer {
                 sun_screen_pos: [0.5, 0.3],
                 god_ray_intensity: 0.3,
                 god_ray_decay: 0.97,
+                screen_size: [config.width as f32, config.height as f32],
+                ssao_intensity: 0.5,
+                ssao_radius: 0.5,
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -1466,6 +1502,14 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: post_process_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&hdr_depth_texture),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&nearest_sampler),
                 },
             ],
             label: Some("post_process_bind_group"),
@@ -1874,6 +1918,9 @@ impl Renderer {
             sun_screen_pos,
             god_ray_intensity: 0.4 * day_factor,  // Sun glow effect (scales with daytime)
             god_ray_decay: 0.97,
+            screen_size: [self.config.width as f32, self.config.height as f32],
+            ssao_intensity: 0.6,
+            ssao_radius: 0.5,
         };
         self.queue.write_buffer(&self.post_process_uniform_buffer, 0, bytemuck::cast_slice(&[post_uniform]));
         
@@ -2426,7 +2473,86 @@ impl Renderer {
         let mut opaque_indices = Vec::new();
         let mut trans_vertices = Vec::new();
         let mut trans_indices = Vec::new();
-        
+
+        let chunk_x_offset = chunk.position.x * World::CHUNK_SIZE as i32;
+        let chunk_z_offset = chunk.position.z * World::CHUNK_SIZE as i32;
+
+        // Greedy meshing for each face direction
+        // Process Top faces (Y+)
+        Self::greedy_mesh_horizontal(
+            world, chunk, chunk_x_offset, chunk_z_offset,
+            |y| y + 1, // neighbor check direction
+            Face::Top,
+            &mut opaque_vertices, &mut opaque_indices,
+            &mut trans_vertices, &mut trans_indices,
+        );
+
+        // Process Bottom faces (Y-)
+        Self::greedy_mesh_horizontal(
+            world, chunk, chunk_x_offset, chunk_z_offset,
+            |y| y - 1,
+            Face::Bottom,
+            &mut opaque_vertices, &mut opaque_indices,
+            &mut trans_vertices, &mut trans_indices,
+        );
+
+        // Process Right faces (X+)
+        Self::greedy_mesh_vertical_x(
+            world, chunk, chunk_x_offset, chunk_z_offset,
+            |x| x + 1,
+            Face::Right,
+            &mut opaque_vertices, &mut opaque_indices,
+            &mut trans_vertices, &mut trans_indices,
+        );
+
+        // Process Left faces (X-)
+        Self::greedy_mesh_vertical_x(
+            world, chunk, chunk_x_offset, chunk_z_offset,
+            |x| x - 1,
+            Face::Left,
+            &mut opaque_vertices, &mut opaque_indices,
+            &mut trans_vertices, &mut trans_indices,
+        );
+
+        // Process Front faces (Z+)
+        Self::greedy_mesh_vertical_z(
+            world, chunk, chunk_x_offset, chunk_z_offset,
+            |z| z + 1,
+            Face::Front,
+            &mut opaque_vertices, &mut opaque_indices,
+            &mut trans_vertices, &mut trans_indices,
+        );
+
+        // Process Back faces (Z-)
+        Self::greedy_mesh_vertical_z(
+            world, chunk, chunk_x_offset, chunk_z_offset,
+            |z| z - 1,
+            Face::Back,
+            &mut opaque_vertices, &mut opaque_indices,
+            &mut trans_vertices, &mut trans_indices,
+        );
+
+        // Render damaged blocks separately (not greedy meshed) so they show crack effects
+        Self::render_damaged_blocks(
+            world, chunk, chunk_x_offset, chunk_z_offset,
+            &mut opaque_vertices, &mut opaque_indices,
+            &mut trans_vertices, &mut trans_indices,
+        );
+
+        (opaque_vertices, opaque_indices, trans_vertices, trans_indices)
+    }
+
+    // Render blocks with damage separately so crack effects are visible
+    fn render_damaged_blocks(
+        world: &World,
+        chunk: &crate::world::Chunk,
+        chunk_x_offset: i32,
+        chunk_z_offset: i32,
+        opaque_vertices: &mut Vec<Vertex>,
+        opaque_indices: &mut Vec<u16>,
+        trans_vertices: &mut Vec<Vertex>,
+        trans_indices: &mut Vec<u16>,
+    ) {
         for x in 0..World::CHUNK_SIZE {
             for y in 0..World::CHUNK_HEIGHT {
                 for z in 0..World::CHUNK_SIZE {
@@ -2434,45 +2560,492 @@ impl Renderer {
                     if block_type == BlockType::Air || block_type == BlockType::Barrier {
                         continue;
                     }
-                    
-                    let world_x = chunk.position.x * World::CHUNK_SIZE as i32 + x as i32;
+
+                    let world_x = chunk_x_offset + x as i32;
                     let world_y = y as i32;
-                    let world_z = chunk.position.z * World::CHUNK_SIZE as i32 + z as i32;
-                    
+                    let world_z = chunk_z_offset + z as i32;
+
                     let damage = world.get_block_damage(world_x, world_y, world_z);
-                    let normalized_damage = if crate::world::World::get_hardness(block_type) > 0.0 { damage / crate::world::World::get_hardness(block_type) } else { 0.0 };
-                    
-                    let pos = Vector3::new(world_x as f32, y as f32, world_z as f32);
-                    
-                    let (vertices, indices) = if Self::is_transparent(block_type) {
-                        (&mut trans_vertices, &mut trans_indices)
-                    } else {
-                        (&mut opaque_vertices, &mut opaque_indices)
-                    };
-                    
+                    if damage <= 0.0 {
+                        continue; // Only render damaged blocks here
+                    }
+
+                    let hardness = crate::world::World::get_hardness(block_type);
+                    let normalized_damage = if hardness > 0.0 { damage / hardness } else { 0.0 };
+
+                    let pos = Vector3::new(world_x as f32, world_y as f32, world_z as f32);
+                    let is_transparent = Self::is_transparent(block_type);
+
+                    // Add faces for damaged block (these will overdraw the greedy mesh but show cracks)
                     if Self::is_face_exposed(world, world_x, world_y + 1, world_z, block_type) {
-                        Self::add_face(vertices, indices, pos, Face::Top, block_type, normalized_damage);
+                        if is_transparent {
+                            Self::add_face(trans_vertices, trans_indices, pos, Face::Top, block_type, normalized_damage);
+                        } else {
+                            Self::add_face(opaque_vertices, opaque_indices, pos, Face::Top, block_type, normalized_damage);
+                        }
                     }
                     if Self::is_face_exposed(world, world_x, world_y - 1, world_z, block_type) {
-                        Self::add_face(vertices, indices, pos, Face::Bottom, block_type, normalized_damage);
+                        if is_transparent {
+                            Self::add_face(trans_vertices, trans_indices, pos, Face::Bottom, block_type, normalized_damage);
+                        } else {
+                            Self::add_face(opaque_vertices, opaque_indices, pos, Face::Bottom, block_type, normalized_damage);
+                        }
                     }
                     if Self::is_face_exposed(world, world_x + 1, world_y, world_z, block_type) {
-                        Self::add_face(vertices, indices, pos, Face::Right, block_type, normalized_damage);
+                        if is_transparent {
+                            Self::add_face(trans_vertices, trans_indices, pos, Face::Right, block_type, normalized_damage);
+                        } else {
+                            Self::add_face(opaque_vertices, opaque_indices, pos, Face::Right, block_type, normalized_damage);
+                        }
                     }
                     if Self::is_face_exposed(world, world_x - 1, world_y, world_z, block_type) {
-                        Self::add_face(vertices, indices, pos, Face::Left, block_type, normalized_damage);
+                        if is_transparent {
+                            Self::add_face(trans_vertices, trans_indices, pos, Face::Left, block_type, normalized_damage);
+                        } else {
+                            Self::add_face(opaque_vertices, opaque_indices, pos, Face::Left, block_type, normalized_damage);
+                        }
                     }
                     if Self::is_face_exposed(world, world_x, world_y, world_z + 1, block_type) {
-                        Self::add_face(vertices, indices, pos, Face::Front, block_type, normalized_damage);
+                        if is_transparent {
+                            Self::add_face(trans_vertices, trans_indices, pos, Face::Front, block_type, normalized_damage);
+                        } else {
+                            Self::add_face(opaque_vertices, opaque_indices, pos, Face::Front, block_type, normalized_damage);
+                        }
                     }
                     if Self::is_face_exposed(world, world_x, world_y, world_z - 1, block_type) {
-                        Self::add_face(vertices, indices, pos, Face::Back, block_type, normalized_damage);
+                        if is_transparent {
+                            Self::add_face(trans_vertices, trans_indices, pos, Face::Back, block_type, normalized_damage);
+                        } else {
+                            Self::add_face(opaque_vertices, opaque_indices, pos, Face::Back, block_type, normalized_damage);
+                        }
                     }
                 }
             }
         }
-        
-        (opaque_vertices, opaque_indices, trans_vertices, trans_indices)
+    }
+
+    // Greedy mesh for horizontal faces (top/bottom) - iterates Y layers, merges in XZ plane
+    fn greedy_mesh_horizontal<F>(
+        world: &World,
+        chunk: &crate::world::Chunk,
+        chunk_x_offset: i32,
+        chunk_z_offset: i32,
+        neighbor_y: F,
+        face: Face,
+        opaque_vertices: &mut Vec<Vertex>,
+        opaque_indices: &mut Vec<u16>,
+        trans_vertices: &mut Vec<Vertex>,
+        trans_indices: &mut Vec<u16>,
+    ) where F: Fn(i32) -> i32 {
+        let size = World::CHUNK_SIZE;
+        let height = World::CHUNK_HEIGHT;
+
+        for y in 0..height {
+            // Build mask of exposed faces at this Y level
+            let mut mask: [[Option<BlockType>; 16]; 16] = [[None; 16]; 16];
+
+            for x in 0..size {
+                for z in 0..size {
+                    let block_type = chunk.blocks[x][y][z];
+                    if block_type == BlockType::Air || block_type == BlockType::Barrier {
+                        continue;
+                    }
+
+                    let world_x = chunk_x_offset + x as i32;
+                    let world_z = chunk_z_offset + z as i32;
+                    let check_y = neighbor_y(y as i32);
+
+                    // Skip damaged blocks - they're rendered separately with crack effects
+                    if world.get_block_damage(world_x, y as i32, world_z) > 0.0 {
+                        continue;
+                    }
+
+                    if Self::is_face_exposed(world, world_x, check_y, world_z, block_type) {
+                        mask[x][z] = Some(block_type);
+                    }
+                }
+            }
+
+            // Greedy merge
+            let mut visited = [[false; 16]; 16];
+
+            for start_x in 0..size {
+                for start_z in 0..size {
+                    if visited[start_x][start_z] || mask[start_x][start_z].is_none() {
+                        continue;
+                    }
+
+                    let block_type = mask[start_x][start_z].unwrap();
+                    let is_transparent = Self::is_transparent(block_type);
+
+                    // Find width (extend in X)
+                    let mut width = 1;
+                    while start_x + width < size
+                        && !visited[start_x + width][start_z]
+                        && mask[start_x + width][start_z] == Some(block_type)
+                    {
+                        width += 1;
+                    }
+
+                    // Find height (extend in Z)
+                    let mut depth = 1;
+                    'outer: while start_z + depth < size {
+                        for dx in 0..width {
+                            if visited[start_x + dx][start_z + depth]
+                                || mask[start_x + dx][start_z + depth] != Some(block_type)
+                            {
+                                break 'outer;
+                            }
+                        }
+                        depth += 1;
+                    }
+
+                    // Mark as visited
+                    for dx in 0..width {
+                        for dz in 0..depth {
+                            visited[start_x + dx][start_z + dz] = true;
+                        }
+                    }
+
+                    // Generate merged quad
+                    let world_x = chunk_x_offset + start_x as i32;
+                    let world_z = chunk_z_offset + start_z as i32;
+
+                    if is_transparent {
+                        Self::add_greedy_face_horizontal(
+                            trans_vertices, trans_indices,
+                            world_x as f32, y as f32, world_z as f32,
+                            width as f32, depth as f32,
+                            face, block_type,
+                        );
+                    } else {
+                        Self::add_greedy_face_horizontal(
+                            opaque_vertices, opaque_indices,
+                            world_x as f32, y as f32, world_z as f32,
+                            width as f32, depth as f32,
+                            face, block_type,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Greedy mesh for vertical X faces (left/right) - iterates X layers, merges in YZ plane
+    fn greedy_mesh_vertical_x<F>(
+        world: &World,
+        chunk: &crate::world::Chunk,
+        chunk_x_offset: i32,
+        chunk_z_offset: i32,
+        neighbor_x: F,
+        face: Face,
+        opaque_vertices: &mut Vec<Vertex>,
+        opaque_indices: &mut Vec<u16>,
+        trans_vertices: &mut Vec<Vertex>,
+        trans_indices: &mut Vec<u16>,
+    ) where F: Fn(i32) -> i32 {
+        let size = World::CHUNK_SIZE;
+        let height = World::CHUNK_HEIGHT;
+
+        for x in 0..size {
+            // Build mask of exposed faces at this X level
+            let mut mask: Vec<Vec<Option<BlockType>>> = vec![vec![None; size]; height];
+
+            for y in 0..height {
+                for z in 0..size {
+                    let block_type = chunk.blocks[x][y][z];
+                    if block_type == BlockType::Air || block_type == BlockType::Barrier {
+                        continue;
+                    }
+
+                    let world_x = chunk_x_offset + x as i32;
+                    let world_z = chunk_z_offset + z as i32;
+                    let check_x = neighbor_x(world_x);
+
+                    // Skip damaged blocks - they're rendered separately with crack effects
+                    if world.get_block_damage(world_x, y as i32, world_z) > 0.0 {
+                        continue;
+                    }
+
+                    if Self::is_face_exposed(world, check_x, y as i32, world_z, block_type) {
+                        mask[y][z] = Some(block_type);
+                    }
+                }
+            }
+
+            // Greedy merge in YZ plane
+            let mut visited: Vec<Vec<bool>> = vec![vec![false; size]; height];
+
+            for start_y in 0..height {
+                for start_z in 0..size {
+                    if visited[start_y][start_z] || mask[start_y][start_z].is_none() {
+                        continue;
+                    }
+
+                    let block_type = mask[start_y][start_z].unwrap();
+                    let is_transparent = Self::is_transparent(block_type);
+
+                    // Find width (extend in Z)
+                    let mut width = 1;
+                    while start_z + width < size
+                        && !visited[start_y][start_z + width]
+                        && mask[start_y][start_z + width] == Some(block_type)
+                    {
+                        width += 1;
+                    }
+
+                    // Find height (extend in Y)
+                    let mut h = 1;
+                    'outer: while start_y + h < height {
+                        for dz in 0..width {
+                            if visited[start_y + h][start_z + dz]
+                                || mask[start_y + h][start_z + dz] != Some(block_type)
+                            {
+                                break 'outer;
+                            }
+                        }
+                        h += 1;
+                    }
+
+                    // Mark as visited
+                    for dy in 0..h {
+                        for dz in 0..width {
+                            visited[start_y + dy][start_z + dz] = true;
+                        }
+                    }
+
+                    // Generate merged quad
+                    let world_x = chunk_x_offset + x as i32;
+                    let world_z = chunk_z_offset + start_z as i32;
+
+                    if is_transparent {
+                        Self::add_greedy_face_vertical_x(
+                            trans_vertices, trans_indices,
+                            world_x as f32, start_y as f32, world_z as f32,
+                            width as f32, h as f32,
+                            face, block_type,
+                        );
+                    } else {
+                        Self::add_greedy_face_vertical_x(
+                            opaque_vertices, opaque_indices,
+                            world_x as f32, start_y as f32, world_z as f32,
+                            width as f32, h as f32,
+                            face, block_type,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Greedy mesh for vertical Z faces (front/back) - iterates Z layers, merges in XY plane
+    fn greedy_mesh_vertical_z<F>(
+        world: &World,
+        chunk: &crate::world::Chunk,
+        chunk_x_offset: i32,
+        chunk_z_offset: i32,
+        neighbor_z: F,
+        face: Face,
+        opaque_vertices: &mut Vec<Vertex>,
+        opaque_indices: &mut Vec<u16>,
+        trans_vertices: &mut Vec<Vertex>,
+        trans_indices: &mut Vec<u16>,
+    ) where F: Fn(i32) -> i32 {
+        let size = World::CHUNK_SIZE;
+        let height = World::CHUNK_HEIGHT;
+
+        for z in 0..size {
+            // Build mask of exposed faces at this Z level
+            let mut mask: Vec<Vec<Option<BlockType>>> = vec![vec![None; size]; height];
+
+            for y in 0..height {
+                for x in 0..size {
+                    let block_type = chunk.blocks[x][y][z];
+                    if block_type == BlockType::Air || block_type == BlockType::Barrier {
+                        continue;
+                    }
+
+                    let world_x = chunk_x_offset + x as i32;
+                    let world_z = chunk_z_offset + z as i32;
+
+                    // Skip damaged blocks - they're rendered separately with crack effects
+                    if world.get_block_damage(world_x, y as i32, world_z) > 0.0 {
+                        continue;
+                    }
+
+                    let check_z = neighbor_z(world_z);
+
+                    if Self::is_face_exposed(world, world_x, y as i32, check_z, block_type) {
+                        mask[y][x] = Some(block_type);
+                    }
+                }
+            }
+
+            // Greedy merge in XY plane
+            let mut visited: Vec<Vec<bool>> = vec![vec![false; size]; height];
+
+            for start_y in 0..height {
+                for start_x in 0..size {
+                    if visited[start_y][start_x] || mask[start_y][start_x].is_none() {
+                        continue;
+                    }
+
+                    let block_type = mask[start_y][start_x].unwrap();
+                    let is_transparent = Self::is_transparent(block_type);
+
+                    // Find width (extend in X)
+                    let mut width = 1;
+                    while start_x + width < size
+                        && !visited[start_y][start_x + width]
+                        && mask[start_y][start_x + width] == Some(block_type)
+                    {
+                        width += 1;
+                    }
+
+                    // Find height (extend in Y)
+                    let mut h = 1;
+                    'outer: while start_y + h < height {
+                        for dx in 0..width {
+                            if visited[start_y + h][start_x + dx]
+                                || mask[start_y + h][start_x + dx] != Some(block_type)
+                            {
+                                break 'outer;
+                            }
+                        }
+                        h += 1;
+                    }
+
+                    // Mark as visited
+                    for dy in 0..h {
+                        for dx in 0..width {
+                            visited[start_y + dy][start_x + dx] = true;
+                        }
+                    }
+
+                    // Generate merged quad
+                    let world_x = chunk_x_offset + start_x as i32;
+                    let world_z = chunk_z_offset + z as i32;
+
+                    if is_transparent {
+                        Self::add_greedy_face_vertical_z(
+                            trans_vertices, trans_indices,
+                            world_x as f32, start_y as f32, world_z as f32,
+                            width as f32, h as f32,
+                            face, block_type,
+                        );
+                    } else {
+                        Self::add_greedy_face_vertical_z(
+                            opaque_vertices, opaque_indices,
+                            world_x as f32, start_y as f32, world_z as f32,
+                            width as f32, h as f32,
+                            face, block_type,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Add a greedy-merged horizontal face (top/bottom)
+    fn add_greedy_face_horizontal(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        x: f32, y: f32, z: f32,
+        width: f32, depth: f32,
+        face: Face,
+        block_type: BlockType,
+    ) {
+        let base_index = vertices.len() as u16;
+        let block_type_f = Self::block_type_to_float(block_type);
+        let normal = match face {
+            Face::Top => [0.0, 1.0, 0.0],
+            Face::Bottom => [0.0, -1.0, 0.0],
+            _ => [0.0, 1.0, 0.0],
+        };
+        let y_offset = if matches!(face, Face::Top) { 1.0 } else { 0.0 };
+
+        // Tiled texture coordinates
+        vertices.push(Vertex { position: [x, y + y_offset, z], tex_coords: [0.0, 0.0], normal, block_type: block_type_f, damage: 0.0 });
+        vertices.push(Vertex { position: [x + width, y + y_offset, z], tex_coords: [width, 0.0], normal, block_type: block_type_f, damage: 0.0 });
+        vertices.push(Vertex { position: [x + width, y + y_offset, z + depth], tex_coords: [width, depth], normal, block_type: block_type_f, damage: 0.0 });
+        vertices.push(Vertex { position: [x, y + y_offset, z + depth], tex_coords: [0.0, depth], normal, block_type: block_type_f, damage: 0.0 });
+
+        let idx = if matches!(face, Face::Top) {
+            [0, 1, 2, 2, 3, 0]
+        } else {
+            [0, 3, 2, 2, 1, 0]
+        };
+        for i in idx {
+            indices.push(base_index + i);
+        }
+    }
+
+    // Add a greedy-merged vertical X face (left/right)
+    fn add_greedy_face_vertical_x(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        x: f32, y: f32, z: f32,
+        width: f32, height: f32,  // width = Z extent, height = Y extent
+        face: Face,
+        block_type: BlockType,
+    ) {
+        let base_index = vertices.len() as u16;
+        let block_type_f = Self::block_type_to_float(block_type);
+        let normal = match face {
+            Face::Right => [1.0, 0.0, 0.0],
+            Face::Left => [-1.0, 0.0, 0.0],
+            _ => [1.0, 0.0, 0.0],
+        };
+        let x_offset = if matches!(face, Face::Right) { 1.0 } else { 0.0 };
+
+        // Tiled texture coordinates
+        vertices.push(Vertex { position: [x + x_offset, y, z], tex_coords: [0.0, height], normal, block_type: block_type_f, damage: 0.0 });
+        vertices.push(Vertex { position: [x + x_offset, y, z + width], tex_coords: [width, height], normal, block_type: block_type_f, damage: 0.0 });
+        vertices.push(Vertex { position: [x + x_offset, y + height, z + width], tex_coords: [width, 0.0], normal, block_type: block_type_f, damage: 0.0 });
+        vertices.push(Vertex { position: [x + x_offset, y + height, z], tex_coords: [0.0, 0.0], normal, block_type: block_type_f, damage: 0.0 });
+
+        let idx = if matches!(face, Face::Right) {
+            [0, 1, 2, 2, 3, 0]
+        } else {
+            [0, 3, 2, 2, 1, 0]
+        };
+        for i in idx {
+            indices.push(base_index + i);
+        }
+    }
+
+    // Add a greedy-merged vertical Z face (front/back)
+    fn add_greedy_face_vertical_z(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        x: f32, y: f32, z: f32,
+        width: f32, height: f32,  // width = X extent, height = Y extent
+        face: Face,
+        block_type: BlockType,
+    ) {
+        let base_index = vertices.len() as u16;
+        let block_type_f = Self::block_type_to_float(block_type);
+        let normal = match face {
+            Face::Front => [0.0, 0.0, 1.0],
+            Face::Back => [0.0, 0.0, -1.0],
+            _ => [0.0, 0.0, 1.0],
+        };
+        let z_offset = if matches!(face, Face::Front) { 1.0 } else { 0.0 };
+
+        // Tiled texture coordinates
+        vertices.push(Vertex { position: [x, y, z + z_offset], tex_coords: [0.0, height], normal, block_type: block_type_f, damage: 0.0 });
+        vertices.push(Vertex { position: [x, y + height, z + z_offset], tex_coords: [0.0, 0.0], normal, block_type: block_type_f, damage: 0.0 });
+        vertices.push(Vertex { position: [x + width, y + height, z + z_offset], tex_coords: [width, 0.0], normal, block_type: block_type_f, damage: 0.0 });
+        vertices.push(Vertex { position: [x + width, y, z + z_offset], tex_coords: [width, height], normal, block_type: block_type_f, damage: 0.0 });
+
+        let idx = if matches!(face, Face::Front) {
+            [0, 1, 2, 2, 3, 0]
+        } else {
+            [0, 3, 2, 2, 1, 0]
+        };
+        for i in idx {
+            indices.push(base_index + i);
+        }
     }
 
     fn create_held_item_vertices(_camera: &Camera, opt_block_type: Option<BlockType>, progress: f32) -> Vec<Vertex> {

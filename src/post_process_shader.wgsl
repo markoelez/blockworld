@@ -20,10 +20,18 @@ struct PostProcessUniform {
     sun_screen_pos: vec2<f32>,  // Sun position in screen space
     god_ray_intensity: f32,
     god_ray_decay: f32,
+    screen_size: vec2<f32>,    // Screen dimensions for SSAO
+    ssao_intensity: f32,
+    ssao_radius: f32,
 }
 
 @group(0) @binding(3)
 var<uniform> u_post: PostProcessUniform;
+
+@group(0) @binding(4)
+var t_depth: texture_depth_2d;
+@group(0) @binding(5)
+var s_nearest: sampler;
 
 // Full-screen triangle vertices
 @vertex
@@ -124,10 +132,132 @@ fn chromatic_aberration(uv: vec2<f32>, strength: f32) -> vec3<f32> {
     return vec3<f32>(r, g, b);
 }
 
+// Simple hash function for noise
+fn hash(p: vec2<f32>) -> f32 {
+    return fract(sin(dot(p, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+}
+
+// Load depth at pixel coordinates (integer)
+fn load_depth(pixel: vec2<i32>) -> f32 {
+    let dims = textureDimensions(t_depth);
+    let clamped = clamp(pixel, vec2<i32>(0), vec2<i32>(dims) - vec2<i32>(1));
+    return textureLoad(t_depth, clamped, 0);
+}
+
+// Simplified SSAO - samples depth at neighboring pixels
+fn calculate_ssao(uv: vec2<f32>) -> f32 {
+    let pixel = vec2<i32>(uv * u_post.screen_size);
+    let center_depth = load_depth(pixel);
+
+    // Skip sky (far depth)
+    if center_depth >= 0.9999 {
+        return 1.0;
+    }
+
+    let radius_pixels = u_post.ssao_radius * 8.0;  // Radius in pixels
+
+    var occlusion = 0.0;
+
+    // Fixed 8-sample pattern (manually unrolled for uniform control flow)
+    let noise = hash(uv * u_post.screen_size);
+    let angle_offset = noise * 6.28318;
+
+    // Sample 0
+    var angle = 0.0 * (6.28318 / 8.0) + angle_offset;
+    var dist = 1.0 / 8.0 * radius_pixels;
+    var offset = vec2<i32>(vec2<f32>(cos(angle), sin(angle)) * dist);
+    var sample_depth = load_depth(pixel + offset);
+    var depth_diff = center_depth - sample_depth;
+    var range_check = smoothstep(0.0, 1.0, 0.01 / max(abs(depth_diff), 0.0001));
+    var is_occluded = step(0.0001, depth_diff) * step(depth_diff, 0.02);
+    occlusion = occlusion + is_occluded * range_check;
+
+    // Sample 1
+    angle = 1.0 * (6.28318 / 8.0) + angle_offset;
+    dist = 2.0 / 8.0 * radius_pixels;
+    offset = vec2<i32>(vec2<f32>(cos(angle), sin(angle)) * dist);
+    sample_depth = load_depth(pixel + offset);
+    depth_diff = center_depth - sample_depth;
+    range_check = smoothstep(0.0, 1.0, 0.01 / max(abs(depth_diff), 0.0001));
+    is_occluded = step(0.0001, depth_diff) * step(depth_diff, 0.02);
+    occlusion = occlusion + is_occluded * range_check;
+
+    // Sample 2
+    angle = 2.0 * (6.28318 / 8.0) + angle_offset;
+    dist = 3.0 / 8.0 * radius_pixels;
+    offset = vec2<i32>(vec2<f32>(cos(angle), sin(angle)) * dist);
+    sample_depth = load_depth(pixel + offset);
+    depth_diff = center_depth - sample_depth;
+    range_check = smoothstep(0.0, 1.0, 0.01 / max(abs(depth_diff), 0.0001));
+    is_occluded = step(0.0001, depth_diff) * step(depth_diff, 0.02);
+    occlusion = occlusion + is_occluded * range_check;
+
+    // Sample 3
+    angle = 3.0 * (6.28318 / 8.0) + angle_offset;
+    dist = 4.0 / 8.0 * radius_pixels;
+    offset = vec2<i32>(vec2<f32>(cos(angle), sin(angle)) * dist);
+    sample_depth = load_depth(pixel + offset);
+    depth_diff = center_depth - sample_depth;
+    range_check = smoothstep(0.0, 1.0, 0.01 / max(abs(depth_diff), 0.0001));
+    is_occluded = step(0.0001, depth_diff) * step(depth_diff, 0.02);
+    occlusion = occlusion + is_occluded * range_check;
+
+    // Sample 4
+    angle = 4.0 * (6.28318 / 8.0) + angle_offset;
+    dist = 5.0 / 8.0 * radius_pixels;
+    offset = vec2<i32>(vec2<f32>(cos(angle), sin(angle)) * dist);
+    sample_depth = load_depth(pixel + offset);
+    depth_diff = center_depth - sample_depth;
+    range_check = smoothstep(0.0, 1.0, 0.01 / max(abs(depth_diff), 0.0001));
+    is_occluded = step(0.0001, depth_diff) * step(depth_diff, 0.02);
+    occlusion = occlusion + is_occluded * range_check;
+
+    // Sample 5
+    angle = 5.0 * (6.28318 / 8.0) + angle_offset;
+    dist = 6.0 / 8.0 * radius_pixels;
+    offset = vec2<i32>(vec2<f32>(cos(angle), sin(angle)) * dist);
+    sample_depth = load_depth(pixel + offset);
+    depth_diff = center_depth - sample_depth;
+    range_check = smoothstep(0.0, 1.0, 0.01 / max(abs(depth_diff), 0.0001));
+    is_occluded = step(0.0001, depth_diff) * step(depth_diff, 0.02);
+    occlusion = occlusion + is_occluded * range_check;
+
+    // Sample 6
+    angle = 6.0 * (6.28318 / 8.0) + angle_offset;
+    dist = 7.0 / 8.0 * radius_pixels;
+    offset = vec2<i32>(vec2<f32>(cos(angle), sin(angle)) * dist);
+    sample_depth = load_depth(pixel + offset);
+    depth_diff = center_depth - sample_depth;
+    range_check = smoothstep(0.0, 1.0, 0.01 / max(abs(depth_diff), 0.0001));
+    is_occluded = step(0.0001, depth_diff) * step(depth_diff, 0.02);
+    occlusion = occlusion + is_occluded * range_check;
+
+    // Sample 7
+    angle = 7.0 * (6.28318 / 8.0) + angle_offset;
+    dist = 8.0 / 8.0 * radius_pixels;
+    offset = vec2<i32>(vec2<f32>(cos(angle), sin(angle)) * dist);
+    sample_depth = load_depth(pixel + offset);
+    depth_diff = center_depth - sample_depth;
+    range_check = smoothstep(0.0, 1.0, 0.01 / max(abs(depth_diff), 0.0001));
+    is_occluded = step(0.0001, depth_diff) * step(depth_diff, 0.02);
+    occlusion = occlusion + is_occluded * range_check;
+
+    occlusion = 1.0 - (occlusion / 8.0) * u_post.ssao_intensity;
+
+    // Smooth the result
+    return clamp(occlusion, 0.0, 1.0);
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Sample HDR scene
     var hdr_color = textureSample(t_hdr, s_linear, in.tex_coords).rgb;
+
+    // Calculate SSAO
+    let ssao = calculate_ssao(in.tex_coords);
+
+    // Apply SSAO to scene (darken occluded areas)
+    hdr_color = hdr_color * ssao;
 
     // Sample bloom
     let bloom_color = textureSample(t_bloom, s_linear, in.tex_coords).rgb;
