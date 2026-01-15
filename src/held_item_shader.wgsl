@@ -158,7 +158,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     else if (bt == 14.0) {
         texture_color = vec4<f32>(0.678, 0.847, 0.902, 1.0);
     }
-    
+    // Gravel
+    else if (bt == 15.0) {
+        texture_color = vec4<f32>(0.55, 0.53, 0.5, 1.0);
+    }
+    // Clay
+    else if (bt == 16.0) {
+        texture_color = vec4<f32>(0.6, 0.55, 0.5, 1.0);
+    }
+
     // Crack effect
     let crack_intensity = step(1.0 - in.damage, noise(in.tex_coords * 20.0)) * step(0.01, in.damage);
     let crack_color = vec4<f32>(0.0, 0.0, 1.0, 1.0);

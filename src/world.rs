@@ -1,4 +1,4 @@
-use noise::{NoiseFn, Perlin};
+use noise::{NoiseFn, Perlin, Simplex};
 use cgmath::{Vector3, Point3};
 use std::collections::HashMap;
 use rand::Rng;
@@ -21,6 +21,8 @@ pub enum BlockType {
     Iron,
     Gold,
     Diamond,
+    Gravel,
+    Clay,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -42,42 +44,64 @@ pub struct Chunk {
 
 pub struct World {
     pub chunks: HashMap<(i32, i32), Chunk>, // Use HashMap for O(1) chunk access
-    noise: Perlin,
+    // Terrain noise layers
+    continent_noise: Perlin,      // Large scale landmass shapes
+    mountain_noise: Perlin,       // Mountain ranges
+    hill_noise: Perlin,           // Rolling hills
+    detail_noise: Perlin,         // Fine detail
+    erosion_noise: Perlin,        // Erosion patterns
+    ridge_noise: Simplex,         // Ridge/valley patterns
+    // Feature noise
+    river_noise: Perlin,          // River paths
+    lake_noise: Perlin,           // Lake locations
     tree_noise: Perlin,
     biome_noise: Perlin,
     temperature_noise: Perlin,
     humidity_noise: Perlin,
     cave_noise: Perlin,
     ore_noise: Perlin,
-    render_distance: i32, // In chunks
+    render_distance: i32,
     player_chunk_pos: (i32, i32),
     block_damage: HashMap<(i32, i32, i32), f32>,
+    seed: u32,
 }
 
 impl World {
     pub const CHUNK_SIZE: usize = 16;
-    pub const CHUNK_HEIGHT: usize = 64;
-    pub const SEA_LEVEL: usize = 25;
-    
+    pub const CHUNK_HEIGHT: usize = 128;  // Taller world for mountains
+    pub const SEA_LEVEL: usize = 45;      // Higher sea level
+    pub const BEACH_HEIGHT: usize = 48;   // Sand appears up to here near water
+
     pub fn new() -> Self {
         let mut rng = rand::thread_rng();
+        let seed: u32 = rng.gen();
+
         let mut world = Self {
             chunks: HashMap::new(),
-            noise: Perlin::new(rng.gen()),
-            tree_noise: Perlin::new(rng.gen()),
-            biome_noise: Perlin::new(rng.gen()),
-            temperature_noise: Perlin::new(rng.gen()),
-            humidity_noise: Perlin::new(rng.gen()),
-            cave_noise: Perlin::new(rng.gen()),
-            ore_noise: Perlin::new(rng.gen()),
-            render_distance: 6, // 6 chunk radius = 13x13 chunks visible
+            // Terrain layers with different seeds for variety
+            continent_noise: Perlin::new(seed),
+            mountain_noise: Perlin::new(seed.wrapping_add(1)),
+            hill_noise: Perlin::new(seed.wrapping_add(2)),
+            detail_noise: Perlin::new(seed.wrapping_add(3)),
+            erosion_noise: Perlin::new(seed.wrapping_add(4)),
+            ridge_noise: Simplex::new(seed.wrapping_add(5)),
+            river_noise: Perlin::new(seed.wrapping_add(6)),
+            lake_noise: Perlin::new(seed.wrapping_add(7)),
+            tree_noise: Perlin::new(seed.wrapping_add(8)),
+            biome_noise: Perlin::new(seed.wrapping_add(9)),
+            temperature_noise: Perlin::new(seed.wrapping_add(10)),
+            humidity_noise: Perlin::new(seed.wrapping_add(11)),
+            cave_noise: Perlin::new(seed.wrapping_add(12)),
+            ore_noise: Perlin::new(seed.wrapping_add(13)),
+            render_distance: 6,
             player_chunk_pos: (0, 0),
             block_damage: HashMap::new(),
+            seed,
         };
-        
+
         // Load initial chunks around spawn
         world.update_loaded_chunks(Point3::new(0.0, 0.0, 0.0));
-        
+
         world
     }
     
@@ -95,10 +119,52 @@ impl World {
         let chunk_z = (pos.z as i32).div_euclid(Self::CHUNK_SIZE as i32);
         self.load_chunks_around(chunk_x, chunk_z);
     }
+
+    /// Force load ALL chunks within render distance synchronously (for initial loading)
+    /// Returns progress as (loaded, total) for loading screen updates
+    pub fn force_load_all_chunks(&mut self, pos: Point3<f32>) -> (usize, usize) {
+        let chunk_x = (pos.x as i32).div_euclid(Self::CHUNK_SIZE as i32);
+        let chunk_z = (pos.z as i32).div_euclid(Self::CHUNK_SIZE as i32);
+
+        let mut total = 0;
+        let mut loaded = 0;
+
+        // Count total and load all chunks without rate limiting
+        for x in (chunk_x - self.render_distance)..=(chunk_x + self.render_distance) {
+            for z in (chunk_z - self.render_distance)..=(chunk_z + self.render_distance) {
+                total += 1;
+                let chunk_key = (x, z);
+                if !self.chunks.contains_key(&chunk_key) {
+                    self.load_chunk(x, z);
+                }
+                loaded += 1;
+            }
+        }
+
+        self.player_chunk_pos = (chunk_x, chunk_z);
+        (loaded, total)
+    }
+
+    /// Get the number of chunks that need to be loaded
+    pub fn get_chunks_to_load_count(&self, pos: Point3<f32>) -> usize {
+        let chunk_x = (pos.x as i32).div_euclid(Self::CHUNK_SIZE as i32);
+        let chunk_z = (pos.z as i32).div_euclid(Self::CHUNK_SIZE as i32);
+
+        let mut count = 0;
+        for x in (chunk_x - self.render_distance)..=(chunk_x + self.render_distance) {
+            for z in (chunk_z - self.render_distance)..=(chunk_z + self.render_distance) {
+                if !self.chunks.contains_key(&(x, z)) {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
     
     fn load_chunks_around(&mut self, chunk_x: i32, chunk_z: i32) {
-        // Limit chunks loaded per frame to prevent stuttering
-        const MAX_CHUNKS_TO_LOAD: usize = 2;
+        // Limit chunks loaded per frame to prevent stuttering (1 is smoother than 2)
+        const MAX_CHUNKS_TO_LOAD: usize = 1;
+        const MAX_CHUNKS_TO_UNLOAD: usize = 2;
 
         self.player_chunk_pos = (chunk_x, chunk_z);
 
@@ -120,13 +186,14 @@ impl World {
             self.load_chunk(x, z);
         }
 
-        // Unload chunks outside render distance (this is fast, do all at once)
+        // Unload chunks outside render distance (limit per frame to prevent stuttering)
         let chunks_to_unload: Vec<(i32, i32)> = self.chunks.keys()
             .filter(|(x, z)| {
                 let dx = (*x - chunk_x).abs();
                 let dz = (*z - chunk_z).abs();
                 dx > self.render_distance + 1 || dz > self.render_distance + 1
             })
+            .take(MAX_CHUNKS_TO_UNLOAD)
             .cloned()
             .collect();
 
@@ -161,90 +228,192 @@ impl World {
     }
     
     fn get_biome(&self, world_x: f64, world_z: f64) -> Biome {
-        let temperature = self.temperature_noise.get([world_x * 0.005, world_z * 0.005]);
-        let humidity = self.humidity_noise.get([world_x * 0.007, world_z * 0.007]);
-        let biome_value = self.biome_noise.get([world_x * 0.003, world_z * 0.003]);
-        
-        // Determine biome based on temperature, humidity, and additional noise
-        match (temperature, humidity, biome_value) {
-            (t, _, _) if t < -0.4 => Biome::Tundra,
-            (t, h, _b) if t > 0.3 && h < -0.2 => Biome::Desert,
-            (_, h, b) if h > 0.3 && b > 0.2 => Biome::Forest,
-            (t, _, b) if t > 0.0 && b > 0.4 => Biome::Mountains,
-            (_, _, b) if b < -0.5 => Biome::Ocean,
+        let temperature = self.temperature_noise.get([world_x * 0.003, world_z * 0.003]);
+        let humidity = self.humidity_noise.get([world_x * 0.004, world_z * 0.004]);
+        let elevation = self.get_base_continent_height(world_x, world_z);
+
+        // High elevation = mountains regardless of other factors
+        if elevation > 75.0 {
+            return Biome::Mountains;
+        }
+
+        // Very low elevation = ocean
+        if elevation < 40.0 {
+            return Biome::Ocean;
+        }
+
+        // Biome based on temperature and humidity
+        match (temperature, humidity) {
+            (t, _) if t < -0.35 => Biome::Tundra,
+            (t, h) if t > 0.35 && h < -0.1 => Biome::Desert,
+            (_, h) if h > 0.25 => Biome::Forest,
             _ => Biome::Plains,
         }
     }
-    
-    fn get_height_for_biome(&self, world_x: f64, world_z: f64, biome: Biome) -> usize {
-        let base_noise = self.noise.get([world_x * 0.01, world_z * 0.01]);
-        let detail_noise = self.noise.get([world_x * 0.05, world_z * 0.05]) * 0.3;
-        
-        let base_height = match biome {
-            Biome::Plains => base_noise * 8.0 + 28.0,
-            Biome::Forest => base_noise * 12.0 + 30.0,
-            Biome::Desert => base_noise * 6.0 + 26.0,
-            Biome::Mountains => {
-                let mountain_noise = self.noise.get([world_x * 0.003, world_z * 0.003]);
-                base_noise * 25.0 + mountain_noise * 15.0 + 35.0
-            },
-            Biome::Tundra => base_noise * 10.0 + 32.0,
-            Biome::Ocean => base_noise * 5.0 + 20.0,
-        };
-        
-        ((base_height + detail_noise) as usize).min(Self::CHUNK_HEIGHT - 1).max(0)
+
+    // Multi-octave terrain height calculation
+    fn get_terrain_height(&self, world_x: f64, world_z: f64) -> f64 {
+        // Layer 1: Continental shapes (very large scale)
+        let continent = self.continent_noise.get([world_x * 0.001, world_z * 0.001]);
+        let continent_height = (continent + 1.0) * 0.5 * 30.0 + 35.0; // 35-65 base
+
+        // Layer 2: Mountain ranges using ridged noise
+        let mountain_mask = self.mountain_noise.get([world_x * 0.004, world_z * 0.004]);
+        let mountain_mask = ((mountain_mask + 1.0) * 0.5).powf(2.0); // Concentrate mountains
+
+        // Ridged noise for sharp mountain peaks
+        let ridge1 = 1.0 - self.ridge_noise.get([world_x * 0.008, world_z * 0.008]).abs();
+        let ridge2 = (1.0 - self.ridge_noise.get([world_x * 0.016, world_z * 0.016]).abs()) * 0.5;
+        let ridged = (ridge1 + ridge2).powf(2.0) * 45.0 * mountain_mask; // Up to 45 blocks of mountains
+
+        // Layer 3: Rolling hills
+        let hills = self.hill_noise.get([world_x * 0.02, world_z * 0.02]);
+        let hills = hills * 12.0; // ±12 blocks
+
+        // Layer 4: Fine detail
+        let detail1 = self.detail_noise.get([world_x * 0.05, world_z * 0.05]) * 4.0;
+        let detail2 = self.detail_noise.get([world_x * 0.1, world_z * 0.1]) * 2.0;
+
+        // Layer 5: Erosion (creates valleys and smooths terrain)
+        let erosion = self.erosion_noise.get([world_x * 0.015, world_z * 0.015]);
+        let erosion_factor = (erosion + 1.0) * 0.5; // 0-1
+        let erosion_carve = if erosion < -0.3 { (erosion + 0.3) * 15.0 } else { 0.0 }; // Carve valleys
+
+        // Combine all layers
+        let mut height = continent_height + ridged + hills + detail1 + detail2 + erosion_carve;
+
+        // Apply erosion smoothing to mountains
+        height = height * (0.7 + 0.3 * erosion_factor);
+
+        height.max(1.0).min((Self::CHUNK_HEIGHT - 5) as f64)
+    }
+
+    fn get_base_continent_height(&self, world_x: f64, world_z: f64) -> f64 {
+        let continent = self.continent_noise.get([world_x * 0.001, world_z * 0.001]);
+        let mountain_influence = self.mountain_noise.get([world_x * 0.004, world_z * 0.004]);
+        (continent + 1.0) * 0.5 * 40.0 + 30.0 + mountain_influence.max(0.0) * 20.0
+    }
+
+    // Check if this location should have a river
+    // Rivers only form at low elevations, close to sea level
+    fn is_river(&self, world_x: f64, world_z: f64, terrain_height: f64) -> bool {
+        // Rivers only exist in a narrow band above sea level
+        let max_river_height = Self::SEA_LEVEL as f64 + 8.0;
+        if terrain_height < Self::SEA_LEVEL as f64 + 2.0 || terrain_height > max_river_height {
+            return false;
+        }
+
+        // River paths follow noise contours
+        let river1 = self.river_noise.get([world_x * 0.008, world_z * 0.008]);
+        let river2 = self.river_noise.get([world_x * 0.004 + 100.0, world_z * 0.004 + 100.0]);
+
+        // Rivers form where noise is close to zero (creates paths)
+        let river_threshold = 0.03;
+        river1.abs() < river_threshold || river2.abs() < river_threshold * 1.5
+    }
+
+    // Check for lakes in depressions - only at low elevations
+    fn is_lake(&self, world_x: f64, world_z: f64, terrain_height: f64) -> bool {
+        // Lakes only form slightly above sea level, not in mountains
+        let max_lake_height = Self::SEA_LEVEL as f64 + 10.0;
+        if terrain_height < Self::SEA_LEVEL as f64 || terrain_height > max_lake_height {
+            return false;
+        }
+
+        let lake = self.lake_noise.get([world_x * 0.02, world_z * 0.02]);
+        let depression = self.erosion_noise.get([world_x * 0.015, world_z * 0.015]);
+
+        // Lakes form in depressions where lake noise is high
+        lake > 0.6 && depression < -0.25
+    }
+
+    // Get the water surface level for rivers/lakes (they fill to a consistent level)
+    fn get_water_surface_level(&self, world_x: f64, world_z: f64, terrain_height: f64) -> Option<usize> {
+        if self.is_river(world_x, world_z, terrain_height) {
+            // Rivers fill to slightly above sea level
+            return Some(Self::SEA_LEVEL + 3);
+        }
+        if self.is_lake(world_x, world_z, terrain_height) {
+            // Lakes fill to a consistent level based on local depression
+            return Some(Self::SEA_LEVEL + 5);
+        }
+        None
     }
     
     fn generate_chunk_data(&self, chunk_x: i32, chunk_z: i32) -> Chunk {
         let mut blocks = vec![vec![vec![BlockType::Air; Self::CHUNK_SIZE]; Self::CHUNK_HEIGHT]; Self::CHUNK_SIZE];
-        
+
         for x in 0..Self::CHUNK_SIZE {
             for z in 0..Self::CHUNK_SIZE {
                 let world_x = (chunk_x * Self::CHUNK_SIZE as i32 + x as i32) as f64;
                 let world_z = (chunk_z * Self::CHUNK_SIZE as i32 + z as i32) as f64;
-                
+
                 let biome = self.get_biome(world_x, world_z);
-                let height = self.get_height_for_biome(world_x, world_z, biome);
-                
+                let raw_height = self.get_terrain_height(world_x, world_z);
+                let terrain_height = raw_height as usize;
+
+                // Check for water features (rivers, lakes) - they have a fixed water level
+                let water_surface = self.get_water_surface_level(world_x, world_z, raw_height);
+
+                // For rivers/lakes, if terrain is above water level, carve down to water level
+                // If terrain is below water level, it becomes the lake/river bed
+                let is_water_feature = water_surface.is_some();
+                let water_level = water_surface.unwrap_or(0);
+
+                // Determine solid ground height
+                let solid_height = if is_water_feature && terrain_height > water_level {
+                    // Carve terrain down to below water level for river/lake bed
+                    water_level.saturating_sub(2)
+                } else {
+                    terrain_height
+                };
+
                 // Generate cave system
-                let has_cave = self.generate_caves(world_x, world_z);
-                
+                let cave_blocks = self.generate_caves(world_x, world_z, solid_height);
+
                 for y in 0..Self::CHUNK_HEIGHT {
-                    if y <= height {
-                        // Check for caves
-                        if has_cave.contains(&y) {
-                            blocks[x][y][z] = BlockType::Air;
-                            continue;
-                        }
-                        
-                        // Generate ores in stone layer
-                        if y < height - 5 {
+                    // Bedrock at bottom
+                    if y == 0 {
+                        blocks[x][y][z] = BlockType::Stone;
+                        continue;
+                    }
+
+                    // Check for caves (but not too close to surface)
+                    if cave_blocks.contains(&y) && y < solid_height.saturating_sub(4) {
+                        blocks[x][y][z] = BlockType::Air;
+                        continue;
+                    }
+
+                    if y <= solid_height {
+                        // Generate ores in deep stone
+                        if y < solid_height.saturating_sub(8) {
                             if let Some(ore) = self.generate_ore(world_x, y as f64, world_z) {
                                 blocks[x][y][z] = ore;
                                 continue;
                             }
                         }
-                        
-                        // Generate terrain based on biome
-                        blocks[x][y][z] = if y == height {
-                            self.get_surface_block(biome, height, world_x, world_z)
-                        } else if y > height - 3 {
-                            self.get_subsurface_block(biome)
+
+                        // Terrain layers
+                        blocks[x][y][z] = if y == solid_height {
+                            self.get_surface_block(biome, solid_height, world_x, world_z, is_water_feature)
+                        } else if y > solid_height.saturating_sub(4) {
+                            self.get_subsurface_block(biome, solid_height, y)
                         } else {
                             BlockType::Stone
                         };
-                    } else if y <= Self::SEA_LEVEL && height < Self::SEA_LEVEL {
-                        blocks[x][y][z] = match biome {
-                            Biome::Tundra => BlockType::Ice,
-                            _ => BlockType::Water,
-                        };
+                    } else if is_water_feature && y <= water_level {
+                        // River/lake water - fills up to the fixed water level
+                        blocks[x][y][z] = if biome == Biome::Tundra { BlockType::Ice } else { BlockType::Water };
+                    } else if y <= Self::SEA_LEVEL && terrain_height < Self::SEA_LEVEL {
+                        // Ocean water
+                        blocks[x][y][z] = if biome == Biome::Tundra { BlockType::Ice } else { BlockType::Water };
                     } else {
                         blocks[x][y][z] = BlockType::Air;
                     }
                 }
             }
         }
-        
+
         Chunk {
             blocks,
             position: Vector3::new(chunk_x, 0, chunk_z),
@@ -254,87 +423,111 @@ impl World {
     }
     
     fn is_near_water(&self, world_x: f64, world_z: f64) -> bool {
-        // Check if this position is close to water level terrain
-        let current_height = self.get_height_for_biome(world_x, world_z, self.get_biome(world_x, world_z));
-        
+        let current_height = self.get_terrain_height(world_x, world_z);
+
         // Check surrounding positions for water
-        let check_radius = 3.0;
-        for dx in -2..=2 {
-            for dz in -2..=2 {
+        for dx in -3..=3 {
+            for dz in -3..=3 {
                 if dx == 0 && dz == 0 { continue; }
-                
+
                 let check_x = world_x + dx as f64;
                 let check_z = world_z + dz as f64;
-                let check_biome = self.get_biome(check_x, check_z);
-                let check_height = self.get_height_for_biome(check_x, check_z, check_biome);
-                
-                // If nearby terrain is below sea level, this could be a water edge
-                if check_height < Self::SEA_LEVEL && current_height >= Self::SEA_LEVEL {
-                    let distance = ((dx * dx + dz * dz) as f64).sqrt();
-                    if distance <= check_radius {
-                        return true;
-                    }
+                let check_height = self.get_terrain_height(check_x, check_z);
+
+                // Near ocean or river/lake
+                if check_height < Self::SEA_LEVEL as f64 && current_height >= Self::SEA_LEVEL as f64 {
+                    return true;
+                }
+                if self.is_river(check_x, check_z, check_height) || self.is_lake(check_x, check_z, check_height) {
+                    return true;
                 }
             }
         }
         false
     }
-    
-    fn get_surface_block(&self, biome: Biome, height: usize, world_x: f64, world_z: f64) -> BlockType {
-        // Check if this location should have sand due to water proximity
-        if height >= Self::SEA_LEVEL && height <= Self::SEA_LEVEL + 2 {
-            if self.is_near_water(world_x, world_z) {
-                return BlockType::Sand;
-            }
+
+    fn get_surface_block(&self, biome: Biome, height: usize, world_x: f64, world_z: f64, is_water_bottom: bool) -> BlockType {
+        // Underwater surfaces
+        if is_water_bottom || height < Self::SEA_LEVEL {
+            let depth_noise = self.detail_noise.get([world_x * 0.1, world_z * 0.1]);
+            return if depth_noise > 0.3 {
+                BlockType::Gravel
+            } else if depth_noise < -0.3 {
+                BlockType::Clay
+            } else {
+                BlockType::Sand
+            };
         }
-        
+
+        // Beach/shore areas
+        if height <= Self::BEACH_HEIGHT && self.is_near_water(world_x, world_z) {
+            return BlockType::Sand;
+        }
+
         match biome {
-            Biome::Plains | Biome::Forest => {
-                if height < Self::SEA_LEVEL {
-                    BlockType::Dirt
+            Biome::Plains | Biome::Forest => BlockType::Grass,
+            Biome::Desert => BlockType::Sand,
+            Biome::Mountains => {
+                if height > 85 {
+                    BlockType::Snow
+                } else if height > 70 {
+                    // Rocky mountain tops
+                    let rock_noise = self.detail_noise.get([world_x * 0.2, world_z * 0.2]);
+                    if rock_noise > 0.2 { BlockType::Stone } else { BlockType::Grass }
                 } else {
                     BlockType::Grass
                 }
             },
-            Biome::Desert => BlockType::Sand,
-            Biome::Mountains => {
-                if height > 45 {
-                    BlockType::Snow
-                } else {
-                    BlockType::Stone
-                }
+            Biome::Tundra => {
+                let snow_noise = self.detail_noise.get([world_x * 0.15, world_z * 0.15]);
+                if snow_noise > -0.2 { BlockType::Snow } else { BlockType::Grass }
             },
-            Biome::Tundra => BlockType::Snow,
             Biome::Ocean => BlockType::Sand,
         }
     }
-    
-    fn get_subsurface_block(&self, biome: Biome) -> BlockType {
+
+    fn get_subsurface_block(&self, biome: Biome, surface_height: usize, current_y: usize) -> BlockType {
+        let depth = surface_height - current_y;
+
         match biome {
-            Biome::Desert | Biome::Ocean => BlockType::Sand,
-            _ => BlockType::Dirt,
+            Biome::Desert | Biome::Ocean => {
+                if depth < 4 { BlockType::Sand } else { BlockType::Stone }
+            },
+            Biome::Mountains => {
+                if depth < 2 { BlockType::Dirt } else { BlockType::Stone }
+            },
+            _ => {
+                if depth < 4 { BlockType::Dirt } else { BlockType::Stone }
+            },
         }
     }
-    
-    fn generate_caves(&self, world_x: f64, world_z: f64) -> Vec<usize> {
+
+    fn generate_caves(&self, world_x: f64, world_z: f64, max_height: usize) -> Vec<usize> {
         let mut cave_levels = Vec::new();
-        
-        // Generate cave systems at different depths
-        for depth in [15, 25, 35] {
-            let cave_noise = self.cave_noise.get([world_x * 0.02, depth as f64 * 0.1, world_z * 0.02]);
-            let tunnel_noise = self.cave_noise.get([world_x * 0.05, depth as f64 * 0.05, world_z * 0.05]);
-            
-            if cave_noise > 0.4 || tunnel_noise > 0.6 {
-                // Add cave at this depth and nearby levels
-                for y_offset in -2..=2 {
-                    let cave_y = (depth as i32 + y_offset) as usize;
-                    if cave_y < Self::CHUNK_HEIGHT {
-                        cave_levels.push(cave_y);
-                    }
-                }
+
+        // Generate multi-level cave systems
+        for y in 5..max_height.saturating_sub(10) {
+            let y_f = y as f64;
+
+            // 3D cave noise for more organic shapes
+            let cave1 = self.cave_noise.get([world_x * 0.03, y_f * 0.03, world_z * 0.03]);
+            let cave2 = self.cave_noise.get([world_x * 0.06, y_f * 0.06, world_z * 0.06]);
+
+            // Larger caverns
+            let cavern = self.cave_noise.get([world_x * 0.015, y_f * 0.02, world_z * 0.015]);
+
+            // Depth factor - more caves deeper down
+            let depth_factor = 1.0 - (y as f64 / max_height as f64);
+            let cave_threshold = 0.55 - depth_factor * 0.1;
+
+            // Combine noise for cave generation
+            let combined = (cave1 + cave2 * 0.5) / 1.5;
+
+            if combined > cave_threshold || cavern > 0.65 {
+                cave_levels.push(y);
             }
         }
-        
+
         cave_levels
     }
     
@@ -889,28 +1082,31 @@ impl World {
     /// Find a valid spawn position on solid ground with clearance above
     pub fn find_spawn_position(&self) -> Point3<f32> {
         // Search in a spiral pattern from origin to find a good spawn spot
-        for radius in 0i32..30 {
+        // Prefer spawning on grass in plains/forest biomes
+        for radius in 0i32..50 {
             for dx in -radius..=radius {
                 for dz in -radius..=radius {
-                    // Only check the edge of each radius (spiral pattern)
                     if radius > 0 && dx.abs() < radius && dz.abs() < radius {
                         continue;
                     }
-                    
+
                     let x = dx;
                     let z = dz;
-                    
-                    // Find the highest solid, walkable block (search from top down)
+
+                    // Check biome - prefer non-ocean, non-mountain spawns
+                    let biome = self.get_biome(x as f64, z as f64);
+                    if biome == Biome::Ocean {
+                        continue;
+                    }
+
                     for y in (1..Self::CHUNK_HEIGHT as i32 - 4).rev() {
                         if let Some(block) = self.get_block(x, y, z) {
-                            // Must be solid ground (not air, water, trees, etc.)
-                            let is_solid_ground = matches!(block, 
-                                BlockType::Grass | BlockType::Dirt | BlockType::Stone | 
+                            let is_solid_ground = matches!(block,
+                                BlockType::Grass | BlockType::Dirt | BlockType::Stone |
                                 BlockType::Sand | BlockType::Snow | BlockType::Cobblestone
                             );
-                            
+
                             if is_solid_ground {
-                                // Check for 3 blocks of air above for player clearance
                                 let mut has_clearance = true;
                                 for check_y in 1..=3 {
                                     if let Some(above) = self.get_block(x, y + check_y, z) {
@@ -919,18 +1115,15 @@ impl World {
                                             break;
                                         }
                                     } else {
-                                        // Block not loaded, skip this position
                                         has_clearance = false;
                                         break;
                                     }
                                 }
-                                
-                                if has_clearance {
-                                    // Found valid spawn - position player standing on the block
-                                    // Ground block top is at y+1, player feet at y+1, eyes at y+1+1.8
+
+                                if has_clearance && y > Self::SEA_LEVEL as i32 {
                                     return Point3::new(
                                         x as f32 + 0.5,
-                                        y as f32 + 1.0 + 1.8, // Stand on top of block
+                                        y as f32 + 1.0 + 1.8,
                                         z as f32 + 0.5
                                     );
                                 }
@@ -940,8 +1133,8 @@ impl World {
                 }
             }
         }
-        
+
         // Fallback: spawn at a safe default position
-        Point3::new(0.5, 35.0, 0.5)
+        Point3::new(0.5, 60.0, 0.5)
     }
 }

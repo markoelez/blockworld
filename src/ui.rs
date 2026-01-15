@@ -283,6 +283,8 @@ impl UIRenderer {
             BlockType::Iron => 12.0,
             BlockType::Gold => 13.0,
             BlockType::Diamond => 14.0,
+            BlockType::Gravel => 15.0,
+            BlockType::Clay => 16.0,
             BlockType::Air | BlockType::Barrier => 0.0,
         }
     }
@@ -498,6 +500,177 @@ impl UIRenderer {
             9 => { add_line(0.0,h,w,h); add_line(w,h,w,h/2.0); add_line(0.0,h/2.0,w,h/2.0); add_line(0.0,0.0,0.0,h/2.0); add_line(w,0.0,0.0,0.0); }
             _ => {},
         }
+        (verts, inds)
+    }
+
+    /// Render a simple loading screen with progress bar and message
+    pub fn render_loading_screen(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        config: &wgpu::SurfaceConfiguration,
+        texture_bind_group: &wgpu::BindGroup,
+        progress: f32,
+        _message: &str
+    ) {
+        let mut vertices: Vec<UIVertex> = Vec::new();
+        let mut indices: Vec<u16> = Vec::new();
+
+        let _aspect = config.width as f32 / config.height as f32;
+
+        // Progress bar dimensions
+        let bar_width = 0.6;
+        let bar_height = 0.04;
+        let bar_x = -bar_width / 2.0;
+        let bar_y = -0.1;
+
+        // Background of progress bar (dark gray)
+        let bg_color = [0.2, 0.2, 0.2, 1.0];
+        let base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [bar_x, bar_y], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [bar_x + bar_width, bar_y], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [bar_x + bar_width, bar_y + bar_height], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [bar_x, bar_y + bar_height], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+        // Foreground of progress bar (green)
+        let fg_color = [0.2, 0.8, 0.3, 1.0];
+        let filled_width = bar_width * progress.clamp(0.0, 1.0);
+        let padding = 0.005;
+        let base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [bar_x + padding, bar_y + padding], tex_coords: [0.0, 0.0], color: fg_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [bar_x + padding + filled_width - 2.0 * padding, bar_y + padding], tex_coords: [0.0, 0.0], color: fg_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [bar_x + padding + filled_width - 2.0 * padding, bar_y + bar_height - padding], tex_coords: [0.0, 0.0], color: fg_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [bar_x + padding, bar_y + bar_height - padding], tex_coords: [0.0, 0.0], color: fg_color, use_texture: 0.0 });
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+        // Loading text using simple lines (draw "LOADING..." above bar)
+        let text_color = [1.0, 1.0, 1.0, 1.0];
+        let char_size = 0.05;
+        let char_spacing = char_size * 0.7;
+        let text_y = bar_y + bar_height + 0.05;
+
+        // Draw "LOADING" using line segments
+        let letters = ['L', 'O', 'A', 'D', 'I', 'N', 'G'];
+        let text_width = letters.len() as f32 * char_spacing;
+        let mut text_x = -text_width / 2.0;
+
+        for letter in letters {
+            let (letter_verts, letter_inds) = Self::get_letter_vertices(letter, text_x, text_y, char_size, text_color, vertices.len() as u16);
+            vertices.extend(letter_verts);
+            indices.extend(letter_inds);
+            text_x += char_spacing;
+        }
+
+        // Draw percentage text below bar
+        let percent = (progress * 100.0) as usize;
+        let percent_str = format!("{}", percent.min(100));
+        let digit_size = 0.03;
+        let digit_spacing = digit_size * 0.7;
+        let percent_width = percent_str.len() as f32 * digit_spacing + digit_size * 0.5; // +0.5 for %
+        let mut digit_x = -percent_width / 2.0;
+        let digit_y = bar_y - 0.06;
+
+        for c in percent_str.chars() {
+            if let Some(digit) = c.to_digit(10) {
+                let (digit_verts, digit_inds) = Self::get_digit_vertices(digit as usize, digit_x, digit_y, digit_size, text_color);
+                let base = vertices.len() as u16;
+                for v in digit_verts {
+                    vertices.push(v);
+                }
+                for i in digit_inds {
+                    indices.push(base + i);
+                }
+                digit_x += digit_spacing;
+            }
+        }
+
+        // Draw % symbol
+        let (percent_verts, percent_inds) = Self::get_letter_vertices('%', digit_x, digit_y, digit_size, text_color, vertices.len() as u16);
+        vertices.extend(percent_verts);
+        indices.extend(percent_inds);
+
+        // Create buffers and render
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Loading Screen Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Loading Screen Index Buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Loading UI Encoder"),
+        });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Loading UI Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            render_pass.set_pipeline(&self.ui_render_pipeline);
+            render_pass.set_bind_group(0, texture_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+        }
+
+        queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    fn get_letter_vertices(letter: char, x: f32, y: f32, size: f32, color: [f32; 4], base_index: u16) -> (Vec<UIVertex>, Vec<u16>) {
+        let h = size;
+        let w = size * 0.5;
+        let t = size * 0.1;
+        let mut verts = Vec::new();
+        let mut inds = Vec::new();
+        let mut idx = base_index;
+
+        let mut add_line = |x1: f32, y1: f32, x2: f32, y2: f32| {
+            let dx = x2 - x1;
+            let dy = y2 - y1;
+            let len = (dx * dx + dy * dy).sqrt().max(0.001);
+            let nx = -dy / len * t / 2.0;
+            let ny = dx / len * t / 2.0;
+            verts.push(UIVertex { position: [x + x1 + nx, y + y1 + ny], tex_coords: [0.0, 0.0], color, use_texture: 0.0 });
+            verts.push(UIVertex { position: [x + x2 + nx, y + y2 + ny], tex_coords: [0.0, 0.0], color, use_texture: 0.0 });
+            verts.push(UIVertex { position: [x + x2 - nx, y + y2 - ny], tex_coords: [0.0, 0.0], color, use_texture: 0.0 });
+            verts.push(UIVertex { position: [x + x1 - nx, y + y1 - ny], tex_coords: [0.0, 0.0], color, use_texture: 0.0 });
+            inds.extend_from_slice(&[idx, idx + 1, idx + 2, idx, idx + 2, idx + 3]);
+            idx += 4;
+        };
+
+        match letter {
+            'L' => { add_line(0.0, 0.0, 0.0, h); add_line(0.0, 0.0, w, 0.0); }
+            'O' => { add_line(0.0, 0.0, 0.0, h); add_line(0.0, h, w, h); add_line(w, h, w, 0.0); add_line(0.0, 0.0, w, 0.0); }
+            'A' => { add_line(0.0, 0.0, 0.0, h); add_line(0.0, h, w, h); add_line(w, h, w, 0.0); add_line(0.0, h / 2.0, w, h / 2.0); }
+            'D' => { add_line(0.0, 0.0, 0.0, h); add_line(0.0, h, w * 0.7, h); add_line(w * 0.7, h, w, h * 0.7); add_line(w, h * 0.7, w, h * 0.3); add_line(w, h * 0.3, w * 0.7, 0.0); add_line(w * 0.7, 0.0, 0.0, 0.0); }
+            'I' => { add_line(w / 2.0, 0.0, w / 2.0, h); add_line(0.0, 0.0, w, 0.0); add_line(0.0, h, w, h); }
+            'N' => { add_line(0.0, 0.0, 0.0, h); add_line(0.0, h, w, 0.0); add_line(w, 0.0, w, h); }
+            'G' => { add_line(0.0, 0.0, 0.0, h); add_line(0.0, h, w, h); add_line(w, h, w, h / 2.0); add_line(w / 2.0, h / 2.0, w, h / 2.0); add_line(0.0, 0.0, w, 0.0); }
+            '%' => {
+                // Small circles and diagonal
+                add_line(0.0, h * 0.8, w * 0.2, h * 0.8); add_line(0.0, h * 0.8, 0.0, h); add_line(0.0, h, w * 0.2, h); add_line(w * 0.2, h, w * 0.2, h * 0.8);
+                add_line(0.0, 0.0, w, h);
+                add_line(w * 0.8, 0.0, w, 0.0); add_line(w * 0.8, 0.0, w * 0.8, h * 0.2); add_line(w * 0.8, h * 0.2, w, h * 0.2); add_line(w, h * 0.2, w, 0.0);
+            }
+            _ => {}
+        }
+
         (verts, inds)
     }
 }

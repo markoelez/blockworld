@@ -73,6 +73,9 @@ struct PostProcessUniform {
     bloom_intensity: f32,
     saturation: f32,
     contrast: f32,
+    sun_screen_pos: [f32; 2],  // Sun position in screen space for god rays
+    god_ray_intensity: f32,
+    god_ray_decay: f32,
 }
 
 #[repr(C)]
@@ -1345,9 +1348,12 @@ impl Renderer {
             label: Some("Post Process Uniform Buffer"),
             contents: bytemuck::cast_slice(&[PostProcessUniform {
                 exposure: 1.2,
-                bloom_intensity: 0.15,
-                saturation: 1.05,
-                contrast: 1.0,
+                bloom_intensity: 0.2,
+                saturation: 1.08,
+                contrast: 1.05,
+                sun_screen_pos: [0.5, 0.3],
+                god_ray_intensity: 0.3,
+                god_ray_decay: 0.97,
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -1753,6 +1759,33 @@ impl Renderer {
             light_view_proj: light_view_proj.into(),
         };
         self.queue.write_buffer(&self.shadow_uniform_buffer, 0, bytemuck::cast_slice(&[shadow_uniform]));
+
+        // Calculate sun position in screen space for god rays
+        let sun_world_pos = Point3::new(
+            camera.position.x + sun_direction.x * 1000.0,
+            camera.position.y + sun_direction.y * 1000.0,
+            camera.position.z + sun_direction.z * 1000.0,
+        );
+        let sun_clip = view_proj * Vector4::new(sun_world_pos.x, sun_world_pos.y, sun_world_pos.z, 1.0);
+        let sun_screen_pos = if sun_clip.w > 0.0 {
+            let ndc_x = sun_clip.x / sun_clip.w;
+            let ndc_y = sun_clip.y / sun_clip.w;
+            [(ndc_x + 1.0) * 0.5, (1.0 - ndc_y) * 0.5]
+        } else {
+            [-10.0, -10.0] // Sun behind camera
+        };
+
+        // Update post-process uniform with sun position
+        let post_uniform = PostProcessUniform {
+            exposure: 1.3,
+            bloom_intensity: 0.3,
+            saturation: 1.1,
+            contrast: 1.05,
+            sun_screen_pos,
+            god_ray_intensity: 0.0,  // Disabled - requires depth texture refactoring
+            god_ray_decay: 0.97,
+        };
+        self.queue.write_buffer(&self.post_process_uniform_buffer, 0, bytemuck::cast_slice(&[post_uniform]));
         
         // Update outline buffers if a block is targeted
         if let Some((block_x, block_y, block_z)) = targeted_block {
@@ -2040,8 +2073,8 @@ impl Renderer {
     }
     
     fn update_chunk_meshes(&mut self, world: &mut World) {
-        // Limit chunks processed per frame to prevent stuttering
-        const MAX_CHUNKS_PER_FRAME: usize = 2;
+        // Limit chunks processed per frame to prevent stuttering (1 is smoother)
+        const MAX_CHUNKS_PER_FRAME: usize = 1;
 
         let loaded_chunks: HashMap<(i32, i32), ()> = world.get_loaded_chunks()
             .map(|chunk| ((chunk.position.x, chunk.position.z), ()))
@@ -2115,7 +2148,123 @@ impl Renderer {
             }
         }
     }
-    
+
+    /// Force generate all chunk meshes without rate limiting (for initial loading)
+    pub fn force_generate_all_meshes(&mut self, world: &mut World) {
+        let loaded_chunks: HashMap<(i32, i32), ()> = world.get_loaded_chunks()
+            .map(|chunk| ((chunk.position.x, chunk.position.z), ()))
+            .collect();
+
+        self.chunk_meshes_opaque.retain(|key, _| loaded_chunks.contains_key(key));
+        self.chunk_meshes_transparent.retain(|key, _| loaded_chunks.contains_key(key));
+
+        // Get ALL dirty/ungenerated chunks without limit
+        let dirty_chunks: Vec<(i32, i32)> = world.get_loaded_chunks()
+            .filter(|chunk| chunk.dirty || !chunk.mesh_generated)
+            .map(|chunk| (chunk.position.x, chunk.position.z))
+            .collect();
+
+        for (chunk_x, chunk_z) in &dirty_chunks {
+            let chunk_key = (*chunk_x, *chunk_z);
+            if let Some(chunk) = world.chunks.get(&chunk_key) {
+                let (opaque_vertices, opaque_indices, trans_vertices, trans_indices) = Self::create_vertices_for_chunk(world, chunk);
+
+                if !opaque_vertices.is_empty() {
+                    let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Chunk Opaque Vertex Buffer"),
+                        contents: bytemuck::cast_slice(&opaque_vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+
+                    let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Chunk Opaque Index Buffer"),
+                        contents: bytemuck::cast_slice(&opaque_indices),
+                        usage: wgpu::BufferUsages::INDEX,
+                    });
+
+                    let chunk_mesh = ChunkMesh {
+                        vertex_buffer,
+                        index_buffer,
+                        index_count: opaque_indices.len() as u32,
+                    };
+
+                    self.chunk_meshes_opaque.insert(chunk_key, chunk_mesh);
+                }
+
+                if !trans_vertices.is_empty() {
+                    let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Chunk Transparent Vertex Buffer"),
+                        contents: bytemuck::cast_slice(&trans_vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+
+                    let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Chunk Transparent Index Buffer"),
+                        contents: bytemuck::cast_slice(&trans_indices),
+                        usage: wgpu::BufferUsages::INDEX,
+                    });
+
+                    let chunk_mesh = ChunkMesh {
+                        vertex_buffer,
+                        index_buffer,
+                        index_count: trans_indices.len() as u32,
+                    };
+
+                    self.chunk_meshes_transparent.insert(chunk_key, chunk_mesh);
+                }
+            }
+        }
+
+        for (chunk_x, chunk_z) in &dirty_chunks {
+            let chunk_key = (*chunk_x, *chunk_z);
+            if let Some(chunk) = world.chunks.get_mut(&chunk_key) {
+                chunk.dirty = false;
+                chunk.mesh_generated = true;
+            }
+        }
+    }
+
+    /// Render a simple loading screen with progress
+    pub fn render_loading_screen(&mut self, progress: f32, message: &str) {
+        let output = match self.surface.get_current_texture() {
+            Ok(tex) => tex,
+            Err(_) => return,
+        };
+        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Loading Screen Encoder"),
+        });
+
+        // Clear to dark blue background
+        {
+            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Loading Clear Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.02,
+                            g: 0.02,
+                            b: 0.05,
+                            a: 1.0,
+                        }),
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+        }
+
+        self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Use UI renderer to draw loading text and progress bar
+        self.ui_renderer.render_loading_screen(&self.device, &self.queue, &view, &self.config, &self.texture_bind_group, progress, message);
+
+        output.present();
+    }
+
     fn create_vertices_for_chunk(world: &World, chunk: &crate::world::Chunk) -> (Vec<Vertex>, Vec<u16>, Vec<Vertex>, Vec<u16>) {
         let mut opaque_vertices = Vec::new();
         let mut opaque_indices = Vec::new();

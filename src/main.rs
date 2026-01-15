@@ -14,6 +14,15 @@ use camera::Camera;
 use renderer::Renderer;
 use ui::Inventory;
 
+#[derive(PartialEq, Clone, Copy)]
+enum LoadingStage {
+    Init,
+    FindSpawn,
+    LoadChunks,
+    GenerateMeshes,
+    Done,
+}
+
 fn set_cursor_captured(window: &Window, captured: bool) {
     if captured {
         if window.set_cursor_grab(CursorGrabMode::Locked).is_err() {
@@ -28,47 +37,42 @@ fn set_cursor_captured(window: &Window, captured: bool) {
 
 fn main() {
     env_logger::init();
-    
+
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title("BlockWorld")
         .build(&event_loop)
         .unwrap();
-    
+
     let mut renderer = pollster::block_on(Renderer::new(&window));
     let mut world = World::new();
     let mut camera = Camera::new(&renderer.config);
     let mut inventory = Inventory::new();
-    
-    // Find a valid spawn position on solid ground
-    let spawn_pos = world.find_spawn_position();
-    camera.set_spawn_position(spawn_pos);
-    
-    // Force load chunks around spawn position before first render
-    world.force_load_chunks_at(spawn_pos);
-    
+
     let mut last_frame = std::time::Instant::now();
-    let mut mouse_captured = true;
+    let mut mouse_captured = false;
     let mut targeted_block: Option<(i32, i32, i32)> = None;
-    
-    // Start with mouse captured
-    set_cursor_captured(&window, true);
-    
+    let mut loading_stage = LoadingStage::Init;
+    let mut spawn_pos = cgmath::Point3::new(0.0f32, 60.0, 0.0);
+    let mut is_loaded = false;
+
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Poll;
-        
+
         match event {
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => *control_flow = ControlFlow::Exit,
                 WindowEvent::KeyboardInput { input, .. } => {
+                    if !is_loaded {
+                        return; // Ignore input during loading
+                    }
                     if let Some(keycode) = input.virtual_keycode {
                         let is_pressed = input.state == ElementState::Pressed;
-                        
+
                         if is_pressed && keycode == VirtualKeyCode::Escape {
                             mouse_captured = !mouse_captured;
                             set_cursor_captured(&window, mouse_captured);
                         } else {
-                            // Handle inventory slot selection and block actions (only on press)
                             if is_pressed {
                                 match keycode {
                                     VirtualKeyCode::Key1 => inventory.select_slot(0),
@@ -102,7 +106,6 @@ fn main() {
                                     _ => {}
                                 }
                             }
-                            // Always pass keyboard events to camera for movement
                             camera.process_keyboard(keycode, is_pressed);
                         }
                     }
@@ -118,22 +121,62 @@ fn main() {
                 _ => {}
             },
             Event::MainEventsCleared => {
-                let now = std::time::Instant::now();
-                let dt = (now - last_frame).as_secs_f32();
-                last_frame = now;
-                
-                // Update world chunks based on camera position
-                world.update_loaded_chunks(camera.position);
-                camera.update(dt, &world);
-                targeted_block = camera.get_targeted_block(&world, 5.0);
-                
+                if is_loaded {
+                    // Normal game loop
+                    let now = std::time::Instant::now();
+                    let dt = (now - last_frame).as_secs_f32();
+                    last_frame = now;
+
+                    world.update_loaded_chunks(camera.position);
+                    camera.update(dt, &world);
+                    targeted_block = camera.get_targeted_block(&world, 5.0);
+                }
                 window.request_redraw();
             }
             Event::RedrawRequested(_) => {
-                renderer.render(&camera, &mut world, &inventory, targeted_block);
+                if is_loaded {
+                    renderer.render(&camera, &mut world, &inventory, targeted_block);
+                } else {
+                    // Process loading stages
+                    let (progress, message) = match loading_stage {
+                        LoadingStage::Init => (0.05, "Initializing..."),
+                        LoadingStage::FindSpawn => (0.15, "Finding spawn..."),
+                        LoadingStage::LoadChunks => (0.4, "Generating terrain..."),
+                        LoadingStage::GenerateMeshes => (0.75, "Building meshes..."),
+                        LoadingStage::Done => (1.0, "Ready!"),
+                    };
+
+                    renderer.render_loading_screen(progress, message);
+
+                    // Advance to next stage after rendering current one
+                    match loading_stage {
+                        LoadingStage::Init => {
+                            loading_stage = LoadingStage::FindSpawn;
+                        }
+                        LoadingStage::FindSpawn => {
+                            spawn_pos = world.find_spawn_position();
+                            camera.set_spawn_position(spawn_pos);
+                            loading_stage = LoadingStage::LoadChunks;
+                        }
+                        LoadingStage::LoadChunks => {
+                            world.force_load_all_chunks(spawn_pos);
+                            loading_stage = LoadingStage::GenerateMeshes;
+                        }
+                        LoadingStage::GenerateMeshes => {
+                            renderer.force_generate_all_meshes(&mut world);
+                            loading_stage = LoadingStage::Done;
+                        }
+                        LoadingStage::Done => {
+                            is_loaded = true;
+                            mouse_captured = true;
+                            set_cursor_captured(&window, true);
+                            last_frame = std::time::Instant::now();
+                        }
+                    }
+                }
             }
             Event::DeviceEvent { event: DeviceEvent::MouseMotion { delta }, .. } => {
-                if mouse_captured {
+                if mouse_captured && is_loaded {
                     camera.process_mouse(delta.0 as f32, delta.1 as f32);
                 }
             }

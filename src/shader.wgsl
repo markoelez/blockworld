@@ -83,35 +83,48 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
-// PCF shadow sampling for soft shadows
+// PCF shadow sampling with Poisson disk for soft shadows
 fn calculate_shadow(shadow_coord: vec3<f32>, normal: vec3<f32>, light_dir: vec3<f32>) -> f32 {
     // Calculate bias based on surface angle
     let NdotL = max(dot(normal, light_dir), 0.0);
-    let bias = max(0.005 * (1.0 - NdotL), 0.001);
+    let bias = max(0.003 * (1.0 - NdotL), 0.001);
 
     let texel_size = 1.0 / 2048.0;
-    var shadow = 0.0;
+    let spread = 2.5; // Shadow softness
 
     // Check if in shadow map bounds
     let in_bounds = shadow_coord.x >= 0.0 && shadow_coord.x <= 1.0 &&
                     shadow_coord.y >= 0.0 && shadow_coord.y <= 1.0 &&
                     shadow_coord.z >= 0.0 && shadow_coord.z <= 1.0;
 
-    // Sample shadow map with 3x3 PCF (smaller kernel to reduce texture samples)
     let sample_coord = clamp(shadow_coord.xy, vec2<f32>(0.001), vec2<f32>(0.999));
     let sample_depth = clamp(shadow_coord.z - bias, 0.0, 1.0);
+    let ts = texel_size * spread;
 
-    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(-texel_size, -texel_size), sample_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(0.0, -texel_size), sample_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(texel_size, -texel_size), sample_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(-texel_size, 0.0), sample_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord, sample_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(texel_size, 0.0), sample_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(-texel_size, texel_size), sample_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(0.0, texel_size), sample_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(texel_size, texel_size), sample_depth);
+    var shadow = 0.0;
 
-    shadow = shadow / 9.0;
+    // 16-tap Poisson disk PCF for smooth soft shadows (manually inlined)
+    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(-0.94201624, -0.39906216) * ts, sample_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(0.94558609, -0.76890725) * ts, sample_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(-0.094184101, -0.92938870) * ts, sample_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(0.34495938, 0.29387760) * ts, sample_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(-0.91588581, 0.45771432) * ts, sample_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(-0.81544232, -0.87912464) * ts, sample_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(-0.38277543, 0.27676845) * ts, sample_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(0.97484398, 0.75648379) * ts, sample_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(0.44323325, -0.97511554) * ts, sample_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(0.53742981, -0.47373420) * ts, sample_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(-0.26496911, -0.41893023) * ts, sample_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(0.79197514, 0.19090188) * ts, sample_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(-0.24188840, 0.99706507) * ts, sample_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(-0.81409955, 0.91437590) * ts, sample_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(0.19984126, 0.78641367) * ts, sample_depth);
+    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(0.14383161, -0.14100790) * ts, sample_depth);
+
+    shadow = shadow / 16.0;
+
+    // Soften shadow edges
+    shadow = smoothstep(0.0, 1.0, shadow);
 
     // If out of bounds, return fully lit
     return select(1.0, shadow, in_bounds);
@@ -182,6 +195,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         texture_color = vec4<f32>(0.4, 0.85, 0.92, 1.0);
         roughness = 0.2;
         metallic = 0.3;
+    } else if (bt == 15.0) {
+        // Gravel (gray with variation)
+        texture_color = vec4<f32>(0.55, 0.53, 0.5, 1.0);
+        roughness = 0.9;
+    } else if (bt == 16.0) {
+        // Clay (brownish-gray)
+        texture_color = vec4<f32>(0.6, 0.55, 0.5, 1.0);
+        roughness = 0.7;
     }
 
     // Crack effect
