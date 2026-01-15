@@ -319,32 +319,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Water depth passed via damage field
         let normalized_depth = clamp(in.damage / 8.0, 0.0, 1.0);
 
-        // Water color gradient: medium blue (surface) -> dark navy (deep)
-        let shallow_color = vec3<f32>(0.08, 0.25, 0.45);
-        let deep_color = vec3<f32>(0.0, 0.02, 0.08);
+        // Water color gradient: vibrant blue (surface) -> dark navy (deep)
+        let shallow_color = vec3<f32>(0.0, 0.2, 0.5);   // Vibrant dark blue
+        let deep_color = vec3<f32>(0.0, 0.02, 0.1);     // Very dark navy
         var water_color = mix(shallow_color, deep_color, normalized_depth);
 
-        // Fresnel reflection (stronger at grazing angles, weaker at depth)
+        // Minimal sky reflection (only at very grazing angles)
         let view_dot_normal = max(dot(V, N), 0.0);
-        let water_fresnel = pow(1.0 - view_dot_normal, 4.0);
-        let sky_reflect = mix(horizon_fog, zenith_fog, 0.4);
-        let reflection_strength = water_fresnel * (1.0 - normalized_depth * 0.8);
-        water_color = mix(water_color, sky_reflect, reflection_strength * 0.4);
+        let water_fresnel = pow(1.0 - view_dot_normal, 5.0);
+        let sky_reflect = mix(horizon_fog, zenith_fog, 0.4) * 0.5;  // Dimmed sky
+        water_color = mix(water_color, sky_reflect, water_fresnel * 0.15);
 
-        // Sun specular highlight (stronger at surface)
-        let sun_reflect = pow(max(dot(reflect(-L, N), V), 0.0), 128.0);
-        let specular_strength = 1.0 - normalized_depth * 0.9;
-        water_color += vec3<f32>(1.0, 0.95, 0.8) * sun_reflect * day_factor * specular_strength;
-
-        // Animated caustics (visible in shallow water only)
-        let caustic_uv = in.world_position.xz * 0.2 + u_uniform.time_of_day * vec2<f32>(0.3, 0.2);
-        let caustic = noise(caustic_uv) * 0.1 * (1.0 - normalized_depth);
-        water_color += vec3<f32>(0.1, 0.2, 0.3) * caustic * day_factor;
+        // Subtle sun specular highlight
+        let sun_reflect = pow(max(dot(reflect(-L, N), V), 0.0), 256.0);
+        water_color += vec3<f32>(1.0, 0.95, 0.8) * sun_reflect * day_factor * 0.5;
 
         lit_color = mix(fog_color, water_color, combined_fog);
 
-        // Alpha: transparent at surface (0.4), opaque at depth (0.95)
-        final_alpha = 0.4 + normalized_depth * 0.55;
+        // Higher alpha so water color is more visible
+        final_alpha = 0.7 + normalized_depth * 0.25;
     } else {
         final_alpha = select(1.0, 0.0, in.block_type < 0.0);
     }
