@@ -311,46 +311,40 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Apply aerial perspective
     lit_color = mix(fog_color, lit_color, combined_fog);
 
-    // Minecraft-style water rendering with depth-based coloring
+    // Water rendering with depth-based coloring
     var final_alpha = 1.0;
-    if bt == 5.0 {
-        // Water depth is passed via damage field (number of water blocks below)
-        let water_depth = in.damage;
-        let normalized_depth = clamp(water_depth / 8.0, 0.0, 1.0);  // Normalize to 0-1 over 8 blocks
+    let is_water = bt == 5.0;
 
-        // Water colors - Minecraft style blue gradient
-        let shallow_color = vec3<f32>(0.2, 0.6, 0.95);  // Bright blue at surface (depth 0)
-        let deep_color = vec3<f32>(0.0, 0.05, 0.18);    // Very dark navy at depth (depth 8+)
+    if is_water {
+        // Water depth passed via damage field
+        let normalized_depth = clamp(in.damage / 8.0, 0.0, 1.0);
 
-        // Blend color based on depth
+        // Water color gradient: bright blue (surface) -> dark navy (deep)
+        let shallow_color = vec3<f32>(0.2, 0.6, 0.95);
+        let deep_color = vec3<f32>(0.0, 0.05, 0.18);
         var water_color = mix(shallow_color, deep_color, normalized_depth);
 
-        // Fresnel effect - more reflection at grazing angles
-        let VdotN = max(dot(V, N), 0.0);
-        let fresnel = pow(1.0 - VdotN, 4.0);
-
-        // Sky reflection at surface (less at depth)
+        // Fresnel reflection (stronger at grazing angles, weaker at depth)
+        let view_dot_normal = max(dot(V, N), 0.0);
+        let water_fresnel = pow(1.0 - view_dot_normal, 4.0);
         let sky_reflect = mix(horizon_fog, zenith_fog, 0.4);
-        let reflection_strength = fresnel * (1.0 - normalized_depth * 0.8);
+        let reflection_strength = water_fresnel * (1.0 - normalized_depth * 0.8);
         water_color = mix(water_color, sky_reflect, reflection_strength * 0.4);
 
         // Sun specular highlight (stronger at surface)
         let sun_reflect = pow(max(dot(reflect(-L, N), V), 0.0), 128.0);
-        let specular_strength = (1.0 - normalized_depth * 0.9);
-        water_color = water_color + vec3<f32>(1.0, 0.95, 0.8) * sun_reflect * day_factor * specular_strength;
+        let specular_strength = 1.0 - normalized_depth * 0.9;
+        water_color += vec3<f32>(1.0, 0.95, 0.8) * sun_reflect * day_factor * specular_strength;
 
-        // Subtle animated caustics (only visible in shallow water)
+        // Animated caustics (visible in shallow water only)
         let caustic_uv = in.world_position.xz * 0.2 + u_uniform.time_of_day * vec2<f32>(0.3, 0.2);
         let caustic = noise(caustic_uv) * 0.1 * (1.0 - normalized_depth);
-        water_color = water_color + vec3<f32>(0.1, 0.2, 0.3) * caustic * day_factor;
+        water_color += vec3<f32>(0.1, 0.2, 0.3) * caustic * day_factor;
 
-        // Apply distance fog
         lit_color = mix(fog_color, water_color, combined_fog);
 
-        // Alpha increases with depth - deep water is more opaque, blocks vision to bottom
-        // Shallow (depth 0-2): transparent, can see bottom
-        // Deep (depth 8+): nearly opaque, can't see bottom
-        final_alpha = 0.4 + normalized_depth * 0.55;  // 0.4 at surface, 0.95 at max depth
+        // Alpha: transparent at surface (0.4), opaque at depth (0.95)
+        final_alpha = 0.4 + normalized_depth * 0.55;
     } else {
         final_alpha = select(1.0, 0.0, in.block_type < 0.0);
     }

@@ -1478,7 +1478,7 @@ impl Renderer {
                 god_ray_intensity: 0.3,
                 god_ray_decay: 0.97,
                 screen_size: [config.width as f32, config.height as f32],
-                ssao_intensity: 0.5,
+                ssao_intensity: 0.0,  // Disabled - was causing visual artifacts
                 ssao_radius: 0.5,
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
@@ -1919,7 +1919,7 @@ impl Renderer {
             god_ray_intensity: 0.4 * day_factor,  // Sun glow effect (scales with daytime)
             god_ray_decay: 0.97,
             screen_size: [self.config.width as f32, self.config.height as f32],
-            ssao_intensity: 0.6,
+            ssao_intensity: 0.0,  // Disabled - was causing visual artifacts
             ssao_radius: 0.5,
         };
         self.queue.write_buffer(&self.post_process_uniform_buffer, 0, bytemuck::cast_slice(&[post_uniform]));
@@ -2676,36 +2676,35 @@ impl Renderer {
                     }
 
                     let block_type = mask[start_x][start_z].unwrap();
-                    let is_transparent = Self::is_transparent(block_type);
+                    let is_water = block_type == BlockType::Water;
 
-                    // Don't merge water blocks - each needs individual depth value
-                    let skip_merge = block_type == BlockType::Water;
-
-                    // Find width (extend in X) - skip for water to preserve per-block depth
-                    let mut width = 1;
-                    if !skip_merge {
-                        while start_x + width < size
-                            && !visited[start_x + width][start_z]
-                            && mask[start_x + width][start_z] == Some(block_type)
+                    // Water blocks skip merging - each needs individual depth value
+                    let (width, depth) = if is_water {
+                        (1, 1)
+                    } else {
+                        // Find width (extend in X)
+                        let mut w = 1;
+                        while start_x + w < size
+                            && !visited[start_x + w][start_z]
+                            && mask[start_x + w][start_z] == Some(block_type)
                         {
-                            width += 1;
+                            w += 1;
                         }
-                    }
 
-                    // Find height (extend in Z) - skip for water to preserve per-block depth
-                    let mut depth = 1;
-                    if !skip_merge {
-                        'outer: while start_z + depth < size {
-                            for dx in 0..width {
-                                if visited[start_x + dx][start_z + depth]
-                                    || mask[start_x + dx][start_z + depth] != Some(block_type)
+                        // Find depth (extend in Z)
+                        let mut d = 1;
+                        'outer: while start_z + d < size {
+                            for dx in 0..w {
+                                if visited[start_x + dx][start_z + d]
+                                    || mask[start_x + dx][start_z + d] != Some(block_type)
                                 {
                                     break 'outer;
                                 }
                             }
-                            depth += 1;
+                            d += 1;
                         }
-                    }
+                        (w, d)
+                    };
 
                     // Mark as visited
                     for dx in 0..width {
@@ -2717,29 +2716,26 @@ impl Renderer {
                     // Generate merged quad
                     let world_x = chunk_x_offset + start_x as i32;
                     let world_z = chunk_z_offset + start_z as i32;
-
-                    // Calculate water depth for water blocks
-                    let water_depth = if block_type == BlockType::Water {
+                    let water_depth = if is_water {
                         world.get_water_depth(world_x, y as i32, world_z) as f32
                     } else {
                         0.0
                     };
 
-                    if is_transparent {
+                    // Water uses transparent buffer, everything else uses opaque
+                    if is_water {
                         Self::add_greedy_face_horizontal(
                             trans_vertices, trans_indices,
                             world_x as f32, y as f32, world_z as f32,
                             width as f32, depth as f32,
-                            face, block_type,
-                            water_depth,
+                            face, block_type, water_depth,
                         );
                     } else {
                         Self::add_greedy_face_horizontal(
                             opaque_vertices, opaque_indices,
                             world_x as f32, y as f32, world_z as f32,
                             width as f32, depth as f32,
-                            face, block_type,
-                            water_depth,
+                            face, block_type, water_depth,
                         );
                     }
                 }
@@ -2970,31 +2966,22 @@ impl Renderer {
         width: f32, depth: f32,
         face: Face,
         block_type: BlockType,
-        water_depth: f32,  // For water blocks: depth of water column below
+        water_depth: f32,  // For water blocks: depth of water column below (0.0 for non-water)
     ) {
         let base_index = vertices.len() as u16;
         let block_type_f = Self::block_type_to_float(block_type);
-        let normal = match face {
-            Face::Top => [0.0, 1.0, 0.0],
-            Face::Bottom => [0.0, -1.0, 0.0],
-            _ => [0.0, 1.0, 0.0],
-        };
-        let y_offset = if matches!(face, Face::Top) { 1.0 } else { 0.0 };
+        let is_top = matches!(face, Face::Top);
+        let normal = if is_top { [0.0, 1.0, 0.0] } else { [0.0, -1.0, 0.0] };
+        let y_offset = if is_top { 1.0 } else { 0.0 };
+        let y_pos = y + y_offset;
 
-        // For water, use damage field to store water depth
-        let damage_value = if block_type == BlockType::Water { water_depth } else { 0.0 };
+        // Water depth is passed via damage field (already 0.0 for non-water blocks)
+        vertices.push(Vertex { position: [x, y_pos, z], tex_coords: [0.0, 0.0], normal, block_type: block_type_f, damage: water_depth });
+        vertices.push(Vertex { position: [x + width, y_pos, z], tex_coords: [width, 0.0], normal, block_type: block_type_f, damage: water_depth });
+        vertices.push(Vertex { position: [x + width, y_pos, z + depth], tex_coords: [width, depth], normal, block_type: block_type_f, damage: water_depth });
+        vertices.push(Vertex { position: [x, y_pos, z + depth], tex_coords: [0.0, depth], normal, block_type: block_type_f, damage: water_depth });
 
-        // Tiled texture coordinates
-        vertices.push(Vertex { position: [x, y + y_offset, z], tex_coords: [0.0, 0.0], normal, block_type: block_type_f, damage: damage_value });
-        vertices.push(Vertex { position: [x + width, y + y_offset, z], tex_coords: [width, 0.0], normal, block_type: block_type_f, damage: damage_value });
-        vertices.push(Vertex { position: [x + width, y + y_offset, z + depth], tex_coords: [width, depth], normal, block_type: block_type_f, damage: damage_value });
-        vertices.push(Vertex { position: [x, y + y_offset, z + depth], tex_coords: [0.0, depth], normal, block_type: block_type_f, damage: damage_value });
-
-        let idx = if matches!(face, Face::Top) {
-            [0, 1, 2, 2, 3, 0]
-        } else {
-            [0, 3, 2, 2, 1, 0]
-        };
+        let idx = if is_top { [0, 1, 2, 2, 3, 0] } else { [0, 3, 2, 2, 1, 0] };
         for i in idx {
             indices.push(base_index + i);
         }

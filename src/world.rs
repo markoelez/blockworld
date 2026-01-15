@@ -296,91 +296,81 @@ impl World {
 
     // Check if neighboring terrain can contain water at the given level
     fn can_contain_water(&self, world_x: f64, world_z: f64, water_level: usize) -> bool {
-        // Check all 8 neighbors - water can only exist if neighbors are high enough to contain it
-        // or are also water features at the same level
-        for dx in -1i32..=1 {
-            for dz in -1i32..=1 {
-                if dx == 0 && dz == 0 {
-                    continue;
-                }
-                let nx = world_x + dx as f64;
-                let nz = world_z + dz as f64;
-                let neighbor_height = self.get_terrain_height(nx, nz);
+        // Check all 8 neighbors - water can only exist if neighbors are high enough or are water features
+        const NEIGHBOR_OFFSETS: [(i32, i32); 8] = [
+            (-1, -1), (-1, 0), (-1, 1),
+            (0, -1),           (0, 1),
+            (1, -1),  (1, 0),  (1, 1),
+        ];
 
-                // Neighbor must be at or above water level, or also be a water feature
-                let neighbor_is_water = self.is_river_raw(nx, nz) || self.is_lake_raw(nx, nz);
-                if neighbor_height < water_level as f64 && !neighbor_is_water {
-                    return false;
-                }
+        for (dx, dz) in NEIGHBOR_OFFSETS {
+            let nx = world_x + dx as f64;
+            let nz = world_z + dz as f64;
+            let neighbor_height = self.get_terrain_height(nx, nz);
+            let neighbor_is_water = self.is_river_raw(nx, nz) || self.is_lake_raw(nx, nz);
+
+            if neighbor_height < water_level as f64 && !neighbor_is_water {
+                return false;
             }
         }
         true
     }
 
-    // Raw river check without containment validation (to avoid recursion)
-    fn is_river_raw(&self, world_x: f64, world_z: f64) -> bool {
-        let terrain_height = self.get_terrain_height(world_x, world_z);
-        let max_river_height = Self::SEA_LEVEL as f64 + 8.0;
-        if terrain_height < Self::SEA_LEVEL as f64 + 2.0 || terrain_height > max_river_height {
-            return false;
-        }
+    // Height range constants for water features
+    const RIVER_MIN_HEIGHT: f64 = Self::SEA_LEVEL as f64 + 2.0;
+    const RIVER_MAX_HEIGHT: f64 = Self::SEA_LEVEL as f64 + 8.0;
+    const LAKE_MIN_HEIGHT: f64 = Self::SEA_LEVEL as f64;
+    const LAKE_MAX_HEIGHT: f64 = Self::SEA_LEVEL as f64 + 10.0;
+    const RIVER_THRESHOLD: f64 = 0.03;
 
-        let river1 = self.river_noise.get([world_x * 0.008, world_z * 0.008]);
-        let river2 = self.river_noise.get([world_x * 0.004 + 100.0, world_z * 0.004 + 100.0]);
-        let river_threshold = 0.03;
-        river1.abs() < river_threshold || river2.abs() < river_threshold * 1.5
+    // Check if terrain height is valid for a river
+    fn is_river_height_valid(terrain_height: f64) -> bool {
+        terrain_height >= Self::RIVER_MIN_HEIGHT && terrain_height <= Self::RIVER_MAX_HEIGHT
     }
 
-    // Raw lake check without containment validation (to avoid recursion)
-    fn is_lake_raw(&self, world_x: f64, world_z: f64) -> bool {
-        let terrain_height = self.get_terrain_height(world_x, world_z);
-        let max_lake_height = Self::SEA_LEVEL as f64 + 10.0;
-        if terrain_height < Self::SEA_LEVEL as f64 || terrain_height > max_lake_height {
-            return false;
-        }
+    // Check if terrain height is valid for a lake
+    fn is_lake_height_valid(terrain_height: f64) -> bool {
+        terrain_height >= Self::LAKE_MIN_HEIGHT && terrain_height <= Self::LAKE_MAX_HEIGHT
+    }
 
+    // Check river noise pattern (whether position lies on a river path)
+    fn is_river_path(&self, world_x: f64, world_z: f64) -> bool {
+        let river1 = self.river_noise.get([world_x * 0.008, world_z * 0.008]);
+        let river2 = self.river_noise.get([world_x * 0.004 + 100.0, world_z * 0.004 + 100.0]);
+        river1.abs() < Self::RIVER_THRESHOLD || river2.abs() < Self::RIVER_THRESHOLD * 1.5
+    }
+
+    // Check lake noise pattern (whether position lies in a lake depression)
+    fn is_lake_depression(&self, world_x: f64, world_z: f64) -> bool {
         let lake = self.lake_noise.get([world_x * 0.02, world_z * 0.02]);
         let depression = self.erosion_noise.get([world_x * 0.015, world_z * 0.015]);
         lake > 0.6 && depression < -0.25
     }
 
-    // Check if this location should have a river
-    // Rivers only form at low elevations, close to sea level
-    fn is_river(&self, world_x: f64, world_z: f64, terrain_height: f64) -> bool {
-        // Rivers only exist in a narrow band above sea level
-        let max_river_height = Self::SEA_LEVEL as f64 + 8.0;
-        if terrain_height < Self::SEA_LEVEL as f64 + 2.0 || terrain_height > max_river_height {
-            return false;
-        }
-
-        // River paths follow noise contours
-        let river1 = self.river_noise.get([world_x * 0.008, world_z * 0.008]);
-        let river2 = self.river_noise.get([world_x * 0.004 + 100.0, world_z * 0.004 + 100.0]);
-
-        // Rivers form where noise is close to zero (creates paths)
-        let river_threshold = 0.03;
-        let is_river_path = river1.abs() < river_threshold || river2.abs() < river_threshold * 1.5;
-
-        // Only allow river if surrounding terrain can contain it
-        is_river_path && self.can_contain_water(world_x, world_z, Self::SEA_LEVEL + 3)
+    // Raw river check without containment validation (to avoid recursion)
+    fn is_river_raw(&self, world_x: f64, world_z: f64) -> bool {
+        let terrain_height = self.get_terrain_height(world_x, world_z);
+        Self::is_river_height_valid(terrain_height) && self.is_river_path(world_x, world_z)
     }
 
-    // Check for lakes in depressions - only at low elevations
+    // Raw lake check without containment validation (to avoid recursion)
+    fn is_lake_raw(&self, world_x: f64, world_z: f64) -> bool {
+        let terrain_height = self.get_terrain_height(world_x, world_z);
+        Self::is_lake_height_valid(terrain_height) && self.is_lake_depression(world_x, world_z)
+    }
+
+    // Check if this location should have a river (with containment validation)
+    fn is_river(&self, world_x: f64, world_z: f64, terrain_height: f64) -> bool {
+        Self::is_river_height_valid(terrain_height)
+            && self.is_river_path(world_x, world_z)
+            && self.can_contain_water(world_x, world_z, Self::SEA_LEVEL + 3)
+    }
+
+    // Check for lakes in depressions (with containment validation)
     fn is_lake(&self, world_x: f64, world_z: f64, terrain_height: f64) -> bool {
-        // Lakes only form slightly above sea level, not in mountains
-        let max_lake_height = Self::SEA_LEVEL as f64 + 10.0;
-        if terrain_height < Self::SEA_LEVEL as f64 || terrain_height > max_lake_height {
-            return false;
-        }
-
-        let lake = self.lake_noise.get([world_x * 0.02, world_z * 0.02]);
-        let depression = self.erosion_noise.get([world_x * 0.015, world_z * 0.015]);
-
-        // Lakes form in depressions where lake noise is high
-        let is_lake_depression = lake > 0.6 && depression < -0.25;
-
-        // Only allow lake if surrounding terrain can contain it
-        is_lake_depression && self.can_contain_water(world_x, world_z, Self::SEA_LEVEL + 5)
+        Self::is_lake_height_valid(terrain_height)
+            && self.is_lake_depression(world_x, world_z)
+            && self.can_contain_water(world_x, world_z, Self::SEA_LEVEL + 5)
     }
 
     // Get the water surface level for rivers/lakes (they fill to a consistent level)
@@ -1135,20 +1125,12 @@ impl World {
         self.block_damage.get(&(x, y, z)).copied().unwrap_or(0.0)
     }
 
-    /// Calculate water depth at a position (how many water blocks below)
+    /// Calculate water depth at a position (count of water blocks below)
     pub fn get_water_depth(&self, x: i32, y: i32, z: i32) -> i32 {
-        let mut depth = 0;
-        let mut check_y = y - 1;
-        while check_y >= 0 {
-            match self.get_block(x, check_y, z) {
-                Some(BlockType::Water) => {
-                    depth += 1;
-                    check_y -= 1;
-                }
-                _ => break,
-            }
-        }
-        depth
+        (0..y)
+            .rev()
+            .take_while(|&check_y| self.get_block(x, check_y, z) == Some(BlockType::Water))
+            .count() as i32
     }
 
     /// Find a valid spawn position on solid ground with clearance above
