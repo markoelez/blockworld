@@ -319,9 +319,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Water depth passed via damage field
         let normalized_depth = clamp(in.damage / 8.0, 0.0, 1.0);
 
-        // Water color gradient: bright blue (surface) -> dark navy (deep)
-        let shallow_color = vec3<f32>(0.2, 0.6, 0.95);
-        let deep_color = vec3<f32>(0.0, 0.05, 0.18);
+        // Water color gradient: medium blue (surface) -> dark navy (deep)
+        let shallow_color = vec3<f32>(0.08, 0.25, 0.45);
+        let deep_color = vec3<f32>(0.0, 0.02, 0.08);
         var water_color = mix(shallow_color, deep_color, normalized_depth);
 
         // Fresnel reflection (stronger at grazing angles, weaker at depth)
