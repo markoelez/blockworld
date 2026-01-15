@@ -270,19 +270,46 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var lit_color = ambient * base_color + diffuse + spec;
 
-    // Atmospheric fog
+    // Enhanced atmospheric fog with aerial perspective
     let distance = length(in.world_position - u_uniform.camera_pos);
-    let fog_factor = exp(-pow(distance * u_uniform.fog_density, 1.5));
-
-    // Fog color based on time of day and view direction
     let view_dir = normalize(in.world_position - u_uniform.camera_pos);
     let height_factor = max(view_dir.y, 0.0);
-    // Night fog is bluish, not black
-    let zenith_fog = vec3<f32>(0.3, 0.5, 0.8) * day_factor + vec3<f32>(0.05, 0.06, 0.12) * night_factor;
-    let horizon_fog = vec3<f32>(0.7, 0.8, 0.95) * day_factor + vec3<f32>(0.08, 0.09, 0.15) * night_factor;
-    let fog_color = mix(horizon_fog, zenith_fog, height_factor);
 
-    lit_color = mix(fog_color, lit_color, fog_factor);
+    // Distance-based fog (exponential squared for softer falloff)
+    let fog_factor = exp(-pow(distance * u_uniform.fog_density, 1.8));
+
+    // Height-based fog (thicker at low altitudes)
+    let world_height = in.world_position.y;
+    let height_fog = exp(-max(world_height - 40.0, 0.0) * 0.02);
+
+    // Combined fog
+    let combined_fog = fog_factor * (0.7 + 0.3 * height_fog);
+
+    // Rayleigh-inspired fog color (blue tint increases with distance)
+    let rayleigh_scatter = vec3<f32>(0.15, 0.25, 0.45) * (1.0 - fog_factor) * day_factor;
+
+    // Base fog colors with time of day
+    let zenith_day = vec3<f32>(0.25, 0.45, 0.75);
+    let horizon_day = vec3<f32>(0.65, 0.78, 0.92);
+    let zenith_night = vec3<f32>(0.03, 0.04, 0.08);
+    let horizon_night = vec3<f32>(0.06, 0.07, 0.12);
+
+    // Sunset tint
+    let sunset_factor = smoothstep(-0.05, 0.25, u_uniform.sun_direction.y) * smoothstep(0.45, 0.15, u_uniform.sun_direction.y);
+    let sunset_horizon = vec3<f32>(0.85, 0.5, 0.3);
+
+    var zenith_fog = mix(zenith_night, zenith_day, day_factor);
+    var horizon_fog = mix(horizon_night, horizon_day, day_factor);
+    horizon_fog = mix(horizon_fog, sunset_horizon, sunset_factor * 0.6);
+
+    // Sun direction influence on fog color
+    let sun_influence = max(dot(view_dir, L), 0.0);
+    let sun_tint = vec3<f32>(1.1, 1.0, 0.9) * sun_influence * day_factor * 0.2;
+
+    let fog_color = mix(horizon_fog, zenith_fog, height_factor) + rayleigh_scatter + sun_tint;
+
+    // Apply aerial perspective
+    lit_color = mix(fog_color, lit_color, combined_fog);
 
     // Water transparency
     let alpha = select(1.0, 0.7, bt == 5.0);

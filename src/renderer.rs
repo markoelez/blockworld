@@ -6,6 +6,7 @@ use image::GenericImageView;
 use cgmath::SquareMatrix;
 use std::time::Instant;
 use cgmath::{Matrix4, Deg, Vector3, Vector4, InnerSpace, Matrix, Point3};
+use rayon::prelude::*;
 
 use crate::camera::Camera;
 use crate::world::{World, BlockType};
@@ -44,6 +45,95 @@ struct ChunkMesh {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
+}
+
+// Frustum plane representation: ax + by + cz + d = 0
+#[derive(Copy, Clone)]
+struct Plane {
+    normal: Vector3<f32>,
+    d: f32,
+}
+
+impl Plane {
+    fn distance_to_point(&self, point: Vector3<f32>) -> f32 {
+        self.normal.dot(point) + self.d
+    }
+}
+
+// View frustum for culling
+struct Frustum {
+    planes: [Plane; 6], // Left, Right, Bottom, Top, Near, Far
+}
+
+impl Frustum {
+    // Extract frustum planes from view-projection matrix
+    fn from_view_proj(vp: &Matrix4<f32>) -> Self {
+        let m = vp;
+
+        // Extract planes from columns of the transposed VP matrix
+        let left = Plane {
+            normal: Vector3::new(m[0][3] + m[0][0], m[1][3] + m[1][0], m[2][3] + m[2][0]),
+            d: m[3][3] + m[3][0],
+        };
+        let right = Plane {
+            normal: Vector3::new(m[0][3] - m[0][0], m[1][3] - m[1][0], m[2][3] - m[2][0]),
+            d: m[3][3] - m[3][0],
+        };
+        let bottom = Plane {
+            normal: Vector3::new(m[0][3] + m[0][1], m[1][3] + m[1][1], m[2][3] + m[2][1]),
+            d: m[3][3] + m[3][1],
+        };
+        let top = Plane {
+            normal: Vector3::new(m[0][3] - m[0][1], m[1][3] - m[1][1], m[2][3] - m[2][1]),
+            d: m[3][3] - m[3][1],
+        };
+        let near = Plane {
+            normal: Vector3::new(m[0][3] + m[0][2], m[1][3] + m[1][2], m[2][3] + m[2][2]),
+            d: m[3][3] + m[3][2],
+        };
+        let far = Plane {
+            normal: Vector3::new(m[0][3] - m[0][2], m[1][3] - m[1][2], m[2][3] - m[2][2]),
+            d: m[3][3] - m[3][2],
+        };
+
+        // Normalize planes
+        let normalize = |p: Plane| -> Plane {
+            let len = p.normal.magnitude();
+            Plane {
+                normal: p.normal / len,
+                d: p.d / len,
+            }
+        };
+
+        Frustum {
+            planes: [
+                normalize(left),
+                normalize(right),
+                normalize(bottom),
+                normalize(top),
+                normalize(near),
+                normalize(far),
+            ],
+        }
+    }
+
+    // Check if an AABB intersects the frustum
+    fn intersects_aabb(&self, min: Vector3<f32>, max: Vector3<f32>) -> bool {
+        for plane in &self.planes {
+            // Find the corner of the AABB that's most in the direction of the plane normal
+            let p = Vector3::new(
+                if plane.normal.x > 0.0 { max.x } else { min.x },
+                if plane.normal.y > 0.0 { max.y } else { min.y },
+                if plane.normal.z > 0.0 { max.z } else { min.z },
+            );
+
+            // If this corner is behind the plane, the AABB is outside
+            if plane.distance_to_point(p) < 0.0 {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 #[repr(C)]
@@ -1778,11 +1868,11 @@ impl Renderer {
         // Update post-process uniform with sun position
         let post_uniform = PostProcessUniform {
             exposure: 1.3,
-            bloom_intensity: 0.3,
-            saturation: 1.1,
-            contrast: 1.05,
+            bloom_intensity: 0.35,
+            saturation: 1.08,
+            contrast: 1.04,
             sun_screen_pos,
-            god_ray_intensity: 0.0,  // Disabled - requires depth texture refactoring
+            god_ray_intensity: 0.4 * day_factor,  // Sun glow effect (scales with daytime)
             god_ray_decay: 0.97,
         };
         self.queue.write_buffer(&self.post_process_uniform_buffer, 0, bytemuck::cast_slice(&[post_uniform]));
@@ -1864,20 +1954,59 @@ impl Renderer {
             render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
             render_pass.set_bind_group(2, &self.shadow_texture_bind_group, &[]);
 
-            // Render opaque chunks
-            for chunk_mesh in self.chunk_meshes_opaque.values() {
+            // Create frustum for culling
+            let frustum = Frustum::from_view_proj(&view_proj);
+            let chunk_size = World::CHUNK_SIZE as f32;
+            let chunk_height = World::CHUNK_HEIGHT as f32;
+
+            // Render opaque chunks with frustum culling
+            for (&(chunk_x, chunk_z), chunk_mesh) in &self.chunk_meshes_opaque {
                 if chunk_mesh.index_count > 0 {
+                    // Calculate chunk AABB
+                    let min = Vector3::new(
+                        chunk_x as f32 * chunk_size,
+                        0.0,
+                        chunk_z as f32 * chunk_size,
+                    );
+                    let max = Vector3::new(
+                        (chunk_x as f32 + 1.0) * chunk_size,
+                        chunk_height,
+                        (chunk_z as f32 + 1.0) * chunk_size,
+                    );
+
+                    // Skip if outside frustum
+                    if !frustum.intersects_aabb(min, max) {
+                        continue;
+                    }
+
                     render_pass.set_vertex_buffer(0, chunk_mesh.vertex_buffer.slice(..));
                     render_pass.set_index_buffer(chunk_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                     render_pass.draw_indexed(0..chunk_mesh.index_count, 0, 0..1);
                 }
             }
 
-            // Render transparent chunks
+            // Render transparent chunks with frustum culling
             render_pass.set_pipeline(&self.transparent_pipeline);
             render_pass.set_bind_group(2, &self.shadow_texture_bind_group, &[]);
-            for chunk_mesh in self.chunk_meshes_transparent.values() {
+            for (&(chunk_x, chunk_z), chunk_mesh) in &self.chunk_meshes_transparent {
                 if chunk_mesh.index_count > 0 {
+                    // Calculate chunk AABB
+                    let min = Vector3::new(
+                        chunk_x as f32 * chunk_size,
+                        0.0,
+                        chunk_z as f32 * chunk_size,
+                    );
+                    let max = Vector3::new(
+                        (chunk_x as f32 + 1.0) * chunk_size,
+                        chunk_height,
+                        (chunk_z as f32 + 1.0) * chunk_size,
+                    );
+
+                    // Skip if outside frustum
+                    if !frustum.intersects_aabb(min, max) {
+                        continue;
+                    }
+
                     render_pass.set_vertex_buffer(0, chunk_mesh.vertex_buffer.slice(..));
                     render_pass.set_index_buffer(chunk_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                     render_pass.draw_indexed(0..chunk_mesh.index_count, 0, 0..1);
@@ -2073,8 +2202,8 @@ impl Renderer {
     }
     
     fn update_chunk_meshes(&mut self, world: &mut World) {
-        // Limit chunks processed per frame to prevent stuttering (1 is smoother)
-        const MAX_CHUNKS_PER_FRAME: usize = 1;
+        // With parallel mesh generation, we can process more chunks per frame
+        const MAX_CHUNKS_PER_FRAME: usize = 4;
 
         let loaded_chunks: HashMap<(i32, i32), ()> = world.get_loaded_chunks()
             .map(|chunk| ((chunk.position.x, chunk.position.z), ()))
@@ -2086,60 +2215,73 @@ impl Renderer {
         let dirty_chunks: Vec<(i32, i32)> = world.get_loaded_chunks()
             .filter(|chunk| chunk.dirty || !chunk.mesh_generated)
             .map(|chunk| (chunk.position.x, chunk.position.z))
-            .take(MAX_CHUNKS_PER_FRAME)  // Only process a few per frame
+            .take(MAX_CHUNKS_PER_FRAME)
             .collect();
 
-        for (chunk_x, chunk_z) in &dirty_chunks {
-            let chunk_key = (*chunk_x, *chunk_z);
-            if let Some(chunk) = world.chunks.get(&chunk_key) {
-                let (opaque_vertices, opaque_indices, trans_vertices, trans_indices) = Self::create_vertices_for_chunk(world, chunk);
-                
-                if !opaque_vertices.is_empty() {
-                    let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Chunk Opaque Vertex Buffer"),
-                        contents: bytemuck::cast_slice(&opaque_vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
-                    
-                    let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Chunk Opaque Index Buffer"),
-                        contents: bytemuck::cast_slice(&opaque_indices),
-                        usage: wgpu::BufferUsages::INDEX,
-                    });
-                    
-                    let chunk_mesh = ChunkMesh {
-                        vertex_buffer,
-                        index_buffer,
-                        index_count: opaque_indices.len() as u32,
-                    };
-                    
-                    self.chunk_meshes_opaque.insert(chunk_key, chunk_mesh);
-                }
-                
-                if !trans_vertices.is_empty() {
-                    let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Chunk Transparent Vertex Buffer"),
-                        contents: bytemuck::cast_slice(&trans_vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
-                    
-                    let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Chunk Transparent Index Buffer"),
-                        contents: bytemuck::cast_slice(&trans_indices),
-                        usage: wgpu::BufferUsages::INDEX,
-                    });
-                    
-                    let chunk_mesh = ChunkMesh {
-                        vertex_buffer,
-                        index_buffer,
-                        index_count: trans_indices.len() as u32,
-                    };
-                    
-                    self.chunk_meshes_transparent.insert(chunk_key, chunk_mesh);
-                }
+        if dirty_chunks.is_empty() {
+            return;
+        }
+
+        // Generate mesh data in parallel (CPU-bound work)
+        let mesh_results: Vec<_> = dirty_chunks
+            .par_iter()
+            .filter_map(|&(chunk_x, chunk_z)| {
+                let chunk_key = (chunk_x, chunk_z);
+                world.chunks.get(&chunk_key).map(|chunk| {
+                    let (opaque_vertices, opaque_indices, trans_vertices, trans_indices) =
+                        Self::create_vertices_for_chunk(world, chunk);
+                    (chunk_key, opaque_vertices, opaque_indices, trans_vertices, trans_indices)
+                })
+            })
+            .collect();
+
+        // Create GPU buffers sequentially (GPU operations must be on main thread)
+        for (chunk_key, opaque_vertices, opaque_indices, trans_vertices, trans_indices) in mesh_results {
+            if !opaque_vertices.is_empty() {
+                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Chunk Opaque Vertex Buffer"),
+                    contents: bytemuck::cast_slice(&opaque_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+
+                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Chunk Opaque Index Buffer"),
+                    contents: bytemuck::cast_slice(&opaque_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+
+                let chunk_mesh = ChunkMesh {
+                    vertex_buffer,
+                    index_buffer,
+                    index_count: opaque_indices.len() as u32,
+                };
+
+                self.chunk_meshes_opaque.insert(chunk_key, chunk_mesh);
+            }
+
+            if !trans_vertices.is_empty() {
+                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Chunk Transparent Vertex Buffer"),
+                    contents: bytemuck::cast_slice(&trans_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+
+                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Chunk Transparent Index Buffer"),
+                    contents: bytemuck::cast_slice(&trans_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+
+                let chunk_mesh = ChunkMesh {
+                    vertex_buffer,
+                    index_buffer,
+                    index_count: trans_indices.len() as u32,
+                };
+
+                self.chunk_meshes_transparent.insert(chunk_key, chunk_mesh);
             }
         }
-        
+
         for (chunk_x, chunk_z) in &dirty_chunks {
             let chunk_key = (*chunk_x, *chunk_z);
             if let Some(chunk) = world.chunks.get_mut(&chunk_key) {
@@ -2150,6 +2292,7 @@ impl Renderer {
     }
 
     /// Force generate all chunk meshes without rate limiting (for initial loading)
+    /// Uses parallel processing for faster initial load
     pub fn force_generate_all_meshes(&mut self, world: &mut World) {
         let loaded_chunks: HashMap<(i32, i32), ()> = world.get_loaded_chunks()
             .map(|chunk| ((chunk.position.x, chunk.position.z), ()))
@@ -2164,54 +2307,67 @@ impl Renderer {
             .map(|chunk| (chunk.position.x, chunk.position.z))
             .collect();
 
-        for (chunk_x, chunk_z) in &dirty_chunks {
-            let chunk_key = (*chunk_x, *chunk_z);
-            if let Some(chunk) = world.chunks.get(&chunk_key) {
-                let (opaque_vertices, opaque_indices, trans_vertices, trans_indices) = Self::create_vertices_for_chunk(world, chunk);
+        if dirty_chunks.is_empty() {
+            return;
+        }
 
-                if !opaque_vertices.is_empty() {
-                    let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Chunk Opaque Vertex Buffer"),
-                        contents: bytemuck::cast_slice(&opaque_vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
+        // Generate mesh data in parallel (CPU-bound work)
+        let mesh_results: Vec<_> = dirty_chunks
+            .par_iter()
+            .filter_map(|&(chunk_x, chunk_z)| {
+                let chunk_key = (chunk_x, chunk_z);
+                world.chunks.get(&chunk_key).map(|chunk| {
+                    let (opaque_vertices, opaque_indices, trans_vertices, trans_indices) =
+                        Self::create_vertices_for_chunk(world, chunk);
+                    (chunk_key, opaque_vertices, opaque_indices, trans_vertices, trans_indices)
+                })
+            })
+            .collect();
 
-                    let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Chunk Opaque Index Buffer"),
-                        contents: bytemuck::cast_slice(&opaque_indices),
-                        usage: wgpu::BufferUsages::INDEX,
-                    });
+        // Create GPU buffers sequentially (GPU operations must be on main thread)
+        for (chunk_key, opaque_vertices, opaque_indices, trans_vertices, trans_indices) in mesh_results {
+            if !opaque_vertices.is_empty() {
+                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Chunk Opaque Vertex Buffer"),
+                    contents: bytemuck::cast_slice(&opaque_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
 
-                    let chunk_mesh = ChunkMesh {
-                        vertex_buffer,
-                        index_buffer,
-                        index_count: opaque_indices.len() as u32,
-                    };
+                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Chunk Opaque Index Buffer"),
+                    contents: bytemuck::cast_slice(&opaque_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
 
-                    self.chunk_meshes_opaque.insert(chunk_key, chunk_mesh);
-                }
+                let chunk_mesh = ChunkMesh {
+                    vertex_buffer,
+                    index_buffer,
+                    index_count: opaque_indices.len() as u32,
+                };
 
-                if !trans_vertices.is_empty() {
-                    let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Chunk Transparent Vertex Buffer"),
-                        contents: bytemuck::cast_slice(&trans_vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
+                self.chunk_meshes_opaque.insert(chunk_key, chunk_mesh);
+            }
 
-                    let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("Chunk Transparent Index Buffer"),
-                        contents: bytemuck::cast_slice(&trans_indices),
-                        usage: wgpu::BufferUsages::INDEX,
-                    });
+            if !trans_vertices.is_empty() {
+                let vertex_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Chunk Transparent Vertex Buffer"),
+                    contents: bytemuck::cast_slice(&trans_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
 
-                    let chunk_mesh = ChunkMesh {
-                        vertex_buffer,
-                        index_buffer,
-                        index_count: trans_indices.len() as u32,
-                    };
+                let index_buffer = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Chunk Transparent Index Buffer"),
+                    contents: bytemuck::cast_slice(&trans_indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
 
-                    self.chunk_meshes_transparent.insert(chunk_key, chunk_mesh);
-                }
+                let chunk_mesh = ChunkMesh {
+                    vertex_buffer,
+                    index_buffer,
+                    index_count: trans_indices.len() as u32,
+                };
+
+                self.chunk_meshes_transparent.insert(chunk_key, chunk_mesh);
             }
         }
 
