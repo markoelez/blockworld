@@ -7,6 +7,8 @@ const PLAYER_HEIGHT: f32 = 1.8;
 const PLAYER_WIDTH: f32 = 0.6;
 const GRAVITY: f32 = 32.0;
 const JUMP_VELOCITY: f32 = 10.0;
+const TERMINAL_VELOCITY: f32 = 50.0;  // Max fall speed
+const MAX_PHYSICS_DT: f32 = 0.016;    // Cap physics step to ~60fps equivalent
 
 pub struct Camera {
     pub position: Point3<f32>,
@@ -107,6 +109,18 @@ impl Camera {
             }
         }
 
+        // Sub-step physics if dt is too large to prevent tunneling through blocks
+        let mut remaining_dt = dt;
+        while remaining_dt > 0.0 {
+            let step_dt = remaining_dt.min(MAX_PHYSICS_DT);
+            self.physics_step(step_dt, world);
+            remaining_dt -= step_dt;
+        }
+
+        self.update_view_proj();
+    }
+
+    fn physics_step(&mut self, dt: f32, world: &World) {
         self.bob_time += dt;
         let yaw_rad = self.yaw.to_radians();
         
@@ -164,13 +178,16 @@ impl Camera {
         
         // Apply gravity
         self.velocity.y -= GRAVITY * dt;
-        
+
+        // Clamp to terminal velocity
+        self.velocity.y = self.velocity.y.max(-TERMINAL_VELOCITY).min(TERMINAL_VELOCITY);
+
         if is_in_water {
             self.velocity.y += GRAVITY * 0.9 * dt;
             self.velocity.y *= 0.95;
             self.velocity.y += (self.bob_time * 3.0).sin() * 0.05;
         }
-        
+
         // Jump if on ground or in water
         if self.jump_pressed && (self.on_ground || is_in_water) {
             self.velocity.y = if is_in_water { 5.0 } else { JUMP_VELOCITY };
@@ -329,9 +346,8 @@ impl Camera {
         }
         
         self.position = new_position;
-        self.update_view_proj();
     }
-    
+
     pub fn get_look_direction(&self) -> Vector3<f32> {
         let yaw_rad = self.yaw.to_radians();
         let pitch_rad = self.pitch.to_radians();

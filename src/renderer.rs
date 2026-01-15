@@ -5,11 +5,16 @@ use std::collections::HashMap;
 use image::GenericImageView;
 use cgmath::SquareMatrix;
 use std::time::Instant;
-use cgmath::{Matrix4, Deg, Vector3, Vector4, InnerSpace, Matrix};
+use cgmath::{Matrix4, Deg, Vector3, Vector4, InnerSpace, Matrix, Point3};
 
 use crate::camera::Camera;
 use crate::world::{World, BlockType};
 use crate::ui::{Inventory, UIRenderer};
+
+// Shadow map resolution
+const SHADOW_MAP_SIZE: u32 = 2048;
+// HDR format for main render target
+const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -47,7 +52,37 @@ struct Uniform {
     view_proj: [[f32; 4]; 4],
     inverse_view_proj: [[f32; 4]; 4],
     camera_pos: [f32; 3],
-    _pad: f32,
+    time_of_day: f32,
+    sun_direction: [f32; 3],
+    ambient_intensity: f32,
+    light_view_proj: [[f32; 4]; 4],
+    sun_color: [f32; 3],
+    fog_density: f32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct ShadowUniform {
+    light_view_proj: [[f32; 4]; 4],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct PostProcessUniform {
+    exposure: f32,
+    bloom_intensity: f32,
+    saturation: f32,
+    contrast: f32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct BloomUniform {
+    threshold: f32,
+    soft_threshold: f32,
+    blur_direction: [f32; 2],
+    texel_size: [f32; 2],
+    _padding: [f32; 2],
 }
 
 pub struct Renderer {
@@ -81,6 +116,32 @@ pub struct Renderer {
     last_render: Instant,
     held_item_vertex_buffer: wgpu::Buffer,
     held_item_index_buffer: wgpu::Buffer,
+    // HDR rendering
+    hdr_texture: wgpu::Texture,
+    hdr_texture_view: wgpu::TextureView,
+    hdr_depth_texture: wgpu::TextureView,
+    // Shadow mapping
+    shadow_pipeline: wgpu::RenderPipeline,
+    shadow_texture: wgpu::Texture,
+    shadow_texture_view: wgpu::TextureView,
+    shadow_sampler: wgpu::Sampler,
+    shadow_uniform_buffer: wgpu::Buffer,
+    shadow_bind_group: wgpu::BindGroup,
+    shadow_texture_bind_group: wgpu::BindGroup,
+    // Post-processing
+    post_process_pipeline: wgpu::RenderPipeline,
+    post_process_bind_group: wgpu::BindGroup,
+    post_process_uniform_buffer: wgpu::Buffer,
+    // Bloom
+    bloom_extract_pipeline: wgpu::RenderPipeline,
+    bloom_blur_pipeline: wgpu::RenderPipeline,
+    bloom_textures: [wgpu::Texture; 2],  // Ping-pong buffers
+    bloom_texture_views: [wgpu::TextureView; 2],
+    bloom_bind_groups: [wgpu::BindGroup; 3],  // Extract, blur H, blur V
+    bloom_uniform_buffer: wgpu::Buffer,
+    // Time tracking
+    start_time: Instant,
+    time_of_day: f32,
 }
 
 impl Renderer {
@@ -243,7 +304,23 @@ impl Renderer {
             label: Some("Held Item Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("held_item_shader.wgsl").into()),
         });
-        
+
+        // New shaders for realistic rendering
+        let shadow_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Shadow Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shadow_shader.wgsl").into()),
+        });
+
+        let post_process_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Post Process Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("post_process_shader.wgsl").into()),
+        });
+
+        let bloom_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Bloom Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("bloom_shader.wgsl").into()),
+        });
+
         let uniform_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
@@ -363,9 +440,146 @@ impl Renderer {
             label: Some("texture_bind_group_layout"),
         });
         
+        // Shadow map bind group layout
+        let shadow_uniform_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+            label: Some("shadow_uniform_bind_group_layout"),
+        });
+
+        // Shadow texture bind group layout (for sampling in main pass)
+        let shadow_texture_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Depth,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                    count: None,
+                },
+            ],
+            label: Some("shadow_texture_bind_group_layout"),
+        });
+
+        // Post-process bind group layout
+        let post_process_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+            label: Some("post_process_bind_group_layout"),
+        });
+
+        // Bloom bind group layout
+        let bloom_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+            label: Some("bloom_bind_group_layout"),
+        });
+
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[&uniform_bind_group_layout, &texture_bind_group_layout],
+            bind_group_layouts: &[&uniform_bind_group_layout, &texture_bind_group_layout, &shadow_texture_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        // Shadow pipeline layout
+        let shadow_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Shadow Pipeline Layout"),
+            bind_group_layouts: &[&shadow_uniform_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        // Post-process pipeline layout
+        let post_process_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Post Process Pipeline Layout"),
+            bind_group_layouts: &[&post_process_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        // Bloom pipeline layout
+        let bloom_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Bloom Pipeline Layout"),
+            bind_group_layouts: &[&bloom_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -398,7 +612,7 @@ impl Renderer {
                 module: &shader,
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
+                    format: HDR_FORMAT,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -453,7 +667,7 @@ impl Renderer {
                 module: &shader,
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
+                    format: HDR_FORMAT,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -509,7 +723,7 @@ impl Renderer {
                 module: &outline_shader,
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
+                    format: HDR_FORMAT,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -570,7 +784,7 @@ impl Renderer {
                 module: &sky_shader,
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
+                    format: HDR_FORMAT,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -627,7 +841,7 @@ impl Renderer {
                 module: &cloud_shader,
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
+                    format: HDR_FORMAT,
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -679,7 +893,7 @@ impl Renderer {
                 module: &held_item_shader,
                 entry_point: "fs_main",
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
+                    format: HDR_FORMAT,
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -711,7 +925,132 @@ impl Renderer {
             },
             multiview: None,
         });
-        
+
+        // Shadow pipeline (depth-only)
+        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Shadow Render Pipeline"),
+            layout: Some(&shadow_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shadow_shader,
+                entry_point: "vs_main",
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute { offset: 0, shader_location: 0, format: wgpu::VertexFormat::Float32x3 },
+                        wgpu::VertexAttribute { offset: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress, shader_location: 1, format: wgpu::VertexFormat::Float32x2 },
+                        wgpu::VertexAttribute { offset: std::mem::size_of::<[f32; 5]>() as wgpu::BufferAddress, shader_location: 2, format: wgpu::VertexFormat::Float32x3 },
+                        wgpu::VertexAttribute { offset: std::mem::size_of::<[f32; 8]>() as wgpu::BufferAddress, shader_location: 3, format: wgpu::VertexFormat::Float32 },
+                        wgpu::VertexAttribute { offset: std::mem::size_of::<[f32; 9]>() as wgpu::BufferAddress, shader_location: 4, format: wgpu::VertexFormat::Float32 },
+                    ],
+                }],
+            },
+            fragment: None,  // Depth-only, no fragment shader output
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: 2,
+                    slope_scale: 2.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
+        // Post-process pipeline (renders to swapchain)
+        let post_process_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Post Process Pipeline"),
+            layout: Some(&post_process_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &post_process_shader,
+                entry_point: "vs_main",
+                buffers: &[],  // Full-screen triangle generated in shader
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &post_process_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,  // Swapchain format
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
+        // Bloom extract pipeline
+        let bloom_extract_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Bloom Extract Pipeline"),
+            layout: Some(&bloom_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &bloom_shader,
+                entry_point: "vs_main",
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &bloom_shader,
+                entry_point: "fs_extract",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
+        // Bloom blur pipeline
+        let bloom_blur_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Bloom Blur Pipeline"),
+            layout: Some(&bloom_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &bloom_shader,
+                entry_point: "vs_main",
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &bloom_shader,
+                entry_point: "fs_blur",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+
         // Create outline buffers with proper size for triangulated edges
         let outline_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Outline Vertex Buffer"),
@@ -869,7 +1208,249 @@ impl Renderer {
         });
 
         let depth_texture = Self::create_depth_texture(&device, &config);
+
+        // Create HDR render target
+        let hdr_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("HDR Texture"),
+            size: wgpu::Extent3d {
+                width: config.width,
+                height: config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: HDR_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let hdr_texture_view = hdr_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let hdr_depth_texture = Self::create_depth_texture(&device, &config);
+
+        // Create shadow map
+        let shadow_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Shadow Map"),
+            size: wgpu::Extent3d {
+                width: SHADOW_MAP_SIZE,
+                height: SHADOW_MAP_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let shadow_texture_view = shadow_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Shadow Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+
+        // Create bloom textures (half resolution for efficiency)
+        let bloom_width = config.width / 2;
+        let bloom_height = config.height / 2;
+        let bloom_textures: [wgpu::Texture; 2] = [
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Bloom Texture 0"),
+                size: wgpu::Extent3d {
+                    width: bloom_width.max(1),
+                    height: bloom_height.max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: HDR_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            }),
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Bloom Texture 1"),
+                size: wgpu::Extent3d {
+                    width: bloom_width.max(1),
+                    height: bloom_height.max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: HDR_FORMAT,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            }),
+        ];
+        let bloom_texture_views: [wgpu::TextureView; 2] = [
+            bloom_textures[0].create_view(&wgpu::TextureViewDescriptor::default()),
+            bloom_textures[1].create_view(&wgpu::TextureViewDescriptor::default()),
+        ];
+
+        // Create linear sampler for post-processing
+        let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("Linear Sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        // Shadow uniform buffer
+        let shadow_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Shadow Uniform Buffer"),
+            size: std::mem::size_of::<ShadowUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &shadow_uniform_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: shadow_uniform_buffer.as_entire_binding(),
+                },
+            ],
+            label: Some("shadow_bind_group"),
+        });
+
+        let shadow_texture_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &shadow_texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&shadow_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+                },
+            ],
+            label: Some("shadow_texture_bind_group"),
+        });
+
+        // Post-process uniform buffer
+        let post_process_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Post Process Uniform Buffer"),
+            contents: bytemuck::cast_slice(&[PostProcessUniform {
+                exposure: 1.2,
+                bloom_intensity: 0.15,
+                saturation: 1.05,
+                contrast: 1.0,
+            }]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        let post_process_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &post_process_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&hdr_texture_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&bloom_texture_views[0]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&linear_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: post_process_uniform_buffer.as_entire_binding(),
+                },
+            ],
+            label: Some("post_process_bind_group"),
+        });
+
+        // Bloom uniform buffer
+        let bloom_uniform_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Bloom Uniform Buffer"),
+            contents: bytemuck::cast_slice(&[BloomUniform {
+                threshold: 0.8,
+                soft_threshold: 0.5,
+                blur_direction: [1.0, 0.0],
+                texel_size: [1.0 / bloom_width as f32, 1.0 / bloom_height as f32],
+                _padding: [0.0, 0.0],
+            }]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+
+        // Bloom bind groups
+        let bloom_bind_groups: [wgpu::BindGroup; 3] = [
+            // Extract pass - sample from HDR texture
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                layout: &bloom_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&hdr_texture_view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&linear_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: bloom_uniform_buffer.as_entire_binding(),
+                    },
+                ],
+                label: Some("bloom_extract_bind_group"),
+            }),
+            // Horizontal blur - sample from bloom texture 0
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                layout: &bloom_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&bloom_texture_views[0]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&linear_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: bloom_uniform_buffer.as_entire_binding(),
+                    },
+                ],
+                label: Some("bloom_blur_h_bind_group"),
+            }),
+            // Vertical blur - sample from bloom texture 1
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                layout: &bloom_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&bloom_texture_views[1]),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&linear_sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: bloom_uniform_buffer.as_entire_binding(),
+                    },
+                ],
+                label: Some("bloom_blur_v_bind_group"),
+            }),
+        ];
+
         let ui_renderer = UIRenderer::new(&device, &queue, &config, &texture_bind_group, &texture_bind_group_layout);
+        let start_time = Instant::now();
         
         // Create indices for up to 2 cubes (item + arm)
         let mut held_indices: Vec<u16> = vec![];
@@ -934,6 +1515,32 @@ impl Renderer {
             last_render,
             held_item_vertex_buffer,
             held_item_index_buffer,
+            // HDR rendering
+            hdr_texture,
+            hdr_texture_view,
+            hdr_depth_texture,
+            // Shadow mapping
+            shadow_pipeline,
+            shadow_texture,
+            shadow_texture_view,
+            shadow_sampler,
+            shadow_uniform_buffer,
+            shadow_bind_group,
+            shadow_texture_bind_group,
+            // Post-processing
+            post_process_pipeline,
+            post_process_bind_group,
+            post_process_uniform_buffer,
+            // Bloom
+            bloom_extract_pipeline,
+            bloom_blur_pipeline,
+            bloom_textures,
+            bloom_texture_views,
+            bloom_bind_groups,
+            bloom_uniform_buffer,
+            // Time tracking
+            start_time,
+            time_of_day: 0.25,  // Start at morning
         }
     }
     
@@ -1087,23 +1694,65 @@ impl Renderer {
         self.last_render = now;
         self.arm_swing_progress = (self.arm_swing_progress - dt * 4.0).max(0.0);
 
+        // Update time of day (full cycle every 10 minutes)
+        let elapsed = (now - self.start_time).as_secs_f32();
+        self.time_of_day = (elapsed / 600.0).fract();
+
+        // Calculate sun direction based on time of day
+        let sun_angle = self.time_of_day * 2.0 * std::f32::consts::PI - std::f32::consts::PI / 2.0;
+        let sun_direction = Vector3::new(
+            0.3 * sun_angle.cos(),
+            sun_angle.sin(),
+            0.5 * sun_angle.cos(),
+        ).normalize();
+
+        // Day/night factor for lighting
+        let day_factor = (sun_direction.y + 0.1).max(0.0).min(1.0) / 0.4;
+        // Much higher minimum ambient at night so terrain is always visible
+        let ambient_intensity = 0.35 + 0.25 * day_factor;
+
+        // Sun color changes with time of day
+        let sun_color = if sun_direction.y < 0.0 {
+            [0.1, 0.1, 0.2]  // Moonlight (blue-ish)
+        } else if sun_direction.y < 0.2 {
+            // Sunrise/sunset - orange
+            let t = sun_direction.y / 0.2;
+            [1.0 - 0.2 * t, 0.6 + 0.3 * t, 0.3 + 0.5 * t]
+        } else {
+            [1.0, 0.95, 0.85]  // Daylight
+        };
+
         // Update chunk meshes for loaded chunks
         self.update_chunk_meshes(world);
-        
+
         let output = self.surface.get_current_texture().unwrap();
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
-        
+
         let view_proj = camera.view_proj;
         let inverse_view_proj = view_proj.invert().unwrap();
-        
+
+        // Calculate light view-projection matrix for shadow mapping
+        let light_view_proj = Self::calculate_light_matrix(&camera.position, &sun_direction);
+
         let uniform = Uniform {
             view_proj: view_proj.into(),
             inverse_view_proj: inverse_view_proj.into(),
             camera_pos: [camera.position.x, camera.position.y, camera.position.z],
-            _pad: 0.0,
+            time_of_day: self.time_of_day,
+            sun_direction: [sun_direction.x, sun_direction.y, sun_direction.z],
+            ambient_intensity,
+            light_view_proj: light_view_proj.into(),
+            sun_color,
+            fog_density: 0.002,
         };
-        
+
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniform]));
+
+        // Update shadow uniform
+        let shadow_uniform = ShadowUniform {
+            light_view_proj: light_view_proj.into(),
+        };
+        self.queue.write_buffer(&self.shadow_uniform_buffer, 0, bytemuck::cast_slice(&[shadow_uniform]));
         
         // Update outline buffers if a block is targeted
         if let Some((block_x, block_y, block_z)) = targeted_block {
@@ -1113,12 +1762,41 @@ impl Renderer {
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
-        
+
+        // === SHADOW MAP PASS ===
+        {
+            let mut shadow_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Shadow Pass"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_texture_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: true,
+                    }),
+                    stencil_ops: None,
+                }),
+            });
+
+            shadow_pass.set_pipeline(&self.shadow_pipeline);
+            shadow_pass.set_bind_group(0, &self.shadow_bind_group, &[]);
+
+            // Render opaque chunks to shadow map
+            for chunk_mesh in self.chunk_meshes_opaque.values() {
+                if chunk_mesh.index_count > 0 {
+                    shadow_pass.set_vertex_buffer(0, chunk_mesh.vertex_buffer.slice(..));
+                    shadow_pass.set_index_buffer(chunk_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                    shadow_pass.draw_indexed(0..chunk_mesh.index_count, 0, 0..1);
+                }
+            }
+        }
+
+        // === MAIN HDR RENDER PASS ===
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Render Pass"),
+                label: Some("HDR Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view: &self.hdr_texture_view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -1131,7 +1809,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_texture,
+                    view: &self.hdr_depth_texture,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: true,
@@ -1146,12 +1824,13 @@ impl Renderer {
             render_pass.set_vertex_buffer(0, self.sky_vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.sky_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(0..self.sky_vertex_count, 0, 0..1);
-            
-            // Render terrain blocks
+
+            // Render terrain blocks with shadows
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
-            
+            render_pass.set_bind_group(2, &self.shadow_texture_bind_group, &[]);
+
             // Render opaque chunks
             for chunk_mesh in self.chunk_meshes_opaque.values() {
                 if chunk_mesh.index_count > 0 {
@@ -1163,6 +1842,7 @@ impl Renderer {
 
             // Render transparent chunks
             render_pass.set_pipeline(&self.transparent_pipeline);
+            render_pass.set_bind_group(2, &self.shadow_texture_bind_group, &[]);
             for chunk_mesh in self.chunk_meshes_transparent.values() {
                 if chunk_mesh.index_count > 0 {
                     render_pass.set_vertex_buffer(0, chunk_mesh.vertex_buffer.slice(..));
@@ -1170,8 +1850,8 @@ impl Renderer {
                     render_pass.draw_indexed(0..chunk_mesh.index_count, 0, 0..1);
                 }
             }
-            
-            // Render 3D clouds (Minecraft-style volumetric clouds)
+
+            // Render 3D clouds
             if self.cloud_index_count > 0 {
                 render_pass.set_pipeline(&self.cloud_pipeline);
                 render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
@@ -1179,21 +1859,21 @@ impl Renderer {
                 render_pass.set_index_buffer(self.cloud_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                 render_pass.draw_indexed(0..self.cloud_index_count, 0, 0..1);
             }
-            
+
             // Render selected block outline
             if targeted_block.is_some() {
                 render_pass.set_pipeline(&self.outline_pipeline);
                 render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
                 render_pass.set_vertex_buffer(0, self.outline_vertex_buffer.slice(..));
                 render_pass.set_index_buffer(self.outline_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-                render_pass.draw_indexed(0..72, 0, 0..1); // 12 edges * 6 indices each (2 triangles)
+                render_pass.draw_indexed(0..72, 0, 0..1);
             }
 
             let opt_block_type = inventory.get_selected_block();
             let vertices = Self::create_held_item_vertices(camera, opt_block_type, self.arm_swing_progress);
             self.queue.write_buffer(&self.held_item_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
 
-            // Use the held item pipeline for view-space rendering
+            // Render held item
             render_pass.set_pipeline(&self.held_item_pipeline);
             render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
@@ -1201,8 +1881,113 @@ impl Renderer {
             render_pass.set_index_buffer(self.held_item_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
             render_pass.draw_indexed(0..self.held_item_index_count, 0, 0..1);
         }
-        
-        // Render UI in a separate pass (no depth testing, renders on top)
+
+        // === BLOOM EXTRACT PASS ===
+        {
+            // Update bloom uniform for extract
+            self.queue.write_buffer(&self.bloom_uniform_buffer, 0, bytemuck::cast_slice(&[BloomUniform {
+                threshold: 0.8,
+                soft_threshold: 0.5,
+                blur_direction: [0.0, 0.0],
+                texel_size: [1.0 / (self.config.width / 2) as f32, 1.0 / (self.config.height / 2) as f32],
+                _padding: [0.0, 0.0],
+            }]));
+
+            let mut bloom_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Bloom Extract Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.bloom_texture_views[0],
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            bloom_pass.set_pipeline(&self.bloom_extract_pipeline);
+            bloom_pass.set_bind_group(0, &self.bloom_bind_groups[0], &[]);
+            bloom_pass.draw(0..3, 0..1);
+        }
+
+        // === BLOOM HORIZONTAL BLUR ===
+        {
+            self.queue.write_buffer(&self.bloom_uniform_buffer, 0, bytemuck::cast_slice(&[BloomUniform {
+                threshold: 0.8,
+                soft_threshold: 0.5,
+                blur_direction: [1.0, 0.0],
+                texel_size: [1.0 / (self.config.width / 2) as f32, 1.0 / (self.config.height / 2) as f32],
+                _padding: [0.0, 0.0],
+            }]));
+
+            let mut blur_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Bloom H Blur Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.bloom_texture_views[1],
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            blur_pass.set_pipeline(&self.bloom_blur_pipeline);
+            blur_pass.set_bind_group(0, &self.bloom_bind_groups[1], &[]);
+            blur_pass.draw(0..3, 0..1);
+        }
+
+        // === BLOOM VERTICAL BLUR ===
+        {
+            self.queue.write_buffer(&self.bloom_uniform_buffer, 0, bytemuck::cast_slice(&[BloomUniform {
+                threshold: 0.8,
+                soft_threshold: 0.5,
+                blur_direction: [0.0, 1.0],
+                texel_size: [1.0 / (self.config.width / 2) as f32, 1.0 / (self.config.height / 2) as f32],
+                _padding: [0.0, 0.0],
+            }]));
+
+            let mut blur_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Bloom V Blur Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.bloom_texture_views[0],
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            blur_pass.set_pipeline(&self.bloom_blur_pipeline);
+            blur_pass.set_bind_group(0, &self.bloom_bind_groups[2], &[]);
+            blur_pass.draw(0..3, 0..1);
+        }
+
+        // === POST-PROCESS PASS (tone mapping, bloom composite) ===
+        {
+            let mut post_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Post Process Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            post_pass.set_pipeline(&self.post_process_pipeline);
+            post_pass.set_bind_group(0, &self.post_process_bind_group, &[]);
+            post_pass.draw(0..3, 0..1);
+        }
+
+        // === UI PASS ===
         {
             let mut ui_render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("UI Render Pass"),
@@ -1210,34 +1995,67 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load, // Load existing content (don't clear)
+                        load: wgpu::LoadOp::Load,
                         store: true,
                     },
                 })],
-                depth_stencil_attachment: None, // No depth testing for UI
+                depth_stencil_attachment: None,
             });
-            
+
             self.ui_renderer.update_inventory_selection(&self.device, &inventory);
             self.ui_renderer.render(&mut ui_render_pass, &self.texture_bind_group);
         }
-        
+
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
     }
+
+    fn calculate_light_matrix(camera_pos: &cgmath::Point3<f32>, sun_direction: &Vector3<f32>) -> Matrix4<f32> {
+        // Calculate orthographic projection for directional light shadows
+        let shadow_distance = 100.0;
+        let light_pos = Point3::new(
+            camera_pos.x + sun_direction.x * shadow_distance,
+            camera_pos.y + sun_direction.y * shadow_distance,
+            camera_pos.z + sun_direction.z * shadow_distance,
+        );
+
+        let light_target = Point3::new(camera_pos.x, camera_pos.y, camera_pos.z);
+        let up = if sun_direction.y.abs() > 0.99 {
+            Vector3::new(0.0, 0.0, 1.0)
+        } else {
+            Vector3::new(0.0, 1.0, 0.0)
+        };
+
+        let light_view = Matrix4::look_at_rh(light_pos, light_target, up);
+
+        // Orthographic projection for the shadow map
+        let shadow_size = 80.0;
+        let light_proj = cgmath::ortho(
+            -shadow_size, shadow_size,
+            -shadow_size, shadow_size,
+            0.1, shadow_distance * 2.0,
+        );
+
+        light_proj * light_view
+    }
     
     fn update_chunk_meshes(&mut self, world: &mut World) {
+        // Limit chunks processed per frame to prevent stuttering
+        const MAX_CHUNKS_PER_FRAME: usize = 2;
+
         let loaded_chunks: HashMap<(i32, i32), ()> = world.get_loaded_chunks()
             .map(|chunk| ((chunk.position.x, chunk.position.z), ()))
             .collect();
-        
+
         self.chunk_meshes_opaque.retain(|key, _| loaded_chunks.contains_key(key));
         self.chunk_meshes_transparent.retain(|key, _| loaded_chunks.contains_key(key));
-        
+
         let dirty_chunks: Vec<(i32, i32)> = world.get_loaded_chunks()
             .filter(|chunk| chunk.dirty || !chunk.mesh_generated)
             .map(|chunk| (chunk.position.x, chunk.position.z))
+            .take(MAX_CHUNKS_PER_FRAME)  // Only process a few per frame
             .collect();
-        
+
         for (chunk_x, chunk_z) in &dirty_chunks {
             let chunk_key = (*chunk_x, *chunk_z);
             if let Some(chunk) = world.chunks.get(&chunk_key) {

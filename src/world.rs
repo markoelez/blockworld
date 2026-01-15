@@ -84,12 +84,9 @@ impl World {
     pub fn update_loaded_chunks(&mut self, player_pos: Point3<f32>) {
         let chunk_x = (player_pos.x as i32).div_euclid(Self::CHUNK_SIZE as i32);
         let chunk_z = (player_pos.z as i32).div_euclid(Self::CHUNK_SIZE as i32);
-        let new_player_chunk = (chunk_x, chunk_z);
-        
-        // Only update if player moved to a different chunk
-        if new_player_chunk != self.player_chunk_pos {
-            self.load_chunks_around(chunk_x, chunk_z);
-        }
+
+        // Always try to load chunks (progressively, limited per frame)
+        self.load_chunks_around(chunk_x, chunk_z);
     }
     
     /// Force load chunks around a position (used for initial spawn)
@@ -100,19 +97,30 @@ impl World {
     }
     
     fn load_chunks_around(&mut self, chunk_x: i32, chunk_z: i32) {
+        // Limit chunks loaded per frame to prevent stuttering
+        const MAX_CHUNKS_TO_LOAD: usize = 2;
+
         self.player_chunk_pos = (chunk_x, chunk_z);
-        
-        // Load chunks in render distance
+
+        // Find chunks that need loading, prioritizing closer chunks
+        let mut chunks_to_load: Vec<(i32, i32, i32)> = Vec::new(); // (x, z, distance_sq)
         for x in (chunk_x - self.render_distance)..=(chunk_x + self.render_distance) {
             for z in (chunk_z - self.render_distance)..=(chunk_z + self.render_distance) {
                 let chunk_key = (x, z);
                 if !self.chunks.contains_key(&chunk_key) {
-                    self.load_chunk(x, z);
+                    let dist_sq = (x - chunk_x).pow(2) + (z - chunk_z).pow(2);
+                    chunks_to_load.push((x, z, dist_sq));
                 }
             }
         }
-        
-        // Unload chunks outside render distance
+
+        // Sort by distance (closest first) and load only a few per frame
+        chunks_to_load.sort_by_key(|&(_, _, dist)| dist);
+        for (x, z, _) in chunks_to_load.into_iter().take(MAX_CHUNKS_TO_LOAD) {
+            self.load_chunk(x, z);
+        }
+
+        // Unload chunks outside render distance (this is fast, do all at once)
         let chunks_to_unload: Vec<(i32, i32)> = self.chunks.keys()
             .filter(|(x, z)| {
                 let dx = (*x - chunk_x).abs();
@@ -121,7 +129,7 @@ impl World {
             })
             .cloned()
             .collect();
-        
+
         for chunk_key in chunks_to_unload {
             self.chunks.remove(&chunk_key);
         }

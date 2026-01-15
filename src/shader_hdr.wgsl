@@ -1,4 +1,4 @@
-// Enhanced terrain shader with shadows, improved lighting, and HDR output
+// Enhanced terrain shader with shadows, PBR-style lighting, and HDR output
 
 struct VertexInput {
     @location(0) position: vec3<f32>,
@@ -33,7 +33,7 @@ struct Uniform {
 @group(0) @binding(0)
 var<uniform> u_uniform: Uniform;
 
-// Block textures
+// Textures
 @group(1) @binding(0)
 var t_grass: texture_2d<f32>;
 @group(1) @binding(1)
@@ -73,53 +73,46 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
     // Calculate shadow map coordinates
     let light_space_pos = u_uniform.light_view_proj * vec4<f32>(in.position, 1.0);
-    let ndc = light_space_pos.xyz / light_space_pos.w;
     out.shadow_coord = vec3<f32>(
-        ndc.x * 0.5 + 0.5,
-        ndc.y * -0.5 + 0.5,
-        ndc.z
+        light_space_pos.x * 0.5 + 0.5,
+        light_space_pos.y * -0.5 + 0.5,  // Flip Y for texture coords
+        light_space_pos.z
     );
 
     return out;
 }
 
 // PCF shadow sampling for soft shadows
-fn calculate_shadow(shadow_coord: vec3<f32>, normal: vec3<f32>, light_dir: vec3<f32>) -> f32 {
-    // Calculate bias based on surface angle
-    let NdotL = max(dot(normal, light_dir), 0.0);
-    let bias = max(0.005 * (1.0 - NdotL), 0.001);
-
-    let texel_size = 1.0 / 2048.0;
+fn calculate_shadow(shadow_coord: vec3<f32>, bias: f32) -> f32 {
+    let texel_size = 1.0 / 2048.0;  // Shadow map resolution
     var shadow = 0.0;
 
-    // Check if in shadow map bounds
-    let in_bounds = shadow_coord.x >= 0.0 && shadow_coord.x <= 1.0 &&
-                    shadow_coord.y >= 0.0 && shadow_coord.y <= 1.0 &&
-                    shadow_coord.z >= 0.0 && shadow_coord.z <= 1.0;
+    // 5x5 PCF kernel for very soft shadows
+    for (var x = -2; x <= 2; x++) {
+        for (var y = -2; y <= 2; y++) {
+            let offset = vec2<f32>(f32(x), f32(y)) * texel_size;
+            shadow += textureSampleCompare(
+                t_shadow,
+                s_shadow,
+                shadow_coord.xy + offset,
+                shadow_coord.z - bias
+            );
+        }
+    }
 
-    // Sample shadow map with 3x3 PCF (smaller kernel to reduce texture samples)
-    let sample_coord = clamp(shadow_coord.xy, vec2<f32>(0.001), vec2<f32>(0.999));
-    let sample_depth = clamp(shadow_coord.z - bias, 0.0, 1.0);
-
-    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(-texel_size, -texel_size), sample_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(0.0, -texel_size), sample_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(texel_size, -texel_size), sample_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(-texel_size, 0.0), sample_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord, sample_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(texel_size, 0.0), sample_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(-texel_size, texel_size), sample_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(0.0, texel_size), sample_depth);
-    shadow += textureSampleCompare(t_shadow, s_shadow, sample_coord + vec2<f32>(texel_size, texel_size), sample_depth);
-
-    shadow = shadow / 9.0;
-
-    // If out of bounds, return fully lit
-    return select(1.0, shadow, in_bounds);
+    return shadow / 25.0;
 }
 
-// Fresnel effect
+// Ambient occlusion from face direction (enhanced)
+fn calculate_ao(normal: vec3<f32>) -> f32 {
+    // Top faces get most light, sides less, bottom least
+    let up_factor = (normal.y + 1.0) * 0.5;
+    return 0.6 + 0.4 * up_factor;
+}
+
+// Fresnel effect for specular
 fn fresnel_schlick(cos_theta: f32, f0: f32) -> f32 {
-    return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+    return f0 + (1.0 - f0) * pow(1.0 - cos_theta, 5.0);
 }
 
 @fragment
@@ -138,10 +131,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Select texture based on block type
     let bt = floor(in.block_type + 0.5);
     var texture_color: vec4<f32>;
-    var roughness = 0.8;
-    var metallic = 0.0;
+    var roughness = 0.8;  // Default roughness
+    var metallic = 0.0;   // Default metallic
 
-    let is_top_face = step(0.9, in.normal.y);
+    let is_top_face = step(0.9, abs(in.normal.y));
     let grass_final = mix(grass_color, grass_top_color, is_top_face);
 
     texture_color = mix(grass_final, dirt_color, step(0.5, bt));
@@ -162,7 +155,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         roughness = 0.6;
     } else if (bt == 9.0) {
         texture_color = vec4<f32>(0.678, 0.847, 0.902, 1.0);
-        roughness = 0.1;
+        roughness = 0.1;  // Ice is smooth
         metallic = 0.1;
     } else if (bt == 10.0) {
         texture_color = vec4<f32>(0.5, 0.5, 0.5, 1.0);
@@ -173,15 +166,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     } else if (bt == 12.0) {
         texture_color = vec4<f32>(0.75, 0.75, 0.78, 1.0);
         roughness = 0.4;
-        metallic = 0.8;
+        metallic = 0.8;  // Iron is metallic
     } else if (bt == 13.0) {
         texture_color = vec4<f32>(1.0, 0.843, 0.0, 1.0);
         roughness = 0.3;
-        metallic = 1.0;
+        metallic = 1.0;  // Gold is very metallic
     } else if (bt == 14.0) {
         texture_color = vec4<f32>(0.4, 0.85, 0.92, 1.0);
         roughness = 0.2;
-        metallic = 0.3;
+        metallic = 0.3;  // Diamond has some reflectivity
     }
 
     // Crack effect
@@ -191,59 +184,49 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var base_color = texture_color.rgb;
 
-    // Lighting vectors
+    // Lighting calculations
     let N = normalize(in.normal);
     let L = normalize(u_uniform.sun_direction);
     let V = normalize(u_uniform.camera_pos - in.world_position);
     let H = normalize(L + V);
 
-    // Day/night factor
-    let day_factor = smoothstep(-0.1, 0.3, u_uniform.sun_direction.y);
-    let night_factor = 1.0 - day_factor;
-
-    // Diffuse lighting (Lambert with hemisphere)
+    // Diffuse lighting (Lambert)
     let NdotL = max(dot(N, L), 0.0);
 
-    // Moon lighting at night (opposite of sun)
-    let moon_dir = -L;
-    let NdotMoon = max(dot(N, moon_dir), 0.0);
-
-    // Specular lighting (Blinn-Phong)
+    // Specular lighting (Blinn-Phong with roughness)
     let NdotH = max(dot(N, H), 0.0);
     let shininess = (1.0 - roughness) * 128.0 + 1.0;
     let specular = pow(NdotH, shininess) * (1.0 - roughness) * 0.5;
 
-    // Fresnel
+    // Fresnel for specular
     let VdotH = max(dot(V, H), 0.0);
     let fresnel = fresnel_schlick(VdotH, mix(0.04, 0.8, metallic));
 
-    // Shadow
-    var shadow = calculate_shadow(in.shadow_coord, N, L);
-    // Only apply shadows during daytime
-    shadow = mix(1.0, shadow, day_factor);
+    // Shadow calculation
+    let shadow_bias = max(0.005 * (1.0 - NdotL), 0.001);
+    var shadow = 1.0;
 
-    // Ambient occlusion from face direction
-    let ao = 0.6 + 0.4 * ((N.y + 1.0) * 0.5);
+    // Only apply shadows if in valid shadow map range
+    if (in.shadow_coord.x >= 0.0 && in.shadow_coord.x <= 1.0 &&
+        in.shadow_coord.y >= 0.0 && in.shadow_coord.y <= 1.0 &&
+        in.shadow_coord.z >= 0.0 && in.shadow_coord.z <= 1.0) {
+        shadow = calculate_shadow(in.shadow_coord, shadow_bias);
+    }
 
-    // Hemisphere ambient (sky + ground) - brighter at night for visibility
-    let night_sky_color = vec3<f32>(0.15, 0.18, 0.25);  // Bluish night ambient
-    let day_sky_color = vec3<f32>(0.5, 0.6, 0.8);
-    let sky_color_ambient = mix(night_sky_color, day_sky_color, day_factor);
-    let sky_ambient = sky_color_ambient * u_uniform.ambient_intensity;
-    let ground_ambient = vec3<f32>(0.15, 0.12, 0.1) * u_uniform.ambient_intensity * 0.5;
+    // Ambient occlusion
+    let ao = calculate_ao(N);
+
+    // Day/night factor from sun direction
+    let day_factor = smoothstep(-0.1, 0.3, u_uniform.sun_direction.y);
+
+    // Ambient light (sky contribution)
+    let sky_ambient = vec3<f32>(0.4, 0.5, 0.7) * u_uniform.ambient_intensity;
+    let ground_ambient = vec3<f32>(0.15, 0.1, 0.05) * u_uniform.ambient_intensity * 0.3;
     let ambient = mix(ground_ambient, sky_ambient, (N.y + 1.0) * 0.5) * ao;
 
-    // Sun lighting
-    let sun_intensity = day_factor * 1.8;
-    let diffuse_sun = base_color * NdotL * u_uniform.sun_color * sun_intensity * shadow;
-
-    // Moon lighting at night (soft blue-white light)
-    let moon_color = vec3<f32>(0.6, 0.65, 0.8);
-    let moon_intensity = night_factor * 0.4;  // Moon is dimmer than sun
-    let diffuse_moon = base_color * NdotMoon * moon_color * moon_intensity;
-
-    let diffuse = diffuse_sun + diffuse_moon;
-
+    // Combine lighting
+    let sun_intensity = day_factor * 2.0;  // HDR sun intensity
+    let diffuse = base_color * NdotL * u_uniform.sun_color * sun_intensity * shadow;
     let spec_color = mix(vec3<f32>(1.0), base_color, metallic);
     let spec = spec_color * specular * fresnel * u_uniform.sun_color * sun_intensity * shadow;
 
@@ -253,12 +236,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let distance = length(in.world_position - u_uniform.camera_pos);
     let fog_factor = exp(-pow(distance * u_uniform.fog_density, 1.5));
 
-    // Fog color based on time of day and view direction
+    // Fog color based on view direction and time of day
     let view_dir = normalize(in.world_position - u_uniform.camera_pos);
     let height_factor = max(view_dir.y, 0.0);
-    // Night fog is bluish, not black
-    let zenith_fog = vec3<f32>(0.3, 0.5, 0.8) * day_factor + vec3<f32>(0.05, 0.06, 0.12) * night_factor;
-    let horizon_fog = vec3<f32>(0.7, 0.8, 0.95) * day_factor + vec3<f32>(0.08, 0.09, 0.15) * night_factor;
+    let zenith_fog = vec3<f32>(0.3, 0.5, 0.8) * day_factor + vec3<f32>(0.02, 0.02, 0.05) * (1.0 - day_factor);
+    let horizon_fog = vec3<f32>(0.7, 0.8, 0.95) * day_factor + vec3<f32>(0.05, 0.05, 0.1) * (1.0 - day_factor);
     let fog_color = mix(horizon_fog, zenith_fog, height_factor);
 
     lit_color = mix(fog_color, lit_color, fog_factor);

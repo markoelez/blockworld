@@ -10,7 +10,12 @@ struct Uniform {
     view_proj: mat4x4<f32>,
     inverse_view_proj: mat4x4<f32>,
     camera_pos: vec3<f32>,
-    pad: f32,
+    time_of_day: f32,
+    sun_direction: vec3<f32>,
+    ambient_intensity: f32,
+    light_view_proj: mat4x4<f32>,
+    sun_color: vec3<f32>,
+    fog_density: f32,
 }
 
 @group(0) @binding(0)
