@@ -233,22 +233,36 @@ impl World {
         let elevation = self.get_base_continent_height(world_x, world_z);
 
         // High elevation = mountains regardless of other factors
-        if elevation > 75.0 {
+        if elevation > 70.0 {
             return Biome::Mountains;
         }
 
         // Very low elevation = ocean
-        if elevation < 40.0 {
+        if elevation < 38.0 {
             return Biome::Ocean;
         }
 
         // Biome based on temperature and humidity
+        // Adjusted thresholds to make plains more common
         match (temperature, humidity) {
-            (t, _) if t < -0.35 => Biome::Tundra,
-            (t, h) if t > 0.35 && h < -0.1 => Biome::Desert,
-            (_, h) if h > 0.25 => Biome::Forest,
+            (t, _) if t < -0.5 => Biome::Tundra,
+            (t, h) if t > 0.5 && h < -0.2 => Biome::Desert,
+            (_, h) if h > 0.4 => Biome::Forest,
             _ => Biome::Plains,
         }
+    }
+
+    /// Check if a world position is a village location (for NPC spawning)
+    pub fn is_village_location(&self, world_x: f64, world_z: f64) -> bool {
+        // Spawn villagers in any non-ocean, non-mountain biome
+        let biome = self.get_biome(world_x, world_z);
+        if biome == Biome::Ocean || biome == Biome::Mountains {
+            return false;
+        }
+
+        // Use tree_noise for village detection - lowered threshold significantly
+        let structure_noise = self.tree_noise.get([world_x * 0.015, world_z * 0.015]);
+        structure_noise > 0.5  // Very common villages for testing
     }
 
     // Multi-octave terrain height calculation
@@ -291,7 +305,9 @@ impl World {
     fn get_base_continent_height(&self, world_x: f64, world_z: f64) -> f64 {
         let continent = self.continent_noise.get([world_x * 0.001, world_z * 0.001]);
         let mountain_influence = self.mountain_noise.get([world_x * 0.004, world_z * 0.004]);
-        (continent + 1.0) * 0.5 * 40.0 + 30.0 + mountain_influence.max(0.0) * 20.0
+        // Range: 35-65 base + 0-10 mountain = 35-75 total
+        // This gives mostly plains (40-80 range) with some ocean and mountains
+        (continent + 1.0) * 0.5 * 30.0 + 35.0 + mountain_influence.max(0.0) * 10.0
     }
 
     // Check if neighboring terrain can contain water at the given level

@@ -8,11 +8,13 @@ mod world;
 mod camera;
 mod renderer;
 mod ui;
+mod entity;
 
 use world::World;
 use camera::Camera;
 use renderer::Renderer;
 use ui::Inventory;
+use entity::EntityManager;
 
 #[derive(PartialEq, Clone, Copy)]
 enum LoadingStage {
@@ -48,6 +50,7 @@ fn main() {
     let mut world = World::new();
     let mut camera = Camera::new(&renderer.config);
     let mut inventory = Inventory::new();
+    let mut entity_manager = EntityManager::new();
 
     let mut last_frame = std::time::Instant::now();
     let mut mouse_captured = false;
@@ -129,13 +132,14 @@ fn main() {
 
                     world.update_loaded_chunks(camera.position);
                     camera.update(dt, &world);
+                    entity_manager.update(dt, &world, camera.position);
                     targeted_block = camera.get_targeted_block(&world, 5.0);
                 }
                 window.request_redraw();
             }
             Event::RedrawRequested(_) => {
                 if is_loaded {
-                    renderer.render(&camera, &mut world, &inventory, targeted_block);
+                    renderer.render(&camera, &mut world, &inventory, targeted_block, &entity_manager);
                 } else {
                     // Process loading stages
                     let (progress, message) = match loading_stage {

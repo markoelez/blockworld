@@ -203,12 +203,52 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Clay (brownish-gray)
         texture_color = vec4<f32>(0.6, 0.55, 0.5, 1.0);
         roughness = 0.7;
+    } else if (bt == 17.0) {
+        // Villager skin (tan)
+        texture_color = vec4<f32>(0.76, 0.60, 0.42, 1.0);
+        roughness = 0.6;
+    } else if (bt == 18.0) {
+        // Villager robe (brown)
+        texture_color = vec4<f32>(0.45, 0.30, 0.15, 1.0);
+        roughness = 0.7;
+    } else if (bt == 19.0) {
+        // Villager robe (green)
+        texture_color = vec4<f32>(0.2, 0.5, 0.25, 1.0);
+        roughness = 0.7;
+    } else if (bt == 20.0) {
+        // Villager robe (red)
+        texture_color = vec4<f32>(0.6, 0.15, 0.15, 1.0);
+        roughness = 0.7;
+    } else if (bt == 21.0) {
+        // Villager robe (blue)
+        texture_color = vec4<f32>(0.15, 0.25, 0.55, 1.0);
+        roughness = 0.7;
+    } else if (bt == 22.0) {
+        // Villager robe (purple)
+        texture_color = vec4<f32>(0.4, 0.2, 0.5, 1.0);
+        roughness = 0.7;
+    } else if (bt == 23.0) {
+        // Villager robe (white/gray)
+        texture_color = vec4<f32>(0.8, 0.78, 0.75, 1.0);
+        roughness = 0.7;
     }
 
-    // Crack effect
-    let crack_intensity = step(1.0 - in.damage, noise(in.tex_coords * 20.0)) * step(0.01, in.damage);
-    let crack_color = vec4<f32>(0.1, 0.1, 0.1, 1.0);
-    texture_color = mix(texture_color, crack_color, crack_intensity * 0.8);
+    // Crack effect - dark cracks that spread as damage increases
+    if in.damage > 0.01 {
+        // Multiple noise layers for more natural crack pattern
+        let crack1 = noise(in.tex_coords * 12.0);
+        let crack2 = noise(in.tex_coords * 24.0 + vec2<f32>(0.5, 0.5));
+        let crack3 = noise(in.tex_coords * 6.0 + vec2<f32>(0.3, 0.7));
+        let combined_noise = (crack1 + crack2 * 0.5 + crack3 * 0.3) / 1.8;
+
+        // Threshold decreases as damage increases, showing more cracks
+        let crack_threshold = 1.0 - in.damage;
+        let crack_intensity = step(crack_threshold, combined_noise);
+
+        // Dark crack color
+        let crack_color = vec4<f32>(0.08, 0.06, 0.04, 1.0);
+        texture_color = mix(texture_color, crack_color, crack_intensity * 0.9);
+    }
 
     var base_color = texture_color.rgb;
 

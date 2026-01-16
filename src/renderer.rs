@@ -11,6 +11,7 @@ use rayon::prelude::*;
 use crate::camera::Camera;
 use crate::world::{World, BlockType};
 use crate::ui::{Inventory, UIRenderer};
+use crate::entity::{EntityManager, Villager, VillagerState, VILLAGER_HEIGHT};
 
 // Shadow map resolution
 const SHADOW_MAP_SIZE: u32 = 2048;
@@ -238,6 +239,10 @@ pub struct Renderer {
     // Time tracking
     start_time: Instant,
     time_of_day: f32,
+    // Villager rendering
+    villager_vertex_buffer: wgpu::Buffer,
+    villager_index_buffer: wgpu::Buffer,
+    villager_index_count: u32,
 }
 
 impl Renderer {
@@ -1624,6 +1629,21 @@ impl Renderer {
         let arm_swing_progress = 0.0;
         let last_render = Instant::now();
 
+        // Villager buffers (allocate max for ~50 villagers * 6 parts * 24 vertices each)
+        let max_villager_vertices = 50 * 6 * 24;
+        let villager_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Villager Vertex Buffer"),
+            size: (max_villager_vertices * std::mem::size_of::<Vertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let villager_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Villager Index Buffer"),
+            size: (max_villager_vertices * 6 / 4 * std::mem::size_of::<u16>()) as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             surface,
             device,
@@ -1681,6 +1701,10 @@ impl Renderer {
             // Time tracking
             start_time,
             time_of_day: 0.25,  // Start at morning
+            // Villager rendering
+            villager_vertex_buffer,
+            villager_index_buffer,
+            villager_index_count: 0,
         }
     }
     
@@ -1828,7 +1852,7 @@ impl Renderer {
         }
     }
     
-    pub fn render(&mut self, camera: &Camera, world: &mut World, inventory: &Inventory, targeted_block: Option<(i32, i32, i32)>) {
+    pub fn render(&mut self, camera: &Camera, world: &mut World, inventory: &Inventory, targeted_block: Option<(i32, i32, i32)>, entity_manager: &EntityManager) {
         let now = Instant::now();
         let dt = (now - self.last_render).as_secs_f32();
         self.last_render = now;
@@ -1864,6 +1888,9 @@ impl Renderer {
 
         // Update chunk meshes for loaded chunks
         self.update_chunk_meshes(world);
+
+        // Update villager mesh
+        self.update_villager_mesh(entity_manager.get_villagers());
 
         let output = self.surface.get_current_texture().unwrap();
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1959,6 +1986,13 @@ impl Renderer {
                     shadow_pass.draw_indexed(0..chunk_mesh.index_count, 0, 0..1);
                 }
             }
+
+            // Render villagers to shadow map
+            if self.villager_index_count > 0 {
+                shadow_pass.set_vertex_buffer(0, self.villager_vertex_buffer.slice(..));
+                shadow_pass.set_index_buffer(self.villager_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                shadow_pass.draw_indexed(0..self.villager_index_count, 0, 0..1);
+            }
         }
 
         // === MAIN HDR RENDER PASS ===
@@ -2030,6 +2064,13 @@ impl Renderer {
                     render_pass.set_index_buffer(chunk_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                     render_pass.draw_indexed(0..chunk_mesh.index_count, 0, 0..1);
                 }
+            }
+
+            // Render villagers (after opaque terrain, before transparent)
+            if self.villager_index_count > 0 {
+                render_pass.set_vertex_buffer(0, self.villager_vertex_buffer.slice(..));
+                render_pass.set_index_buffer(self.villager_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed(0..self.villager_index_count, 0, 0..1);
             }
 
             // Render transparent chunks with frustum culling
@@ -3301,6 +3342,175 @@ impl Renderer {
 
     fn is_transparent(block_type: BlockType) -> bool {
         matches!(block_type, BlockType::Water)
+    }
+
+    // Generate a cube mesh for a villager body part
+    fn generate_villager_cube(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        pos: [f32; 3],
+        size: [f32; 3],
+        block_type: f32,
+        rotation: f32,  // Y-axis rotation in radians
+        pivot: [f32; 3],  // Pivot point for rotation
+    ) {
+        let base_idx = vertices.len() as u16;
+        let cos_r = rotation.cos();
+        let sin_r = rotation.sin();
+
+        let face_verts = [
+            TOP_FACE_VERTICES,
+            BOTTOM_FACE_VERTICES,
+            RIGHT_FACE_VERTICES,
+            LEFT_FACE_VERTICES,
+            FRONT_FACE_VERTICES,
+            BACK_FACE_VERTICES,
+        ];
+
+        for face_vert in face_verts.iter() {
+            for v in face_vert.iter() {
+                // Scale and offset the vertex
+                let mut local_x = (v.position[0] - 0.5) * size[0] + pos[0];
+                let local_y = (v.position[1] - 0.5) * size[1] + pos[1];
+                let mut local_z = (v.position[2] - 0.5) * size[2] + pos[2];
+
+                // Apply rotation around pivot
+                let rx = local_x - pivot[0];
+                let rz = local_z - pivot[2];
+                local_x = rx * cos_r - rz * sin_r + pivot[0];
+                local_z = rx * sin_r + rz * cos_r + pivot[2];
+
+                // Rotate normal as well
+                let mut norm_x = v.normal[0];
+                let mut norm_z = v.normal[2];
+                let new_norm_x = norm_x * cos_r - norm_z * sin_r;
+                let new_norm_z = norm_x * sin_r + norm_z * cos_r;
+                norm_x = new_norm_x;
+                norm_z = new_norm_z;
+
+                vertices.push(Vertex {
+                    position: [local_x, local_y, local_z],
+                    tex_coords: v.tex_coords,
+                    normal: [norm_x, v.normal[1], norm_z],
+                    block_type,
+                    damage: 0.0,
+                });
+            }
+        }
+
+        // Add indices for all 6 faces (4 vertices each, 2 triangles)
+        for face in 0..6 {
+            let face_base = base_idx + (face * 4) as u16;
+            indices.push(face_base);
+            indices.push(face_base + 1);
+            indices.push(face_base + 2);
+            indices.push(face_base);
+            indices.push(face_base + 2);
+            indices.push(face_base + 3);
+        }
+    }
+
+    pub fn update_villager_mesh(&mut self, villagers: &[Villager]) {
+        let mut vertices: Vec<Vertex> = Vec::new();
+        let mut indices: Vec<u16> = Vec::new();
+
+        for villager in villagers {
+            let x = villager.position.x;
+            let y = villager.position.y - VILLAGER_HEIGHT;  // Position is at eye level
+            let z = villager.position.z;
+            let yaw = villager.yaw.to_radians();
+            let pivot = [x, y, z];
+
+            // Animation swing for arms and legs
+            let swing = if villager.state == VillagerState::Walking {
+                (villager.animation_time * 8.0).sin() * 0.5
+            } else {
+                0.0
+            };
+
+            let robe = villager.robe_color;
+
+            // Head (skin color = 17.0)
+            Self::generate_villager_cube(
+                &mut vertices,
+                &mut indices,
+                [x, y + 1.6, z],
+                [0.5, 0.5, 0.5],
+                17.0,
+                yaw,
+                pivot,
+            );
+
+            // Body (robe color)
+            Self::generate_villager_cube(
+                &mut vertices,
+                &mut indices,
+                [x, y + 0.95, z],
+                [0.6, 0.8, 0.35],
+                robe,
+                yaw,
+                pivot,
+            );
+
+            // Left Arm (robe color)
+            let left_arm_swing = swing;
+            let left_arm_x = x - 0.375;
+            let left_arm_pivot = [left_arm_x, y + 1.15, z];
+            Self::generate_villager_cube(
+                &mut vertices,
+                &mut indices,
+                [left_arm_x, y + 0.85 + left_arm_swing * 0.15, z + left_arm_swing * 0.2],
+                [0.25, 0.6, 0.25],
+                robe,
+                yaw,
+                left_arm_pivot,
+            );
+
+            // Right Arm (robe color)
+            let right_arm_swing = -swing;
+            let right_arm_x = x + 0.375;
+            let right_arm_pivot = [right_arm_x, y + 1.15, z];
+            Self::generate_villager_cube(
+                &mut vertices,
+                &mut indices,
+                [right_arm_x, y + 0.85 + right_arm_swing * 0.15, z + right_arm_swing * 0.2],
+                [0.25, 0.6, 0.25],
+                robe,
+                yaw,
+                right_arm_pivot,
+            );
+
+            // Left Leg (robe color)
+            let left_leg_swing = -swing;
+            Self::generate_villager_cube(
+                &mut vertices,
+                &mut indices,
+                [x - 0.125, y + 0.35, z + left_leg_swing * 0.25],
+                [0.25, 0.7, 0.25],
+                robe,
+                yaw,
+                pivot,
+            );
+
+            // Right Leg (robe color)
+            let right_leg_swing = swing;
+            Self::generate_villager_cube(
+                &mut vertices,
+                &mut indices,
+                [x + 0.125, y + 0.35, z + right_leg_swing * 0.25],
+                [0.25, 0.7, 0.25],
+                robe,
+                yaw,
+                pivot,
+            );
+        }
+
+        self.villager_index_count = indices.len() as u32;
+
+        if !vertices.is_empty() {
+            self.queue.write_buffer(&self.villager_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+            self.queue.write_buffer(&self.villager_index_buffer, 0, bytemuck::cast_slice(&indices));
+        }
     }
 }
 
