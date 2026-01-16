@@ -326,32 +326,36 @@ impl World {
     }
 
     // Check if neighboring terrain can contain water at the given level
+    // Uses a larger radius to prevent floating water
     fn can_contain_water(&self, world_x: f64, world_z: f64, water_level: usize) -> bool {
-        // Check all 8 neighbors - water can only exist if neighbors are high enough or are water features
-        const NEIGHBOR_OFFSETS: [(i32, i32); 8] = [
-            (-1, -1), (-1, 0), (-1, 1),
-            (0, -1),           (0, 1),
-            (1, -1),  (1, 0),  (1, 1),
-        ];
+        // Check a wider area - water can only exist if ALL nearby terrain can hold it
+        const CHECK_RADIUS: i32 = 8;
 
-        for (dx, dz) in NEIGHBOR_OFFSETS {
-            let nx = world_x + dx as f64;
-            let nz = world_z + dz as f64;
-            let neighbor_height = self.get_terrain_height(nx, nz);
-            let neighbor_is_water = self.is_river_raw(nx, nz) || self.is_lake_raw(nx, nz);
+        for dx in -CHECK_RADIUS..=CHECK_RADIUS {
+            for dz in -CHECK_RADIUS..=CHECK_RADIUS {
+                if dx == 0 && dz == 0 { continue; }
 
-            if neighbor_height < water_level as f64 && !neighbor_is_water {
-                return false;
+                let nx = world_x + dx as f64;
+                let nz = world_z + dz as f64;
+                let neighbor_height = self.get_terrain_height(nx, nz);
+
+                // If any neighbor is lower than water level and not a water feature, water would flow out
+                if neighbor_height < water_level as f64 {
+                    let neighbor_is_water = self.is_river_raw(nx, nz) || self.is_lake_raw(nx, nz);
+                    if !neighbor_is_water {
+                        return false;
+                    }
+                }
             }
         }
         true
     }
 
-    // Height range constants for water features
-    const RIVER_MIN_HEIGHT: f64 = Self::SEA_LEVEL as f64 + 2.0;
-    const RIVER_MAX_HEIGHT: f64 = Self::SEA_LEVEL as f64 + 8.0;
-    const LAKE_MIN_HEIGHT: f64 = Self::SEA_LEVEL as f64;
-    const LAKE_MAX_HEIGHT: f64 = Self::SEA_LEVEL as f64 + 10.0;
+    // Height range constants for water features - keep close to sea level for realism
+    const RIVER_MIN_HEIGHT: f64 = Self::SEA_LEVEL as f64 - 2.0;
+    const RIVER_MAX_HEIGHT: f64 = Self::SEA_LEVEL as f64 + 2.0;
+    const LAKE_MIN_HEIGHT: f64 = Self::SEA_LEVEL as f64 - 3.0;
+    const LAKE_MAX_HEIGHT: f64 = Self::SEA_LEVEL as f64 + 1.0;
     const RIVER_THRESHOLD: f64 = 0.03;
 
     // Check if terrain height is valid for a river
@@ -394,25 +398,23 @@ impl World {
     fn is_river(&self, world_x: f64, world_z: f64, terrain_height: f64) -> bool {
         Self::is_river_height_valid(terrain_height)
             && self.is_river_path(world_x, world_z)
-            && self.can_contain_water(world_x, world_z, Self::SEA_LEVEL + 3)
+            && self.can_contain_water(world_x, world_z, Self::SEA_LEVEL)
     }
 
     // Check for lakes in depressions (with containment validation)
     fn is_lake(&self, world_x: f64, world_z: f64, terrain_height: f64) -> bool {
         Self::is_lake_height_valid(terrain_height)
             && self.is_lake_depression(world_x, world_z)
-            && self.can_contain_water(world_x, world_z, Self::SEA_LEVEL + 5)
+            && self.can_contain_water(world_x, world_z, Self::SEA_LEVEL)
     }
 
-    // Get the water surface level for rivers/lakes (they fill to a consistent level)
+    // Get the water surface level for rivers/lakes (they fill to sea level)
     fn get_water_surface_level(&self, world_x: f64, world_z: f64, terrain_height: f64) -> Option<usize> {
         if self.is_river(world_x, world_z, terrain_height) {
-            // Rivers fill to slightly above sea level
-            return Some(Self::SEA_LEVEL + 3);
+            return Some(Self::SEA_LEVEL);
         }
         if self.is_lake(world_x, world_z, terrain_height) {
-            // Lakes fill to a consistent level based on local depression
-            return Some(Self::SEA_LEVEL + 5);
+            return Some(Self::SEA_LEVEL);
         }
         None
     }
