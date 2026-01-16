@@ -25,6 +25,14 @@ pub enum BlockType {
     Clay,
     Torch,  // Emits light
     Chest,  // Storage container
+    // New block types for world generation
+    Lava,              // Emissive, damages player
+    MobSpawner,        // Dungeon spawner block
+    Rail,              // Mineshaft decoration
+    Planks,            // Wooden planks
+    Fence,             // Support beams
+    Brick,             // Stone brick
+    MossyCobblestone,  // Aged dungeon walls
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -71,6 +79,12 @@ pub struct World {
     humidity_noise: Perlin,
     cave_noise: Perlin,
     ore_noise: Perlin,
+    // New noise for world generation enhancements
+    lava_noise: Perlin,           // Lava pool locations
+    ore_vein_noise: Perlin,       // Ore vein shapes
+    dungeon_noise: Perlin,        // Dungeon placement
+    mineshaft_noise: Perlin,      // Mineshaft corridors
+    cavern_noise: Perlin,         // Large cavern shapes
     render_distance: i32,
     player_chunk_pos: (i32, i32),
     block_damage: HashMap<(i32, i32, i32), f32>,
@@ -109,6 +123,12 @@ impl World {
             humidity_noise: Perlin::new(seed.wrapping_add(11)),
             cave_noise: Perlin::new(seed.wrapping_add(12)),
             ore_noise: Perlin::new(seed.wrapping_add(13)),
+            // New noise for world generation enhancements
+            lava_noise: Perlin::new(seed.wrapping_add(14)),
+            ore_vein_noise: Perlin::new(seed.wrapping_add(15)),
+            dungeon_noise: Perlin::new(seed.wrapping_add(16)),
+            mineshaft_noise: Perlin::new(seed.wrapping_add(17)),
+            cavern_noise: Perlin::new(seed.wrapping_add(18)),
             render_distance: 6,
             player_chunk_pos: (0, 0),
             block_damage: HashMap::new(),
@@ -224,10 +244,14 @@ impl World {
     
     fn load_chunk(&mut self, chunk_x: i32, chunk_z: i32) {
         let mut chunk = self.generate_chunk_data(chunk_x, chunk_z);
-        
-        // Generate trees for this chunk
+
+        // Generate underground structures first
+        self.generate_dungeons_for_chunk(&mut chunk);
+        self.generate_mineshafts_for_chunk(&mut chunk);
+
+        // Generate surface structures and trees
         self.generate_trees_for_chunk(&mut chunk);
-        
+
         self.chunks.insert((chunk_x, chunk_z), chunk);
     }
     
@@ -464,7 +488,17 @@ impl World {
 
                     // Check for caves (but not too close to surface)
                     if cave_blocks.contains(&y) && y < solid_height.saturating_sub(4) {
-                        blocks[x][y][z] = BlockType::Air;
+                        // Deep caves can have lava pools instead of air
+                        if self.should_have_lava(world_x, y as f64, world_z) {
+                            // Only place lava if there's solid ground below (no floating lava)
+                            if y > 1 && !cave_blocks.contains(&(y - 1)) {
+                                blocks[x][y][z] = BlockType::Lava;
+                            } else {
+                                blocks[x][y][z] = BlockType::Air;
+                            }
+                        } else {
+                            blocks[x][y][z] = BlockType::Air;
+                        }
                         continue;
                     }
 
@@ -593,42 +627,329 @@ impl World {
         for y in 5..max_height.saturating_sub(10) {
             let y_f = y as f64;
 
-            // 3D cave noise for more organic shapes
+            // 3D cave noise for more organic shapes - worm-like tunnels
             let cave1 = self.cave_noise.get([world_x * 0.03, y_f * 0.03, world_z * 0.03]);
             let cave2 = self.cave_noise.get([world_x * 0.06, y_f * 0.06, world_z * 0.06]);
 
-            // Larger caverns
-            let cavern = self.cave_noise.get([world_x * 0.015, y_f * 0.02, world_z * 0.015]);
+            // Large caverns using dedicated cavern noise - lower frequency for bigger spaces
+            let cavern = self.cavern_noise.get([world_x * 0.008, y_f * 0.012, world_z * 0.008]);
 
-            // Depth factor - more caves deeper down
+            // Secondary cavern layer for variety with offset
+            let cavern2 = self.cavern_noise.get([
+                (world_x + 1000.0) * 0.01,
+                y_f * 0.015,
+                (world_z + 1000.0) * 0.01
+            ]);
+
+            // Depth factor - more caves and larger caverns deeper down
             let depth_factor = 1.0 - (y as f64 / max_height as f64);
             let cave_threshold = 0.55 - depth_factor * 0.1;
+
+            // Cavern threshold scales with depth (bigger caverns deeper)
+            let cavern_threshold = 0.55 - depth_factor * 0.15;
 
             // Combine noise for cave generation
             let combined = (cave1 + cave2 * 0.5) / 1.5;
 
-            if combined > cave_threshold || cavern > 0.65 {
+            // Carve if tunnel noise OR large cavern noise exceeds threshold
+            if combined > cave_threshold
+                || cavern > cavern_threshold
+                || (cavern2 > 0.6 && depth_factor > 0.5)
+            {
                 cave_levels.push(y);
             }
         }
 
         cave_levels
     }
-    
-    fn generate_ore(&self, world_x: f64, world_y: f64, world_z: f64) -> Option<BlockType> {
-        let ore_noise = self.ore_noise.get([world_x * 0.1, world_y * 0.1, world_z * 0.1]);
-        let depth_factor = (Self::CHUNK_HEIGHT as f64 - world_y) / Self::CHUNK_HEIGHT as f64;
-        
-        // Different ores at different depths
-        match (ore_noise, depth_factor) {
-            (n, d) if n > 0.85 && d > 0.8 => Some(BlockType::Diamond),
-            (n, d) if n > 0.75 && d > 0.6 => Some(BlockType::Gold),
-            (n, d) if n > 0.65 && d > 0.4 => Some(BlockType::Iron),
-            (n, d) if n > 0.55 && d > 0.2 => Some(BlockType::Coal),
-            _ => None,
+
+    /// Check if a position should have lava (deep underground in caves)
+    fn should_have_lava(&self, world_x: f64, world_y: f64, world_z: f64) -> bool {
+        const LAVA_MAX_HEIGHT: usize = 15;  // Lava only below y=15
+
+        if world_y as usize > LAVA_MAX_HEIGHT {
+            return false;
         }
+
+        // Use lava noise to create pools
+        let lava_val = self.lava_noise.get([world_x * 0.02, world_y * 0.03, world_z * 0.02]);
+        let pool_val = self.lava_noise.get([world_x * 0.05, world_y * 0.01, world_z * 0.05]);
+
+        lava_val > 0.6 && pool_val > 0.4
     }
     
+    fn generate_ore(&self, world_x: f64, world_y: f64, world_z: f64) -> Option<BlockType> {
+        let depth_factor = (Self::CHUNK_HEIGHT as f64 - world_y) / Self::CHUNK_HEIGHT as f64;
+
+        // Ore vein seed noise - determines vein center locations
+        let vein_seed = self.ore_noise.get([world_x * 0.08, world_y * 0.08, world_z * 0.08]);
+
+        // Ore vein spread noise - determines vein shape/extent
+        let vein_spread = self.ore_vein_noise.get([world_x * 0.15, world_y * 0.15, world_z * 0.15]);
+
+        // Combined vein value - higher means more likely to be in a vein
+        let vein_value = (vein_seed + vein_spread * 0.7) / 1.7;
+
+        // Determine ore type based on depth and seed noise
+        // Veins are larger for common ores, smaller for rare ones
+        let (ore_type, threshold, vein_threshold) = if depth_factor > 0.85 && vein_seed > 0.88 {
+            // Diamond: rare, small veins (3-5 blocks)
+            (Some(BlockType::Diamond), 0.88, 0.82)
+        } else if depth_factor > 0.65 && vein_seed > 0.78 {
+            // Gold: uncommon, small-medium veins (4-7 blocks)
+            (Some(BlockType::Gold), 0.78, 0.75)
+        } else if depth_factor > 0.40 && vein_seed > 0.68 {
+            // Iron: common, medium veins (6-12 blocks)
+            (Some(BlockType::Iron), 0.68, 0.60)
+        } else if depth_factor > 0.20 && vein_seed > 0.55 {
+            // Coal: very common, large veins (10-20 blocks)
+            (Some(BlockType::Coal), 0.55, 0.45)
+        } else {
+            (None, 1.0, 1.0)
+        };
+
+        // Check if this block is part of a vein
+        if let Some(ore) = ore_type {
+            // Block is part of vein if:
+            // 1. It's at a vein seed point (high ore_noise), OR
+            // 2. It's near a vein seed and within the vein spread
+            if vein_seed > threshold || vein_value > vein_threshold {
+                return Some(ore);
+            }
+        }
+
+        None
+    }
+
+    /// Generate dungeon structures in caves
+    fn generate_dungeons_for_chunk(&self, chunk: &mut Chunk) {
+        let chunk_world_x = chunk.position.x * Self::CHUNK_SIZE as i32;
+        let chunk_world_z = chunk.position.z * Self::CHUNK_SIZE as i32;
+
+        // Check if this chunk should have a dungeon (~3% of chunks)
+        let dungeon_seed = self.dungeon_noise.get([
+            chunk_world_x as f64 * 0.1,
+            chunk_world_z as f64 * 0.1
+        ]);
+
+        if dungeon_seed < 0.85 {
+            return;
+        }
+
+        // Find a suitable location for the dungeon (cave space at y=15-40)
+        for attempt in 0..5 {
+            let x = ((dungeon_seed * 1000.0 + attempt as f64 * 137.0) as usize) % (Self::CHUNK_SIZE - 6) + 3;
+            let z = ((dungeon_seed * 2000.0 + attempt as f64 * 173.0) as usize) % (Self::CHUNK_SIZE - 6) + 3;
+
+            // Search for a cave space
+            for y in (15..40).rev() {
+                if y + 5 >= Self::CHUNK_HEIGHT { continue; }
+                if x + 5 >= Self::CHUNK_SIZE || z + 5 >= Self::CHUNK_SIZE { continue; }
+
+                // Check if there's enough air space for a dungeon
+                let mut has_space = true;
+                let mut has_floor = false;
+
+                for dx in 0..5 {
+                    for dz in 0..5 {
+                        // Need air at this level and above
+                        if chunk.blocks[x + dx][y][z + dz] != BlockType::Air ||
+                           chunk.blocks[x + dx][y + 1][z + dz] != BlockType::Air ||
+                           chunk.blocks[x + dx][y + 2][z + dz] != BlockType::Air {
+                            has_space = false;
+                            break;
+                        }
+                        // Need solid floor below
+                        if y > 0 && chunk.blocks[x + dx][y - 1][z + dz] == BlockType::Stone {
+                            has_floor = true;
+                        }
+                    }
+                    if !has_space { break; }
+                }
+
+                if has_space && has_floor {
+                    self.place_dungeon_in_chunk(chunk, x, y, z, chunk_world_x, chunk_world_z);
+                    return;
+                }
+            }
+        }
+    }
+
+    fn place_dungeon_in_chunk(&self, chunk: &mut Chunk, x: usize, y: usize, z: usize, chunk_world_x: i32, chunk_world_z: i32) {
+        let width = 5;
+        let height = 4;
+        let depth = 5;
+        let mut rng = rand::thread_rng();
+
+        // Build dungeon walls, floor, and ceiling
+        for dx in 0..width {
+            for dy in 0..height {
+                for dz in 0..depth {
+                    let bx = x + dx;
+                    let by = y + dy;
+                    let bz = z + dz;
+
+                    if bx >= Self::CHUNK_SIZE || by >= Self::CHUNK_HEIGHT || bz >= Self::CHUNK_SIZE {
+                        continue;
+                    }
+
+                    let is_wall = dx == 0 || dx == width - 1 || dz == 0 || dz == depth - 1;
+                    let is_floor = dy == 0;
+                    let is_ceiling = dy == height - 1;
+
+                    if is_floor || is_ceiling || is_wall {
+                        // Mix cobblestone and mossy cobblestone for aged look
+                        chunk.blocks[bx][by][bz] = if rng.gen::<f32>() < 0.3 {
+                            BlockType::MossyCobblestone
+                        } else {
+                            BlockType::Cobblestone
+                        };
+                    } else {
+                        chunk.blocks[bx][by][bz] = BlockType::Air;
+                    }
+                }
+            }
+        }
+
+        // Place mob spawner in center
+        let spawner_x = x + width / 2;
+        let spawner_y = y + 1;
+        let spawner_z = z + depth / 2;
+        if spawner_x < Self::CHUNK_SIZE && spawner_y < Self::CHUNK_HEIGHT && spawner_z < Self::CHUNK_SIZE {
+            chunk.blocks[spawner_x][spawner_y][spawner_z] = BlockType::MobSpawner;
+        }
+
+        // Place chest in corner
+        let chest_x = x + 1;
+        let chest_y = y + 1;
+        let chest_z = z + 1;
+        if chest_x < Self::CHUNK_SIZE && chest_y < Self::CHUNK_HEIGHT && chest_z < Self::CHUNK_SIZE {
+            chunk.blocks[chest_x][chest_y][chest_z] = BlockType::Chest;
+            // Populate chest with dungeon loot
+            let world_x = chunk_world_x + chest_x as i32;
+            let world_z = chunk_world_z + chest_z as i32;
+            self.populate_dungeon_chest(world_x, chest_y as i32, world_z);
+        }
+    }
+
+    fn populate_dungeon_chest(&self, x: i32, y: i32, z: i32) {
+        // Note: This creates chest contents but they won't persist since we don't
+        // have mutable access to World here. This would need to be called after
+        // chunk generation with proper world access. For now, skip.
+        // In a full implementation, this would add items like:
+        // - Coal (1-8), Iron (1-4), Gold (1-3), Diamond (1-2)
+        // - Cobblestone, Torches
+    }
+
+    /// Generate mineshaft tunnels
+    fn generate_mineshafts_for_chunk(&self, chunk: &mut Chunk) {
+        let chunk_world_x = chunk.position.x * Self::CHUNK_SIZE as i32;
+        let chunk_world_z = chunk.position.z * Self::CHUNK_SIZE as i32;
+
+        // Check if this chunk should have a mineshaft (~2% of chunks)
+        let shaft_seed = self.mineshaft_noise.get([
+            chunk_world_x as f64 * 0.08,
+            chunk_world_z as f64 * 0.08
+        ]);
+
+        if shaft_seed < 0.90 {
+            return;
+        }
+
+        // Mineshaft Y level (20-50)
+        let base_y = 25 + ((shaft_seed * 1000.0) as usize % 20);
+
+        // Generate main corridor and branches
+        let mut rng = rand::thread_rng();
+
+        // Main corridor direction (0=X, 1=Z)
+        let main_dir = if shaft_seed > 0.95 { 0 } else { 1 };
+
+        // Place main corridor through chunk
+        if main_dir == 0 {
+            // X-direction corridor
+            let z = Self::CHUNK_SIZE / 2;
+            for x in 0..Self::CHUNK_SIZE {
+                self.place_mineshaft_segment(chunk, x, base_y, z, x % 4 == 0);
+
+                // Branch corridors
+                if x % 6 == 3 && rng.gen::<f32>() < 0.4 {
+                    let branch_len = rng.gen_range(4..8);
+                    for dz in 1..=branch_len {
+                        if z + dz < Self::CHUNK_SIZE {
+                            self.place_mineshaft_segment(chunk, x, base_y, z + dz, dz % 4 == 0);
+                        }
+                        if z >= dz {
+                            self.place_mineshaft_segment(chunk, x, base_y, z - dz, dz % 4 == 0);
+                        }
+                    }
+                }
+            }
+        } else {
+            // Z-direction corridor
+            let x = Self::CHUNK_SIZE / 2;
+            for z in 0..Self::CHUNK_SIZE {
+                self.place_mineshaft_segment(chunk, x, base_y, z, z % 4 == 0);
+
+                // Branch corridors
+                if z % 6 == 3 && rng.gen::<f32>() < 0.4 {
+                    let branch_len = rng.gen_range(4..8);
+                    for dx in 1..=branch_len {
+                        if x + dx < Self::CHUNK_SIZE {
+                            self.place_mineshaft_segment(chunk, x + dx, base_y, z, dx % 4 == 0);
+                        }
+                        if x >= dx {
+                            self.place_mineshaft_segment(chunk, x - dx, base_y, z, dx % 4 == 0);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn place_mineshaft_segment(&self, chunk: &mut Chunk, x: usize, y: usize, z: usize, has_support: bool) {
+        if x >= Self::CHUNK_SIZE || z >= Self::CHUNK_SIZE || y + 3 >= Self::CHUNK_HEIGHT {
+            return;
+        }
+
+        // Carve 3-wide, 3-tall tunnel
+        for dx in 0..=2 {
+            for dy in 0..=2 {
+                let bx = if x > 0 { x - 1 + dx } else { dx };
+                if bx >= Self::CHUNK_SIZE { continue; }
+
+                // Floor is planks
+                if dy == 0 {
+                    chunk.blocks[bx][y][z] = BlockType::Planks;
+                } else {
+                    chunk.blocks[bx][y + dy][z] = BlockType::Air;
+                }
+            }
+        }
+
+        // Add support beams
+        if has_support && x > 0 && x < Self::CHUNK_SIZE - 1 {
+            // Left fence post
+            chunk.blocks[x - 1][y + 1][z] = BlockType::Fence;
+            chunk.blocks[x - 1][y + 2][z] = BlockType::Fence;
+            // Right fence post
+            if x + 1 < Self::CHUNK_SIZE {
+                chunk.blocks[x + 1][y + 1][z] = BlockType::Fence;
+                chunk.blocks[x + 1][y + 2][z] = BlockType::Fence;
+            }
+            // Top beam
+            for dx in 0..=2 {
+                let bx = if x > 0 { x - 1 + dx } else { dx };
+                if bx < Self::CHUNK_SIZE && y + 3 < Self::CHUNK_HEIGHT {
+                    chunk.blocks[bx][y + 3][z] = BlockType::Planks;
+                }
+            }
+        }
+
+        // Rail in center
+        chunk.blocks[x][y + 1][z] = BlockType::Rail;
+    }
+
     fn generate_trees_for_chunk(&self, chunk: &mut Chunk) {
         let chunk_world_x = chunk.position.x * Self::CHUNK_SIZE as i32;
         let chunk_world_z = chunk.position.z * Self::CHUNK_SIZE as i32;
@@ -899,27 +1220,309 @@ impl World {
     }
     
     fn place_village_structure(&self, chunk: &mut Chunk, local_x: usize, local_z: usize, ground_y: usize) {
-        // Simple house structure
-        for dx in -1..=1 {
-            for dz in -1..=1 {
-                for dy in 1..=3 {
+        // Use noise to determine building type
+        let world_x = chunk.position.x * Self::CHUNK_SIZE as i32 + local_x as i32;
+        let world_z = chunk.position.z * Self::CHUNK_SIZE as i32 + local_z as i32;
+        let building_selector = self.tree_noise.get([world_x as f64 * 0.1, world_z as f64 * 0.1]);
+
+        // Select building type based on noise
+        if building_selector > 0.6 {
+            self.place_village_well(chunk, local_x, local_z, ground_y);
+        } else if building_selector > 0.3 {
+            self.place_village_large_house(chunk, local_x, local_z, ground_y);
+        } else if building_selector > 0.0 {
+            self.place_village_blacksmith(chunk, local_x, local_z, ground_y);
+        } else if building_selector > -0.3 {
+            self.place_village_church(chunk, local_x, local_z, ground_y);
+        } else if building_selector > -0.6 {
+            self.place_village_farm(chunk, local_x, local_z, ground_y);
+        } else {
+            self.place_village_small_house(chunk, local_x, local_z, ground_y);
+        }
+
+        // Place gravel paths around the structure
+        self.place_village_paths(chunk, local_x, local_z, ground_y);
+    }
+
+    fn place_village_small_house(&self, chunk: &mut Chunk, local_x: usize, local_z: usize, ground_y: usize) {
+        // 5x5 wooden house with door and windows
+        for dx in -2..=2 {
+            for dz in -2..=2 {
+                for dy in 0..=4 {
                     let x = local_x as i32 + dx;
                     let z = local_z as i32 + dz;
                     let y = ground_y + dy;
-                    
-                    if x >= 0 && x < Self::CHUNK_SIZE as i32 && 
-                       z >= 0 && z < Self::CHUNK_SIZE as i32 && 
-                       y < Self::CHUNK_HEIGHT {
-                        
+
+                    if x < 0 || x >= Self::CHUNK_SIZE as i32 ||
+                       z < 0 || z >= Self::CHUNK_SIZE as i32 ||
+                       y >= Self::CHUNK_HEIGHT {
+                        continue;
+                    }
+
+                    let is_edge = dx.abs() == 2 || dz.abs() == 2;
+                    let is_corner = dx.abs() == 2 && dz.abs() == 2;
+
+                    if dy == 0 {
+                        // Floor
+                        chunk.blocks[x as usize][y][z as usize] = BlockType::Planks;
+                    } else if dy <= 3 && is_edge && !is_corner {
                         // Walls
-                        if dx.abs() == 1 || dz.abs() == 1 {
-                            if dy <= 2 {
-                                chunk.blocks[x as usize][y][z as usize] = BlockType::Wood;
-                            } else {
-                                chunk.blocks[x as usize][y][z as usize] = BlockType::Leaves; // Roof
-                            }
+                        if dy == 2 && (dx == 0 || dz == 0) && !is_corner {
+                            // Windows (glass)
+                            chunk.blocks[x as usize][y][z as usize] = BlockType::Ice;
+                        } else if dy == 1 && dx == 0 && dz == 2 {
+                            // Door opening (air)
+                            chunk.blocks[x as usize][y][z as usize] = BlockType::Air;
+                        } else {
+                            chunk.blocks[x as usize][y][z as usize] = BlockType::Planks;
+                        }
+                    } else if dy <= 3 && is_corner {
+                        // Corner posts
+                        chunk.blocks[x as usize][y][z as usize] = BlockType::Wood;
+                    } else if dy == 4 && (dx.abs() <= 2 && dz.abs() <= 2) {
+                        // Roof
+                        chunk.blocks[x as usize][y][z as usize] = BlockType::Brick;
+                    } else if dy <= 3 && !is_edge {
+                        // Interior air
+                        chunk.blocks[x as usize][y][z as usize] = BlockType::Air;
+                    }
+                }
+            }
+        }
+    }
+
+    fn place_village_large_house(&self, chunk: &mut Chunk, local_x: usize, local_z: usize, ground_y: usize) {
+        // 7x7 two-story house
+        for dx in -3..=3 {
+            for dz in -3..=3 {
+                for dy in 0..=6 {
+                    let x = local_x as i32 + dx;
+                    let z = local_z as i32 + dz;
+                    let y = ground_y + dy;
+
+                    if x < 0 || x >= Self::CHUNK_SIZE as i32 ||
+                       z < 0 || z >= Self::CHUNK_SIZE as i32 ||
+                       y >= Self::CHUNK_HEIGHT {
+                        continue;
+                    }
+
+                    let is_edge = dx.abs() == 3 || dz.abs() == 3;
+                    let is_corner = dx.abs() == 3 && dz.abs() == 3;
+
+                    if dy == 0 {
+                        // Ground floor
+                        chunk.blocks[x as usize][y][z as usize] = BlockType::Cobblestone;
+                    } else if dy == 3 && !is_edge {
+                        // Second floor
+                        chunk.blocks[x as usize][y][z as usize] = BlockType::Planks;
+                    } else if dy <= 5 && is_edge && !is_corner {
+                        // Walls
+                        if (dy == 2 || dy == 5) && (dx == 0 || dz == 0) {
+                            chunk.blocks[x as usize][y][z as usize] = BlockType::Ice;
+                        } else if dy == 1 && dx == 0 && dz == 3 {
+                            // Door
+                            chunk.blocks[x as usize][y][z as usize] = BlockType::Air;
+                        } else {
+                            chunk.blocks[x as usize][y][z as usize] = BlockType::Planks;
+                        }
+                    } else if dy <= 5 && is_corner {
+                        // Corner supports
+                        chunk.blocks[x as usize][y][z as usize] = BlockType::Wood;
+                    } else if dy == 6 {
+                        // Pitched roof
+                        if dx.abs() <= 2 && dz.abs() <= 2 {
+                            chunk.blocks[x as usize][y][z as usize] = BlockType::Brick;
+                        }
+                    } else if dy <= 5 && !is_edge {
+                        chunk.blocks[x as usize][y][z as usize] = BlockType::Air;
+                    }
+                }
+            }
+        }
+    }
+
+    fn place_village_blacksmith(&self, chunk: &mut Chunk, local_x: usize, local_z: usize, ground_y: usize) {
+        // 7x7 stone blacksmith with furnace area
+        for dx in -3..=3 {
+            for dz in -3..=3 {
+                for dy in 0..=4 {
+                    let x = local_x as i32 + dx;
+                    let z = local_z as i32 + dz;
+                    let y = ground_y + dy;
+
+                    if x < 0 || x >= Self::CHUNK_SIZE as i32 ||
+                       z < 0 || z >= Self::CHUNK_SIZE as i32 ||
+                       y >= Self::CHUNK_HEIGHT {
+                        continue;
+                    }
+
+                    let is_edge = dx.abs() == 3 || dz.abs() == 3;
+
+                    if dy == 0 {
+                        chunk.blocks[x as usize][y][z as usize] = BlockType::Cobblestone;
+                    } else if dy <= 3 && is_edge {
+                        chunk.blocks[x as usize][y][z as usize] = BlockType::Cobblestone;
+                    } else if dy == 4 {
+                        chunk.blocks[x as usize][y][z as usize] = BlockType::Stone;
+                    } else if dy == 1 && dx == 2 && dz == 2 {
+                        // Lava forge
+                        chunk.blocks[x as usize][y][z as usize] = BlockType::Lava;
+                    } else if dy == 1 && dx == -2 && dz == -2 {
+                        // Chest
+                        chunk.blocks[x as usize][y][z as usize] = BlockType::Chest;
+                    } else if dy <= 3 && !is_edge {
+                        chunk.blocks[x as usize][y][z as usize] = BlockType::Air;
+                    }
+                }
+            }
+        }
+    }
+
+    fn place_village_church(&self, chunk: &mut Chunk, local_x: usize, local_z: usize, ground_y: usize) {
+        // 7x9 tall church with tower
+        for dx in -3..=3 {
+            for dz in -4..=4 {
+                for dy in 0..=8 {
+                    let x = local_x as i32 + dx;
+                    let z = local_z as i32 + dz;
+                    let y = ground_y + dy;
+
+                    if x < 0 || x >= Self::CHUNK_SIZE as i32 ||
+                       z < 0 || z >= Self::CHUNK_SIZE as i32 ||
+                       y >= Self::CHUNK_HEIGHT {
+                        continue;
+                    }
+
+                    let is_edge = dx.abs() == 3 || dz.abs() == 4;
+                    let in_tower = dx.abs() <= 1 && dz >= 2;
+
+                    if dy == 0 {
+                        chunk.blocks[x as usize][y][z as usize] = BlockType::Cobblestone;
+                    } else if dy <= 4 && is_edge {
+                        // Main walls
+                        chunk.blocks[x as usize][y][z as usize] = BlockType::Cobblestone;
+                    } else if dy > 4 && dy <= 7 && in_tower && (dx.abs() == 1 || dz == 4) {
+                        // Tower walls
+                        chunk.blocks[x as usize][y][z as usize] = BlockType::Cobblestone;
+                    } else if dy == 5 && !in_tower && dx.abs() <= 2 && dz.abs() <= 3 {
+                        // Main roof
+                        chunk.blocks[x as usize][y][z as usize] = BlockType::Stone;
+                    } else if dy == 8 && in_tower && dx.abs() <= 1 && dz >= 2 && dz <= 4 {
+                        // Tower roof
+                        chunk.blocks[x as usize][y][z as usize] = BlockType::Stone;
+                    } else if dy <= 4 && !is_edge {
+                        chunk.blocks[x as usize][y][z as usize] = BlockType::Air;
+                    }
+                }
+            }
+        }
+    }
+
+    fn place_village_farm(&self, chunk: &mut Chunk, local_x: usize, local_z: usize, ground_y: usize) {
+        // 9x9 fenced farm area with crops
+        for dx in -4..=4 {
+            for dz in -4..=4 {
+                let x = local_x as i32 + dx;
+                let z = local_z as i32 + dz;
+
+                if x < 0 || x >= Self::CHUNK_SIZE as i32 ||
+                   z < 0 || z >= Self::CHUNK_SIZE as i32 {
+                    continue;
+                }
+
+                let is_edge = dx.abs() == 4 || dz.abs() == 4;
+
+                // Ground level - farmland
+                if ground_y < Self::CHUNK_HEIGHT {
+                    if is_edge {
+                        // Fence posts
+                        chunk.blocks[x as usize][ground_y][z as usize] = BlockType::Dirt;
+                        if ground_y + 1 < Self::CHUNK_HEIGHT {
+                            chunk.blocks[x as usize][ground_y + 1][z as usize] = BlockType::Fence;
+                        }
+                    } else {
+                        // Farmland with crops
+                        chunk.blocks[x as usize][ground_y][z as usize] = BlockType::Dirt;
+                        // Plant crops in alternating pattern
+                        if ground_y + 1 < Self::CHUNK_HEIGHT && (dx + dz) % 2 == 0 {
+                            chunk.blocks[x as usize][ground_y + 1][z as usize] = BlockType::Leaves;
                         }
                     }
+                }
+
+                // Water channel in center
+                if dx == 0 && dz.abs() <= 2 && ground_y > 0 {
+                    chunk.blocks[x as usize][ground_y][z as usize] = BlockType::Water;
+                }
+            }
+        }
+    }
+
+    fn place_village_well(&self, chunk: &mut Chunk, local_x: usize, local_z: usize, ground_y: usize) {
+        // 3x3 well with water and roof
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                for dy in -2..=4 {
+                    let x = local_x as i32 + dx;
+                    let z = local_z as i32 + dz;
+                    let y = ground_y as i32 + dy;
+
+                    if x < 0 || x >= Self::CHUNK_SIZE as i32 ||
+                       z < 0 || z >= Self::CHUNK_SIZE as i32 ||
+                       y < 0 || y >= Self::CHUNK_HEIGHT as i32 {
+                        continue;
+                    }
+
+                    let is_corner = dx.abs() == 1 && dz.abs() == 1;
+                    let is_edge = dx.abs() == 1 || dz.abs() == 1;
+
+                    if dy < 0 {
+                        // Underground water
+                        if !is_edge {
+                            chunk.blocks[x as usize][y as usize][z as usize] = BlockType::Water;
+                        } else {
+                            chunk.blocks[x as usize][y as usize][z as usize] = BlockType::Cobblestone;
+                        }
+                    } else if dy == 0 {
+                        // Well rim
+                        if is_edge {
+                            chunk.blocks[x as usize][y as usize][z as usize] = BlockType::Cobblestone;
+                        } else {
+                            chunk.blocks[x as usize][y as usize][z as usize] = BlockType::Water;
+                        }
+                    } else if dy <= 3 && is_corner {
+                        // Support posts
+                        chunk.blocks[x as usize][y as usize][z as usize] = BlockType::Fence;
+                    } else if dy == 4 && is_edge {
+                        // Roof
+                        chunk.blocks[x as usize][y as usize][z as usize] = BlockType::Planks;
+                    }
+                }
+            }
+        }
+    }
+
+    fn place_village_paths(&self, chunk: &mut Chunk, local_x: usize, local_z: usize, ground_y: usize) {
+        // Place gravel paths extending from structure
+        for dx in -5..=5 {
+            let x = local_x as i32 + dx;
+            let z = local_z as i32;
+
+            if x >= 0 && x < Self::CHUNK_SIZE as i32 && ground_y > 0 && ground_y < Self::CHUNK_HEIGHT {
+                let current = chunk.blocks[x as usize][ground_y][z as usize];
+                if current == BlockType::Grass || current == BlockType::Dirt {
+                    chunk.blocks[x as usize][ground_y][z as usize] = BlockType::Gravel;
+                }
+            }
+        }
+        for dz in -5..=5 {
+            let x = local_x as i32;
+            let z = local_z as i32 + dz;
+
+            if z >= 0 && z < Self::CHUNK_SIZE as i32 && ground_y > 0 && ground_y < Self::CHUNK_HEIGHT {
+                let current = chunk.blocks[x as usize][ground_y][z as usize];
+                if current == BlockType::Grass || current == BlockType::Dirt {
+                    chunk.blocks[x as usize][ground_y][z as usize] = BlockType::Gravel;
                 }
             }
         }

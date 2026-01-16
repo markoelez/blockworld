@@ -17,7 +17,7 @@ use camera::Camera;
 use renderer::Renderer;
 use ui::{Inventory, DebugInfo, PauseMenu, ChestUI};
 use entity::EntityManager;
-use particle::{ParticleSystem, WeatherState};
+use particle::{ParticleSystem, WeatherState, LightningSystem};
 use audio::{AudioManager, MusicManager};
 
 #[derive(PartialEq, Clone, Copy)]
@@ -61,6 +61,7 @@ fn main() {
     let mut particle_system = ParticleSystem::new();
     let mut weather_state = WeatherState::new();
     let mut weather_rng = rand::thread_rng();
+    let mut lightning_system = LightningSystem::new();
     let audio_manager = AudioManager::new();
     let mut music_manager = MusicManager::new();
 
@@ -331,6 +332,13 @@ fn main() {
                     weather_state.update(dt, &mut weather_rng);
                     particle_system.spawn_weather(camera.position, &weather_state, dt);
 
+                    // Update lightning system and play thunder sounds
+                    if let Some(thunder_volume) = lightning_system.update(dt, camera.position, &weather_state, &mut weather_rng) {
+                        if let Some(ref audio) = audio_manager {
+                            audio.play_thunder(thunder_volume);
+                        }
+                    }
+
                     // Spawn torch flame particles (throttled to every ~0.1 seconds)
                     torch_particle_timer += dt;
                     if torch_particle_timer >= 0.1 {
@@ -396,7 +404,7 @@ fn main() {
             Event::RedrawRequested(_) => {
                 if is_loaded {
                     let is_underwater = camera.is_underwater(&world);
-                    renderer.render(&camera, &mut world, &inventory, targeted_block, &entity_manager, &particle_system, is_underwater, &debug_info, &pause_menu, &chest_ui);
+                    renderer.render(&camera, &mut world, &inventory, targeted_block, &entity_manager, &particle_system, is_underwater, &debug_info, &pause_menu, &chest_ui, &lightning_system, &weather_state);
                 } else {
                     // Process loading stages
                     let (progress, message) = match loading_stage {

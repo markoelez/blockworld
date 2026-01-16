@@ -255,6 +255,69 @@ fn generate_rising_tone(duration_ms: u32, freq_start: f32, freq_end: f32, volume
     samples
 }
 
+fn generate_thunder(volume: f32) -> Vec<i16> {
+    let sample_rate = 44100;
+    let duration_secs = 2.5;  // Thunder rumbles for 2.5 seconds
+    let num_samples = (sample_rate as f32 * duration_secs) as usize;
+    let mut samples = Vec::with_capacity(num_samples);
+    let mut rng = rand::thread_rng();
+
+    for i in 0..num_samples {
+        let t = i as f32 / sample_rate as f32;
+        let progress = i as f32 / num_samples as f32;
+
+        // Multi-layered thunder sound
+        // 1. Low rumble (20-60 Hz)
+        let low_freq = 30.0 + 20.0 * (t * 0.5).sin();
+        let low_rumble = (2.0 * std::f32::consts::PI * low_freq * t).sin() * 0.4;
+
+        // 2. Mid rumble with modulation (60-150 Hz)
+        let mid_freq = 80.0 + 40.0 * (t * 2.0).sin();
+        let mid_rumble = (2.0 * std::f32::consts::PI * mid_freq * t).sin() * 0.3;
+
+        // 3. Noise crackle
+        let noise = rng.gen_range(-1.0..1.0) * 0.25;
+
+        // 4. Initial crack (loud burst at start)
+        let crack_envelope = if progress < 0.1 {
+            (1.0 - progress / 0.1).powf(0.5)
+        } else {
+            0.0
+        };
+        let crack = noise * crack_envelope * 2.0;
+
+        // 5. Rolling envelope (multiple peaks for rumbling effect)
+        let roll1 = (progress * 8.0).sin().abs() * 0.3;
+        let roll2 = ((progress + 0.25) * 6.0).sin().abs() * 0.2;
+        let roll_envelope = roll1 + roll2;
+
+        // Overall envelope: loud start, rolling middle, fade out
+        let main_envelope = if progress < 0.05 {
+            progress / 0.05  // Quick attack
+        } else if progress < 0.3 {
+            1.0  // Sustain
+        } else {
+            (1.0 - (progress - 0.3) / 0.7).powf(1.5)  // Long decay
+        };
+
+        // Combine all components
+        let combined = (low_rumble + mid_rumble + noise * roll_envelope + crack) * main_envelope * volume;
+        let sample = (combined.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+        samples.push(sample);
+    }
+
+    // Apply simple low-pass filter for more realistic thunder
+    let mut prev = samples[0] as f32;
+    for sample in samples.iter_mut() {
+        let current = *sample as f32;
+        let filtered = prev * 0.7 + current * 0.3;
+        *sample = filtered as i16;
+        prev = filtered;
+    }
+
+    samples
+}
+
 pub struct AudioManager {
     _stream: OutputStream,
     handle: OutputStreamHandle,
@@ -367,6 +430,15 @@ impl AudioManager {
         }
 
         let samples = generate_noise_burst(60, 0.25);
+        self.play_samples(samples, 44100);
+    }
+
+    pub fn play_thunder(&self, volume: f32) {
+        if !self.enabled {
+            return;
+        }
+
+        let samples = generate_thunder(volume);
         self.play_samples(samples, 44100);
     }
 

@@ -13,7 +13,7 @@ use crate::camera::Camera;
 use crate::world::{World, BlockType, TorchFace};
 use crate::ui::{Inventory, UIRenderer, DebugInfo, PauseMenu, ChestUI};
 use crate::entity::{EntityManager, Villager, VillagerState, VILLAGER_HEIGHT};
-use crate::particle::ParticleSystem;
+use crate::particle::{ParticleSystem, LightningSystem, WeatherState, WeatherType};
 
 // Shadow map resolution
 const SHADOW_MAP_SIZE: u32 = 2048;
@@ -2433,19 +2433,32 @@ impl Renderer {
         let cam_y = camera_pos.y as i32;
         let cam_z = camera_pos.z as i32;
 
-        // Search nearby blocks for torches
+        // Search nearby blocks for torches and lava
         for x in (cam_x - search_radius)..(cam_x + search_radius) {
             for z in (cam_z - search_radius)..(cam_z + search_radius) {
                 for y in (cam_y - 20).max(0)..(cam_y + 20).min(World::CHUNK_HEIGHT as i32) {
-                    if let Some(BlockType::Torch) = world.get_block(x, y, z) {
-                        if (num_lights as usize) < MAX_POINT_LIGHTS {
-                            lights[num_lights as usize] = PointLight {
+                    if let Some(block) = world.get_block(x, y, z) {
+                        let light = match block {
+                            BlockType::Torch => Some(PointLight {
                                 position: [x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5],
                                 radius: 12.0,
                                 color: [1.0, 0.8, 0.4],  // Warm orange glow
                                 intensity: 1.5,
-                            };
-                            num_lights += 1;
+                            }),
+                            BlockType::Lava => Some(PointLight {
+                                position: [x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5],
+                                radius: 15.0,  // Larger than torch
+                                color: [1.0, 0.4, 0.1],  // Orange-red glow
+                                intensity: 2.0,  // Brighter than torch
+                            }),
+                            _ => None,
+                        };
+
+                        if let Some(point_light) = light {
+                            if (num_lights as usize) < MAX_POINT_LIGHTS {
+                                lights[num_lights as usize] = point_light;
+                                num_lights += 1;
+                            }
                         }
                     }
                 }
@@ -2607,7 +2620,7 @@ impl Renderer {
         self.time_of_day
     }
 
-    pub fn render(&mut self, camera: &Camera, world: &mut World, inventory: &Inventory, targeted_block: Option<(i32, i32, i32)>, entity_manager: &EntityManager, particle_system: &ParticleSystem, underwater: bool, debug_info: &DebugInfo, pause_menu: &PauseMenu, chest_ui: &ChestUI) {
+    pub fn render(&mut self, camera: &Camera, world: &mut World, inventory: &Inventory, targeted_block: Option<(i32, i32, i32)>, entity_manager: &EntityManager, particle_system: &ParticleSystem, underwater: bool, debug_info: &DebugInfo, pause_menu: &PauseMenu, chest_ui: &ChestUI, lightning_system: &LightningSystem, weather_state: &WeatherState) {
         let now = Instant::now();
         let dt = (now - self.last_render).as_secs_f32();
         self.last_render = now;
@@ -2628,7 +2641,20 @@ impl Renderer {
         // Day/night factor for lighting
         let day_factor = (sun_direction.y + 0.1).max(0.0).min(1.0) / 0.4;
         // Much higher minimum ambient at night so terrain is always visible
-        let ambient_intensity = 0.35 + 0.25 * day_factor;
+        let mut ambient_intensity = 0.35 + 0.25 * day_factor;
+
+        // Weather affects ambient light (darken during storms)
+        let weather_factor = match weather_state.weather_type {
+            WeatherType::Thunderstorm => 0.5,  // Much darker during thunderstorms
+            WeatherType::Rain => 0.75,         // Slightly darker during rain
+            _ => 1.0,
+        };
+        ambient_intensity *= weather_factor;
+
+        // Lightning flash brightens everything temporarily
+        if lightning_system.sky_flash > 0.0 {
+            ambient_intensity = ambient_intensity.max(0.8 * lightning_system.sky_flash);
+        }
 
         // Sun color changes with time of day
         let sun_color = if sun_direction.y < 0.0 {
@@ -2674,7 +2700,7 @@ impl Renderer {
             ambient_intensity,
             light_view_proj: light_view_proj.into(),
             sun_color,
-            fog_density: 0.002,
+            fog_density: Self::calculate_fog_density(self.time_of_day, weather_state, lightning_system.sky_flash),
         };
 
         self.queue.write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniform]));
@@ -3144,7 +3170,48 @@ impl Renderer {
 
         light_proj * light_view
     }
-    
+
+    fn calculate_fog_density(time_of_day: f32, weather_state: &WeatherState, sky_flash: f32) -> f32 {
+        // Base fog density
+        let mut fog_density = 0.002;
+
+        // Morning mist (thicker fog at dawn: 0.2-0.35 time)
+        if time_of_day > 0.2 && time_of_day < 0.35 {
+            // Peak fog at 0.275 (middle of dawn)
+            let dawn_progress = (time_of_day - 0.2) / 0.15;
+            let mist_factor = if dawn_progress < 0.5 {
+                dawn_progress * 2.0  // Fog increasing
+            } else {
+                (1.0 - dawn_progress) * 2.0  // Fog decreasing
+            };
+            fog_density += 0.006 * mist_factor;  // Up to 0.008 total during peak mist
+        }
+
+        // Weather-based fog
+        match weather_state.weather_type {
+            WeatherType::Thunderstorm => {
+                // Heavy fog during thunderstorms
+                fog_density += 0.012 * weather_state.intensity;
+            }
+            WeatherType::Rain => {
+                // Light fog during rain
+                fog_density += 0.004 * weather_state.intensity;
+            }
+            WeatherType::Snow => {
+                // Moderate fog during snow
+                fog_density += 0.005 * weather_state.intensity;
+            }
+            WeatherType::Clear => {}
+        }
+
+        // Lightning flash briefly reduces fog visibility (scene becomes clearer)
+        if sky_flash > 0.0 {
+            fog_density *= 1.0 - (sky_flash * 0.5);
+        }
+
+        fog_density
+    }
+
     fn update_chunk_meshes(&mut self, world: &mut World) {
         // With parallel mesh generation, we can process more chunks per frame
         const MAX_CHUNKS_PER_FRAME: usize = 4;
@@ -4405,6 +4472,14 @@ impl Renderer {
             BlockType::Clay => 16.0,
             BlockType::Torch => 24.0,  // Torch uses texture
             BlockType::Chest => 26.0,  // Chest uses wood-like color
+            // New block types for world generation
+            BlockType::Lava => 41.0,             // Emissive orange
+            BlockType::MobSpawner => 42.0,       // Dark cage-like
+            BlockType::Rail => 43.0,             // Metal rails
+            BlockType::Planks => 44.0,           // Light wood
+            BlockType::Fence => 45.0,            // Wood fence
+            BlockType::Brick => 46.0,            // Stone brick
+            BlockType::MossyCobblestone => 47.0, // Mossy green cobblestone
             _ => 0.0,
         }
     }
@@ -4442,7 +4517,7 @@ impl Renderer {
     }
 
     fn is_transparent(block_type: BlockType) -> bool {
-        matches!(block_type, BlockType::Water)
+        matches!(block_type, BlockType::Water | BlockType::Lava)
     }
 
     // Generate a cube mesh for a villager body part

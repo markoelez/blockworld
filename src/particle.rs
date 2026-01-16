@@ -11,6 +11,172 @@ pub enum WeatherType {
     Clear,
     Rain,
     Snow,
+    Thunderstorm,
+}
+
+// Lightning bolt segment for rendering
+#[derive(Clone)]
+pub struct LightningSegment {
+    pub start: Point3<f32>,
+    pub end: Point3<f32>,
+    pub brightness: f32,
+}
+
+// A single lightning bolt with branching
+#[derive(Clone)]
+pub struct LightningBolt {
+    pub segments: Vec<LightningSegment>,
+    pub lifetime: f32,
+    pub age: f32,
+    pub strike_pos: Point3<f32>,
+}
+
+impl LightningBolt {
+    pub fn new(start: Point3<f32>, end: Point3<f32>, rng: &mut ThreadRng) -> Self {
+        let mut segments = Vec::new();
+        Self::generate_bolt(&mut segments, start, end, 1.0, 4, rng);
+
+        Self {
+            segments,
+            lifetime: rng.gen_range(0.15..0.3),
+            age: 0.0,
+            strike_pos: end,
+        }
+    }
+
+    fn generate_bolt(
+        segments: &mut Vec<LightningSegment>,
+        start: Point3<f32>,
+        end: Point3<f32>,
+        brightness: f32,
+        depth: u32,
+        rng: &mut ThreadRng,
+    ) {
+        if depth == 0 {
+            segments.push(LightningSegment { start, end, brightness });
+            return;
+        }
+
+        // Midpoint displacement
+        let mid = Point3::new(
+            (start.x + end.x) / 2.0 + rng.gen_range(-5.0..5.0),
+            (start.y + end.y) / 2.0 + rng.gen_range(-2.0..2.0),
+            (start.z + end.z) / 2.0 + rng.gen_range(-5.0..5.0),
+        );
+
+        Self::generate_bolt(segments, start, mid, brightness, depth - 1, rng);
+        Self::generate_bolt(segments, mid, end, brightness, depth - 1, rng);
+
+        // Random branching (30% chance)
+        if rng.gen_bool(0.3) && depth > 1 {
+            let branch_end = Point3::new(
+                mid.x + rng.gen_range(-15.0..15.0),
+                mid.y - rng.gen_range(10.0..30.0),
+                mid.z + rng.gen_range(-15.0..15.0),
+            );
+            Self::generate_bolt(segments, mid, branch_end, brightness * 0.6, depth - 2, rng);
+        }
+    }
+
+    pub fn is_alive(&self) -> bool {
+        self.age < self.lifetime
+    }
+
+    pub fn brightness(&self) -> f32 {
+        // Flash effect - bright at start, then fade
+        let progress = self.age / self.lifetime;
+        if progress < 0.1 {
+            1.0
+        } else {
+            1.0 - ((progress - 0.1) / 0.9).powf(2.0)
+        }
+    }
+}
+
+// Lightning system to manage multiple lightning bolts
+pub struct LightningSystem {
+    pub bolts: Vec<LightningBolt>,
+    pub sky_flash: f32,  // 0.0 to 1.0, for screen flash effect
+    pub pending_thunder: Vec<(f32, f32)>,  // (delay_remaining, volume)
+    strike_cooldown: f32,
+}
+
+impl LightningSystem {
+    pub fn new() -> Self {
+        Self {
+            bolts: Vec::new(),
+            sky_flash: 0.0,
+            pending_thunder: Vec::new(),
+            strike_cooldown: 0.0,
+        }
+    }
+
+    pub fn update(&mut self, dt: f32, camera_pos: Point3<f32>, weather: &WeatherState, rng: &mut ThreadRng) -> Option<f32> {
+        // Update existing bolts
+        self.bolts.retain_mut(|bolt| {
+            bolt.age += dt;
+            bolt.is_alive()
+        });
+
+        // Fade sky flash
+        self.sky_flash = (self.sky_flash - dt * 5.0).max(0.0);
+
+        // Update pending thunder and check for sounds to play
+        let mut thunder_to_play = None;
+        self.pending_thunder.retain_mut(|(delay, volume)| {
+            *delay -= dt;
+            if *delay <= 0.0 {
+                thunder_to_play = Some(*volume);
+                false
+            } else {
+                true
+            }
+        });
+
+        // Update cooldown
+        self.strike_cooldown = (self.strike_cooldown - dt).max(0.0);
+
+        // Only spawn new lightning during thunderstorms
+        if weather.weather_type == WeatherType::Thunderstorm && self.strike_cooldown <= 0.0 {
+            // Random chance for lightning strike
+            if rng.gen_bool(0.02 * weather.intensity as f64) {
+                self.spawn_lightning(camera_pos, rng);
+            }
+        }
+
+        thunder_to_play
+    }
+
+    pub fn spawn_lightning(&mut self, camera_pos: Point3<f32>, rng: &mut ThreadRng) {
+        // Strike within 100 blocks of player
+        let offset_x = rng.gen_range(-100.0..100.0);
+        let offset_z = rng.gen_range(-100.0..100.0);
+
+        let start = Point3::new(
+            camera_pos.x + offset_x,
+            camera_pos.y + 80.0,  // Start high in sky
+            camera_pos.z + offset_z,
+        );
+
+        let end = Point3::new(
+            start.x + rng.gen_range(-10.0..10.0),
+            camera_pos.y - 20.0,  // Strike ground
+            start.z + rng.gen_range(-10.0..10.0),
+        );
+
+        let bolt = LightningBolt::new(start, end, rng);
+
+        // Calculate distance for thunder delay (speed of sound ~343 m/s)
+        let distance = ((offset_x * offset_x + offset_z * offset_z).sqrt()).abs();
+        let thunder_delay = distance / 343.0;  // Delay in seconds
+        let thunder_volume = (1.0 - distance / 150.0).max(0.2);  // Louder when closer
+
+        self.pending_thunder.push((thunder_delay, thunder_volume));
+        self.sky_flash = 1.0;
+        self.strike_cooldown = rng.gen_range(2.0..8.0);  // Cooldown between strikes
+
+        self.bolts.push(bolt);
+    }
 }
 
 pub struct WeatherState {
@@ -31,14 +197,17 @@ impl WeatherState {
     pub fn update(&mut self, dt: f32, rng: &mut ThreadRng) {
         self.transition_timer -= dt;
         if self.transition_timer <= 0.0 {
-            // Change weather randomly
-            self.weather_type = match rng.gen_range(0..10) {
+            // Change weather randomly (thunderstorms less common)
+            self.weather_type = match rng.gen_range(0..12) {
                 0..=5 => WeatherType::Clear,
                 6..=8 => WeatherType::Rain,
-                _ => WeatherType::Snow,
+                9..=10 => WeatherType::Snow,
+                _ => WeatherType::Thunderstorm,  // ~8% chance
             };
             self.intensity = if self.weather_type == WeatherType::Clear {
                 0.0
+            } else if self.weather_type == WeatherType::Thunderstorm {
+                rng.gen_range(0.6..1.0)  // Thunderstorms are always intense
             } else {
                 rng.gen_range(0.3..1.0)
             };
@@ -240,6 +409,7 @@ impl ParticleSystem {
         let spawn_rate = match weather.weather_type {
             WeatherType::Rain => 150.0 * weather.intensity,
             WeatherType::Snow => 80.0 * weather.intensity,
+            WeatherType::Thunderstorm => 200.0 * weather.intensity,  // Heavy rain
             WeatherType::Clear => 0.0,
         };
 
@@ -274,6 +444,22 @@ impl ParticleSystem {
                         [0.6, 0.7, 0.9, 0.35],  // Blue-ish, transparent
                         2.5,
                         0.015,
+                        ParticleType::Rain,
+                    ));
+                }
+                WeatherType::Thunderstorm => {
+                    // Heavy rain with wind
+                    let velocity = Vector3::new(
+                        self.rng.gen_range(-2.0..2.0),  // More wind
+                        -20.0 - self.rng.gen_range(0.0..6.0),  // Faster
+                        self.rng.gen_range(-2.0..2.0),
+                    );
+                    self.particles.push(Particle::new_weather(
+                        pos,
+                        velocity,
+                        [0.5, 0.55, 0.7, 0.4],  // Darker rain
+                        2.0,
+                        0.018,  // Slightly larger drops
                         ParticleType::Rain,
                     ));
                 }

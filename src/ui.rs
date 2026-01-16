@@ -406,6 +406,14 @@ impl UIRenderer {
             BlockType::Clay => 16.0,
             BlockType::Torch => 24.0,
             BlockType::Chest => 26.0,
+            // New block types
+            BlockType::Lava => 41.0,
+            BlockType::MobSpawner => 42.0,
+            BlockType::Rail => 43.0,
+            BlockType::Planks => 44.0,
+            BlockType::Fence => 45.0,
+            BlockType::Brick => 46.0,
+            BlockType::MossyCobblestone => 47.0,
             BlockType::Air | BlockType::Barrier => 0.0,
         }
     }

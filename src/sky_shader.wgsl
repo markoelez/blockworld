@@ -165,5 +165,24 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         sky_color = sky_color + star * night_factor * 1.2;
     }
 
+    // Weather-based sky darkening using fog_density
+    // Normal fog_density is ~0.002, storm is ~0.014+
+    let weather_intensity = saturate((u_uniform.fog_density - 0.003) / 0.012);
+    if (weather_intensity > 0.0) {
+        // Storm cloud overlay color (dark gray)
+        let storm_color = vec3<f32>(0.25, 0.27, 0.32);
+
+        // Desaturate and darken the sky during storms
+        let luminance = dot(sky_color, vec3<f32>(0.299, 0.587, 0.114));
+        let desaturated = mix(sky_color, vec3<f32>(luminance), weather_intensity * 0.6);
+
+        // Blend towards storm color
+        sky_color = mix(desaturated, storm_color, weather_intensity * 0.7);
+
+        // Reduce sun/moon visibility during storms
+        let visibility_factor = 1.0 - weather_intensity * 0.8;
+        sky_color = sky_color * (0.3 + 0.7 * visibility_factor);
+    }
+
     return vec4<f32>(sky_color, 1.0);
 }

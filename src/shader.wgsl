@@ -375,6 +375,45 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Bat - dark brown
         texture_color = vec4<f32>(0.25, 0.20, 0.18, 1.0);
         roughness = 0.7;
+    } else if (bt == 41.0) {
+        // Lava - emissive bright orange/red with animated noise
+        let lava_time = u_uniform.time_of_day * 20.0;
+        let lava_noise1 = noise(in.tex_coords * 4.0 + vec2<f32>(lava_time, 0.0));
+        let lava_noise2 = noise(in.tex_coords * 8.0 - vec2<f32>(0.0, lava_time * 0.7));
+        let lava_pattern = (lava_noise1 + lava_noise2) * 0.5;
+        let lava_bright = vec3<f32>(1.0, 0.6, 0.15);
+        let lava_dark = vec3<f32>(0.8, 0.2, 0.05);
+        texture_color = vec4<f32>(mix(lava_dark, lava_bright, lava_pattern) * 3.0, 1.0);
+        roughness = 1.0;
+    } else if (bt == 42.0) {
+        // MobSpawner - dark iron cage
+        texture_color = vec4<f32>(0.2, 0.2, 0.25, 1.0);
+        roughness = 0.5;
+    } else if (bt == 43.0) {
+        // Rail - rusty iron
+        texture_color = vec4<f32>(0.5, 0.4, 0.35, 1.0);
+        roughness = 0.6;
+    } else if (bt == 44.0) {
+        // Planks - light wood
+        let grain = noise(in.tex_coords * 6.0) * 0.08;
+        texture_color = vec4<f32>(0.65 + grain, 0.5 + grain, 0.3 + grain, 1.0);
+        roughness = 0.8;
+    } else if (bt == 45.0) {
+        // Fence - wood
+        let grain = noise(in.tex_coords * 4.0) * 0.05;
+        texture_color = vec4<f32>(0.55 + grain, 0.4 + grain, 0.25 + grain, 1.0);
+        roughness = 0.85;
+    } else if (bt == 46.0) {
+        // Brick - stone brick
+        texture_color = vec4<f32>(0.55, 0.55, 0.55, 1.0);
+        roughness = 0.75;
+    } else if (bt == 47.0) {
+        // MossyCobblestone - cobblestone with green moss
+        let moss = noise(in.tex_coords * 3.0);
+        let base_gray = vec3<f32>(0.45, 0.45, 0.45);
+        let moss_green = vec3<f32>(0.3, 0.45, 0.25);
+        texture_color = vec4<f32>(mix(base_gray, moss_green, moss * 0.6), 1.0);
+        roughness = 0.8;
     }
 
     // Crack effect - dark cracks that spread as damage increases
