@@ -23,6 +23,16 @@ pub enum BlockType {
     Diamond,
     Gravel,
     Clay,
+    Torch,  // Emits light
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TorchFace {
+    Top,    // Sitting on top of a block
+    North,  // Torch tilts toward -Z (placed on +Z face of solid block)
+    South,  // Torch tilts toward +Z (placed on -Z face of solid block)
+    East,   // Torch tilts toward +X (placed on -X face of solid block)
+    West,   // Torch tilts toward -X (placed on +X face of solid block)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -63,6 +73,7 @@ pub struct World {
     render_distance: i32,
     player_chunk_pos: (i32, i32),
     block_damage: HashMap<(i32, i32, i32), f32>,
+    pub torch_orientations: HashMap<(i32, i32, i32), TorchFace>,
     seed: u32,
 }
 
@@ -96,6 +107,7 @@ impl World {
             render_distance: 6,
             player_chunk_pos: (0, 0),
             block_damage: HashMap::new(),
+            torch_orientations: HashMap::new(),
             seed,
         };
 
@@ -1099,6 +1111,36 @@ impl World {
             false
         }
     }
+
+    pub fn place_torch(&mut self, x: i32, y: i32, z: i32, face: TorchFace) -> bool {
+        if self.can_place_block_at(x, y, z) {
+            self.set_block(x, y, z, BlockType::Torch);
+            self.torch_orientations.insert((x, y, z), face);
+
+            // Mark adjacent chunks as dirty since torch doesn't occlude faces
+            // and neighboring blocks need their faces regenerated
+            self.mark_neighbors_dirty(x, y, z);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn mark_neighbors_dirty(&mut self, x: i32, _y: i32, z: i32) {
+        // Mark all potentially affected chunks as dirty
+        let offsets = [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)];
+        for (dx, dz) in offsets {
+            let chunk_x = (x + dx).div_euclid(Self::CHUNK_SIZE as i32);
+            let chunk_z = (z + dz).div_euclid(Self::CHUNK_SIZE as i32);
+            if let Some(chunk) = self.chunks.get_mut(&(chunk_x, chunk_z)) {
+                chunk.dirty = true;
+            }
+        }
+    }
+
+    pub fn get_torch_face(&self, x: i32, y: i32, z: i32) -> Option<TorchFace> {
+        self.torch_orientations.get(&(x, y, z)).copied()
+    }
     
     pub fn get_hardness(block_type: BlockType) -> f32 {
         match block_type {
@@ -1125,6 +1167,10 @@ impl World {
         if new_damage >= hardness {
             self.set_block(x, y, z, BlockType::Air);
             self.block_damage.remove(&pos);
+            // Clean up torch orientation if it was a torch
+            if block_type == BlockType::Torch {
+                self.torch_orientations.remove(&pos);
+            }
             Some(block_type)
         } else {
             self.block_damage.insert(pos, new_damage);

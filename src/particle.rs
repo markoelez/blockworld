@@ -2,8 +2,58 @@ use cgmath::{Point3, Vector3};
 use rand::prelude::*;
 use crate::world::BlockType;
 
-const MAX_PARTICLES: usize = 500;
+const MAX_PARTICLES: usize = 2000;
 const GRAVITY: f32 = -15.0;
+const SNOW_GRAVITY: f32 = -2.0;
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum WeatherType {
+    Clear,
+    Rain,
+    Snow,
+}
+
+pub struct WeatherState {
+    pub weather_type: WeatherType,
+    pub intensity: f32,  // 0.0 - 1.0
+    pub transition_timer: f32,
+}
+
+impl WeatherState {
+    pub fn new() -> Self {
+        Self {
+            weather_type: WeatherType::Clear,
+            intensity: 0.0,
+            transition_timer: 30.0,  // Start with weather change soon
+        }
+    }
+
+    pub fn update(&mut self, dt: f32, rng: &mut ThreadRng) {
+        self.transition_timer -= dt;
+        if self.transition_timer <= 0.0 {
+            // Change weather randomly
+            self.weather_type = match rng.gen_range(0..10) {
+                0..=5 => WeatherType::Clear,
+                6..=8 => WeatherType::Rain,
+                _ => WeatherType::Snow,
+            };
+            self.intensity = if self.weather_type == WeatherType::Clear {
+                0.0
+            } else {
+                rng.gen_range(0.3..1.0)
+            };
+            // Next weather change in 60-300 seconds
+            self.transition_timer = rng.gen_range(60.0..300.0);
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum ParticleType {
+    Normal,
+    Rain,
+    Snow,
+}
 
 #[derive(Clone)]
 pub struct Particle {
@@ -13,6 +63,7 @@ pub struct Particle {
     pub age: f32,
     pub lifetime: f32,
     pub size: f32,
+    pub particle_type: ParticleType,
 }
 
 impl Particle {
@@ -24,6 +75,19 @@ impl Particle {
             age: 0.0,
             lifetime,
             size,
+            particle_type: ParticleType::Normal,
+        }
+    }
+
+    pub fn new_weather(position: Point3<f32>, velocity: Vector3<f32>, color: [f32; 4], lifetime: f32, size: f32, particle_type: ParticleType) -> Self {
+        Self {
+            position,
+            velocity,
+            color,
+            age: 0.0,
+            lifetime,
+            size,
+            particle_type,
         }
     }
 
@@ -164,20 +228,105 @@ impl ParticleSystem {
         ));
     }
 
+    pub fn spawn_weather(&mut self, camera_pos: Point3<f32>, weather: &WeatherState, dt: f32) {
+        if weather.intensity < 0.01 || weather.weather_type == WeatherType::Clear {
+            return;
+        }
+
+        let spawn_rate = match weather.weather_type {
+            WeatherType::Rain => 150.0 * weather.intensity,
+            WeatherType::Snow => 80.0 * weather.intensity,
+            WeatherType::Clear => 0.0,
+        };
+
+        let spawn_count = (spawn_rate * dt) as usize;
+        let spawn_radius = 25.0;
+        let spawn_height = 35.0;
+
+        for _ in 0..spawn_count {
+            if self.particles.len() >= MAX_PARTICLES {
+                break;
+            }
+
+            let offset_x = self.rng.gen_range(-spawn_radius..spawn_radius);
+            let offset_z = self.rng.gen_range(-spawn_radius..spawn_radius);
+
+            let pos = Point3::new(
+                camera_pos.x + offset_x,
+                camera_pos.y + spawn_height,
+                camera_pos.z + offset_z,
+            );
+
+            match weather.weather_type {
+                WeatherType::Rain => {
+                    let velocity = Vector3::new(
+                        self.rng.gen_range(-0.5..0.5),
+                        -18.0 - self.rng.gen_range(0.0..4.0),
+                        self.rng.gen_range(-0.5..0.5),
+                    );
+                    self.particles.push(Particle::new_weather(
+                        pos,
+                        velocity,
+                        [0.6, 0.7, 0.9, 0.35],  // Blue-ish, transparent
+                        2.5,
+                        0.015,
+                        ParticleType::Rain,
+                    ));
+                }
+                WeatherType::Snow => {
+                    let velocity = Vector3::new(
+                        self.rng.gen_range(-1.0..1.0),
+                        -2.5 - self.rng.gen_range(0.0..1.0),
+                        self.rng.gen_range(-1.0..1.0),
+                    );
+                    self.particles.push(Particle::new_weather(
+                        pos,
+                        velocity,
+                        [0.95, 0.95, 1.0, 0.85],  // White
+                        6.0,
+                        0.04,
+                        ParticleType::Snow,
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+
     pub fn update(&mut self, dt: f32) {
         for particle in &mut self.particles {
-            particle.velocity.y += GRAVITY * dt;
+            // Apply appropriate gravity based on particle type
+            let gravity = match particle.particle_type {
+                ParticleType::Snow => SNOW_GRAVITY,
+                ParticleType::Rain => GRAVITY * 0.5,  // Rain has constant velocity mostly
+                ParticleType::Normal => GRAVITY,
+            };
+            particle.velocity.y += gravity * dt;
+
+            // Add slight drift for snow
+            if particle.particle_type == ParticleType::Snow {
+                particle.velocity.x += self.rng.gen_range(-0.5..0.5) * dt;
+                particle.velocity.z += self.rng.gen_range(-0.5..0.5) * dt;
+            }
+
             particle.position.x += particle.velocity.x * dt;
             particle.position.y += particle.velocity.y * dt;
             particle.position.z += particle.velocity.z * dt;
             particle.age += dt;
 
-            // Simple ground collision - bounce slightly
+            // Ground collision - weather particles just die, others bounce
             if particle.position.y < 0.0 {
-                particle.position.y = 0.0;
-                particle.velocity.y = -particle.velocity.y * 0.3;
-                particle.velocity.x *= 0.8;
-                particle.velocity.z *= 0.8;
+                match particle.particle_type {
+                    ParticleType::Rain | ParticleType::Snow => {
+                        particle.age = particle.lifetime;  // Kill weather particles on ground
+                    }
+                    ParticleType::Normal => {
+                        particle.position.y = 0.0;
+                        particle.velocity.y = -particle.velocity.y * 0.3;
+                        particle.velocity.x *= 0.8;
+                        particle.velocity.z *= 0.8;
+                    }
+                }
             }
         }
 
@@ -213,6 +362,7 @@ fn get_block_particle_color(block_type: BlockType) -> [f32; 4] {
         BlockType::Gold => [0.95, 0.8, 0.2, 1.0],
         BlockType::Diamond => [0.4, 0.9, 0.95, 1.0],
         BlockType::Water => [0.3, 0.5, 0.8, 0.7],
+        BlockType::Torch => [0.9, 0.6, 0.2, 1.0],  // Orange particles
         _ => [0.5, 0.5, 0.5, 1.0],
     }
 }

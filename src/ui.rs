@@ -285,6 +285,7 @@ impl UIRenderer {
             BlockType::Diamond => 14.0,
             BlockType::Gravel => 15.0,
             BlockType::Clay => 16.0,
+            BlockType::Torch => 24.0,
             BlockType::Air | BlockType::Barrier => 0.0,
         }
     }

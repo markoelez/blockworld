@@ -141,6 +141,13 @@ fn hash(p: vec2<f32>) -> f32 {
     return fract(sin(dot(p, vec2<f32>(12.9898, 78.233))) * 43758.5453);
 }
 
+// Linearize depth for better comparison (reverse-Z perspective)
+fn linearize_depth(d: f32) -> f32 {
+    let near = 0.1;
+    let far = 500.0;
+    return near * far / (far - d * (far - near));
+}
+
 // Load depth at pixel coordinates (integer)
 fn load_depth(pixel: vec2<i32>) -> f32 {
     let dims = textureDimensions(t_depth);
@@ -148,21 +155,23 @@ fn load_depth(pixel: vec2<i32>) -> f32 {
     return textureLoad(t_depth, clamped, 0);
 }
 
-// Simplified SSAO - samples depth at neighboring pixels
+// Improved SSAO with linearized depth comparison
 fn calculate_ssao(uv: vec2<f32>) -> f32 {
     let pixel = vec2<i32>(uv * u_post.screen_size);
-    let center_depth = load_depth(pixel);
+    let center_depth_raw = load_depth(pixel);
 
     // Skip sky (far depth)
-    if center_depth >= 0.9999 {
+    if center_depth_raw >= 0.9999 {
         return 1.0;
     }
 
-    let radius_pixels = u_post.ssao_radius * 8.0;  // Radius in pixels
+    // Linearize center depth for accurate world-space comparison
+    let center_depth = linearize_depth(center_depth_raw);
+    let radius_pixels = u_post.ssao_radius * 12.0;
 
     var occlusion = 0.0;
 
-    // Fixed 8-sample pattern (manually unrolled for uniform control flow)
+    // Fixed 8-sample pattern with random rotation
     let noise = hash(uv * u_post.screen_size);
     let angle_offset = noise * 6.28318;
 
@@ -170,86 +179,88 @@ fn calculate_ssao(uv: vec2<f32>) -> f32 {
     var angle = 0.0 * (6.28318 / 8.0) + angle_offset;
     var dist = 1.0 / 8.0 * radius_pixels;
     var offset = vec2<i32>(vec2<f32>(cos(angle), sin(angle)) * dist);
-    var sample_depth = load_depth(pixel + offset);
+    var sample_depth = linearize_depth(load_depth(pixel + offset));
     var depth_diff = center_depth - sample_depth;
-    var range_check = smoothstep(0.0, 1.0, 0.01 / max(abs(depth_diff), 0.0001));
-    var is_occluded = step(0.0001, depth_diff) * step(depth_diff, 0.02);
-    occlusion = occlusion + is_occluded * range_check;
+    // Smooth falloff: occlude if sample is closer (depth_diff > 0) but not too far away
+    var falloff = 1.0 - smoothstep(0.0, 2.0, abs(depth_diff));
+    var is_occluded = smoothstep(0.0, 0.3, depth_diff) * falloff;
+    occlusion = occlusion + is_occluded;
 
     // Sample 1
     angle = 1.0 * (6.28318 / 8.0) + angle_offset;
     dist = 2.0 / 8.0 * radius_pixels;
     offset = vec2<i32>(vec2<f32>(cos(angle), sin(angle)) * dist);
-    sample_depth = load_depth(pixel + offset);
+    sample_depth = linearize_depth(load_depth(pixel + offset));
     depth_diff = center_depth - sample_depth;
-    range_check = smoothstep(0.0, 1.0, 0.01 / max(abs(depth_diff), 0.0001));
-    is_occluded = step(0.0001, depth_diff) * step(depth_diff, 0.02);
-    occlusion = occlusion + is_occluded * range_check;
+    falloff = 1.0 - smoothstep(0.0, 2.0, abs(depth_diff));
+    is_occluded = smoothstep(0.0, 0.3, depth_diff) * falloff;
+    occlusion = occlusion + is_occluded;
 
     // Sample 2
     angle = 2.0 * (6.28318 / 8.0) + angle_offset;
     dist = 3.0 / 8.0 * radius_pixels;
     offset = vec2<i32>(vec2<f32>(cos(angle), sin(angle)) * dist);
-    sample_depth = load_depth(pixel + offset);
+    sample_depth = linearize_depth(load_depth(pixel + offset));
     depth_diff = center_depth - sample_depth;
-    range_check = smoothstep(0.0, 1.0, 0.01 / max(abs(depth_diff), 0.0001));
-    is_occluded = step(0.0001, depth_diff) * step(depth_diff, 0.02);
-    occlusion = occlusion + is_occluded * range_check;
+    falloff = 1.0 - smoothstep(0.0, 2.0, abs(depth_diff));
+    is_occluded = smoothstep(0.0, 0.3, depth_diff) * falloff;
+    occlusion = occlusion + is_occluded;
 
     // Sample 3
     angle = 3.0 * (6.28318 / 8.0) + angle_offset;
     dist = 4.0 / 8.0 * radius_pixels;
     offset = vec2<i32>(vec2<f32>(cos(angle), sin(angle)) * dist);
-    sample_depth = load_depth(pixel + offset);
+    sample_depth = linearize_depth(load_depth(pixel + offset));
     depth_diff = center_depth - sample_depth;
-    range_check = smoothstep(0.0, 1.0, 0.01 / max(abs(depth_diff), 0.0001));
-    is_occluded = step(0.0001, depth_diff) * step(depth_diff, 0.02);
-    occlusion = occlusion + is_occluded * range_check;
+    falloff = 1.0 - smoothstep(0.0, 2.0, abs(depth_diff));
+    is_occluded = smoothstep(0.0, 0.3, depth_diff) * falloff;
+    occlusion = occlusion + is_occluded;
 
     // Sample 4
     angle = 4.0 * (6.28318 / 8.0) + angle_offset;
     dist = 5.0 / 8.0 * radius_pixels;
     offset = vec2<i32>(vec2<f32>(cos(angle), sin(angle)) * dist);
-    sample_depth = load_depth(pixel + offset);
+    sample_depth = linearize_depth(load_depth(pixel + offset));
     depth_diff = center_depth - sample_depth;
-    range_check = smoothstep(0.0, 1.0, 0.01 / max(abs(depth_diff), 0.0001));
-    is_occluded = step(0.0001, depth_diff) * step(depth_diff, 0.02);
-    occlusion = occlusion + is_occluded * range_check;
+    falloff = 1.0 - smoothstep(0.0, 2.0, abs(depth_diff));
+    is_occluded = smoothstep(0.0, 0.3, depth_diff) * falloff;
+    occlusion = occlusion + is_occluded;
 
     // Sample 5
     angle = 5.0 * (6.28318 / 8.0) + angle_offset;
     dist = 6.0 / 8.0 * radius_pixels;
     offset = vec2<i32>(vec2<f32>(cos(angle), sin(angle)) * dist);
-    sample_depth = load_depth(pixel + offset);
+    sample_depth = linearize_depth(load_depth(pixel + offset));
     depth_diff = center_depth - sample_depth;
-    range_check = smoothstep(0.0, 1.0, 0.01 / max(abs(depth_diff), 0.0001));
-    is_occluded = step(0.0001, depth_diff) * step(depth_diff, 0.02);
-    occlusion = occlusion + is_occluded * range_check;
+    falloff = 1.0 - smoothstep(0.0, 2.0, abs(depth_diff));
+    is_occluded = smoothstep(0.0, 0.3, depth_diff) * falloff;
+    occlusion = occlusion + is_occluded;
 
     // Sample 6
     angle = 6.0 * (6.28318 / 8.0) + angle_offset;
     dist = 7.0 / 8.0 * radius_pixels;
     offset = vec2<i32>(vec2<f32>(cos(angle), sin(angle)) * dist);
-    sample_depth = load_depth(pixel + offset);
+    sample_depth = linearize_depth(load_depth(pixel + offset));
     depth_diff = center_depth - sample_depth;
-    range_check = smoothstep(0.0, 1.0, 0.01 / max(abs(depth_diff), 0.0001));
-    is_occluded = step(0.0001, depth_diff) * step(depth_diff, 0.02);
-    occlusion = occlusion + is_occluded * range_check;
+    falloff = 1.0 - smoothstep(0.0, 2.0, abs(depth_diff));
+    is_occluded = smoothstep(0.0, 0.3, depth_diff) * falloff;
+    occlusion = occlusion + is_occluded;
 
     // Sample 7
     angle = 7.0 * (6.28318 / 8.0) + angle_offset;
     dist = 8.0 / 8.0 * radius_pixels;
     offset = vec2<i32>(vec2<f32>(cos(angle), sin(angle)) * dist);
-    sample_depth = load_depth(pixel + offset);
+    sample_depth = linearize_depth(load_depth(pixel + offset));
     depth_diff = center_depth - sample_depth;
-    range_check = smoothstep(0.0, 1.0, 0.01 / max(abs(depth_diff), 0.0001));
-    is_occluded = step(0.0001, depth_diff) * step(depth_diff, 0.02);
-    occlusion = occlusion + is_occluded * range_check;
+    falloff = 1.0 - smoothstep(0.0, 2.0, abs(depth_diff));
+    is_occluded = smoothstep(0.0, 0.3, depth_diff) * falloff;
+    occlusion = occlusion + is_occluded;
 
+    // Apply intensity and convert to AO factor
     occlusion = 1.0 - (occlusion / 8.0) * u_post.ssao_intensity;
 
-    // Smooth the result
-    return clamp(occlusion, 0.0, 1.0);
+    // Power curve for more natural falloff
+    return clamp(pow(occlusion, 1.5), 0.0, 1.0);
 }
 
 @fragment

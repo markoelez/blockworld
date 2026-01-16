@@ -52,6 +52,8 @@ var t_water: texture_2d<f32>;
 var t_sand: texture_2d<f32>;
 @group(1) @binding(9)
 var t_snow: texture_2d<f32>;
+@group(1) @binding(10)
+var t_torch: texture_2d<f32>;
 @group(1) @binding(6)
 var s_diffuse: sampler;
 
@@ -60,6 +62,22 @@ var s_diffuse: sampler;
 var t_shadow: texture_depth_2d;
 @group(2) @binding(1)
 var s_shadow: sampler_comparison;
+
+// Point lighting
+struct PointLight {
+    position: vec3<f32>,
+    radius: f32,
+    color: vec3<f32>,
+    intensity: f32,
+}
+
+struct LightingUniform {
+    point_lights: array<PointLight, 32>,
+    num_lights: u32,
+}
+
+@group(3) @binding(0)
+var<uniform> u_lighting: LightingUniform;
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
@@ -135,6 +153,31 @@ fn fresnel_schlick(cos_theta: f32, f0: f32) -> f32 {
     return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
 
+// Calculate point light contribution
+fn calculate_point_lights(world_pos: vec3<f32>, normal: vec3<f32>, base_color: vec3<f32>) -> vec3<f32> {
+    var result = vec3<f32>(0.0);
+    let N = normalize(normal);
+
+    for (var i = 0u; i < u_lighting.num_lights; i = i + 1u) {
+        let light = u_lighting.point_lights[i];
+        let light_vec = light.position - world_pos;
+        let dist = length(light_vec);
+
+        if dist < light.radius {
+            let L = normalize(light_vec);
+            let NdotL = max(dot(N, L), 0.0);
+
+            // Smooth quadratic attenuation
+            let attenuation = 1.0 - smoothstep(0.0, light.radius, dist);
+            let att_sq = attenuation * attenuation;
+
+            result += base_color * light.color * NdotL * light.intensity * att_sq;
+        }
+    }
+
+    return result;
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Sample all textures
@@ -147,6 +190,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let water_color = textureSample(t_water, s_diffuse, in.tex_coords);
     let sand_color = textureSample(t_sand, s_diffuse, in.tex_coords);
     let snow_color = textureSample(t_snow, s_diffuse, in.tex_coords);
+    let torch_color = textureSample(t_torch, s_diffuse, in.tex_coords);
 
     // Select texture based on block type
     let bt = floor(in.block_type + 0.5);
@@ -231,6 +275,14 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Villager robe (white/gray)
         texture_color = vec4<f32>(0.8, 0.78, 0.75, 1.0);
         roughness = 0.7;
+    } else if (bt == 24.0) {
+        // Torch stick - warm brown/orange color
+        texture_color = vec4<f32>(0.6, 0.4, 0.2, 1.0);  // Brown wood color
+        roughness = 0.9;
+    } else if (bt == 25.0) {
+        // Torch flame - bright yellow/orange HDR glow
+        texture_color = vec4<f32>(1.0, 0.8, 0.3, 1.0) * 4.0;  // Very bright for bloom
+        roughness = 1.0;
     }
 
     // Crack effect - dark cracks that spread as damage increases
@@ -308,7 +360,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let spec_color = mix(vec3<f32>(1.0), base_color, metallic);
     let spec = spec_color * specular * fresnel * u_uniform.sun_color * sun_intensity * shadow;
 
-    var lit_color = ambient * base_color + diffuse + spec;
+    // Point light contribution (torches, etc.)
+    let point_lights = calculate_point_lights(in.world_position, N, base_color);
+
+    var lit_color = ambient * base_color + diffuse + spec + point_lights;
 
     // Enhanced atmospheric fog with aerial perspective
     let distance = length(in.world_position - u_uniform.camera_pos);

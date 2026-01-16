@@ -9,7 +9,7 @@ use cgmath::{Matrix4, Deg, Vector3, Vector4, InnerSpace, Matrix, Point3};
 use rayon::prelude::*;
 
 use crate::camera::Camera;
-use crate::world::{World, BlockType};
+use crate::world::{World, BlockType, TorchFace};
 use crate::ui::{Inventory, UIRenderer};
 use crate::entity::{EntityManager, Villager, VillagerState, VILLAGER_HEIGHT};
 use crate::particle::ParticleSystem;
@@ -206,6 +206,36 @@ struct BloomUniform {
     _padding: [f32; 2],
 }
 
+const MAX_POINT_LIGHTS: usize = 32;
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct PointLight {
+    position: [f32; 3],
+    radius: f32,
+    color: [f32; 3],
+    intensity: f32,
+}
+
+impl Default for PointLight {
+    fn default() -> Self {
+        Self {
+            position: [0.0, 0.0, 0.0],
+            radius: 0.0,
+            color: [0.0, 0.0, 0.0],
+            intensity: 0.0,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct LightingUniform {
+    point_lights: [PointLight; MAX_POINT_LIGHTS],
+    num_lights: u32,
+    _padding: [u32; 3],
+}
+
 pub struct Renderer {
     surface: wgpu::Surface,
     device: wgpu::Device,
@@ -273,6 +303,9 @@ pub struct Renderer {
     particle_uniform_buffer: wgpu::Buffer,
     particle_bind_group: wgpu::BindGroup,
     particle_vertex_count: u32,
+    // Point lighting
+    lighting_buffer: wgpu::Buffer,
+    lighting_bind_group: wgpu::BindGroup,
 }
 
 impl Renderer {
@@ -572,6 +605,16 @@ impl Renderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 10,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
             ],
             label: Some("texture_bind_group_layout"),
         });
@@ -614,6 +657,23 @@ impl Renderer {
                 },
             ],
             label: Some("shadow_texture_bind_group_layout"),
+        });
+
+        // Lighting bind group layout (for point lights)
+        let lighting_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+            label: Some("lighting_bind_group_layout"),
         });
 
         // Post-process bind group layout
@@ -712,7 +772,7 @@ impl Renderer {
 
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Render Pipeline Layout"),
-            bind_group_layouts: &[&uniform_bind_group_layout, &texture_bind_group_layout, &shadow_texture_bind_group_layout],
+            bind_group_layouts: &[&uniform_bind_group_layout, &texture_bind_group_layout, &shadow_texture_bind_group_layout, &lighting_bind_group_layout],
             push_constant_ranges: &[],
         });
 
@@ -1258,7 +1318,9 @@ impl Renderer {
             .unwrap_or_else(|_| Self::create_fallback_texture(&device, &queue, [244, 205, 140, 255]));
         let snow_texture = Self::load_texture(&device, &queue, "src/textures/snow.png")
             .unwrap_or_else(|_| Self::create_fallback_texture(&device, &queue, [250, 250, 250, 255]));
-        
+        let torch_texture = Self::load_texture(&device, &queue, "src/textures/torch.png")
+            .unwrap_or_else(|_| Self::create_fallback_texture(&device, &queue, [255, 180, 100, 255]));
+
         // Create texture views
         let grass_view = grass_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let grass_top_view = grass_top_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1269,7 +1331,8 @@ impl Renderer {
         let water_view = water_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let sand_view = sand_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let snow_view = snow_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        
+        let torch_view = torch_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
         // Create sampler
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             address_mode_u: wgpu::AddressMode::Repeat,
@@ -1324,6 +1387,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 9,
                     resource: wgpu::BindingResource::TextureView(&snow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 10,
+                    resource: wgpu::BindingResource::TextureView(&torch_view),
                 },
             ],
             label: Some("texture_bind_group"),
@@ -1518,8 +1585,8 @@ impl Renderer {
                 god_ray_intensity: 0.3,
                 god_ray_decay: 0.97,
                 screen_size: [config.width as f32, config.height as f32],
-                ssao_intensity: 0.0,  // Disabled - was causing visual artifacts
-                ssao_radius: 0.5,
+                ssao_intensity: 0.0,  // Disabled - causing visual artifacts
+                ssao_radius: 0.25,
                 underwater: 0.0,
                 _pad1: 0.0,
                 _pad2: 0.0,
@@ -1733,6 +1800,25 @@ impl Renderer {
             push_constant_ranges: &[],
         });
 
+        // Lighting buffer for point lights
+        let lighting_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Lighting Buffer"),
+            size: std::mem::size_of::<LightingUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let lighting_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &lighting_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: lighting_buffer.as_entire_binding(),
+                },
+            ],
+            label: Some("lighting_bind_group"),
+        });
+
         let particle_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Particle Pipeline"),
             layout: Some(&particle_pipeline_layout),
@@ -1877,6 +1963,46 @@ impl Renderer {
             particle_uniform_buffer,
             particle_bind_group,
             particle_vertex_count: 0,
+            // Point lighting
+            lighting_buffer,
+            lighting_bind_group,
+        }
+    }
+
+    fn collect_torch_lights(world: &World, camera_pos: cgmath::Point3<f32>) -> LightingUniform {
+        use crate::world::BlockType;
+
+        let mut lights = [PointLight::default(); MAX_POINT_LIGHTS];
+        let mut num_lights = 0u32;
+
+        let search_radius = 48i32;
+        let cam_x = camera_pos.x as i32;
+        let cam_y = camera_pos.y as i32;
+        let cam_z = camera_pos.z as i32;
+
+        // Search nearby blocks for torches
+        for x in (cam_x - search_radius)..(cam_x + search_radius) {
+            for z in (cam_z - search_radius)..(cam_z + search_radius) {
+                for y in (cam_y - 20).max(0)..(cam_y + 20).min(World::CHUNK_HEIGHT as i32) {
+                    if let Some(BlockType::Torch) = world.get_block(x, y, z) {
+                        if (num_lights as usize) < MAX_POINT_LIGHTS {
+                            lights[num_lights as usize] = PointLight {
+                                position: [x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5],
+                                radius: 12.0,
+                                color: [1.0, 0.8, 0.4],  // Warm orange glow
+                                intensity: 1.5,
+                            };
+                            num_lights += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        LightingUniform {
+            point_lights: lights,
+            num_lights,
+            _padding: [0; 3],
         }
     }
 
@@ -2121,15 +2247,19 @@ impl Renderer {
             god_ray_intensity: 0.4 * day_factor,  // Sun glow effect (scales with daytime)
             god_ray_decay: 0.97,
             screen_size: [self.config.width as f32, self.config.height as f32],
-            ssao_intensity: 0.0,  // Disabled - was causing visual artifacts
-            ssao_radius: 0.5,
+            ssao_intensity: 0.0,  // Disabled - causing visual artifacts
+            ssao_radius: 0.25,
             underwater: if underwater { 1.0 } else { 0.0 },
             _pad1: 0.0,
             _pad2: 0.0,
             _pad3: 0.0,
         };
         self.queue.write_buffer(&self.post_process_uniform_buffer, 0, bytemuck::cast_slice(&[post_uniform]));
-        
+
+        // Collect torch lights from nearby chunks
+        let lighting_uniform = Self::collect_torch_lights(world, camera.position);
+        self.queue.write_buffer(&self.lighting_buffer, 0, bytemuck::cast_slice(&[lighting_uniform]));
+
         // Update outline buffers if a block is targeted
         if let Some((block_x, block_y, block_z)) = targeted_block {
             self.update_outline_buffers(block_x, block_y, block_z);
@@ -2213,6 +2343,7 @@ impl Renderer {
             render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
             render_pass.set_bind_group(2, &self.shadow_texture_bind_group, &[]);
+            render_pass.set_bind_group(3, &self.lighting_bind_group, &[]);
 
             // Create frustum for culling
             let frustum = Frustum::from_view_proj(&view_proj);
@@ -2255,6 +2386,7 @@ impl Renderer {
             // Render transparent chunks with frustum culling
             render_pass.set_pipeline(&self.transparent_pipeline);
             render_pass.set_bind_group(2, &self.shadow_texture_bind_group, &[]);
+            render_pass.set_bind_group(3, &self.lighting_bind_group, &[]);
             for (&(chunk_x, chunk_z), chunk_mesh) in &self.chunk_meshes_transparent {
                 if chunk_mesh.index_count > 0 {
                     // Calculate chunk AABB
@@ -2767,6 +2899,12 @@ impl Renderer {
             &mut trans_vertices, &mut trans_indices,
         );
 
+        // Render torches with special geometry
+        Self::render_torches(
+            world, chunk, chunk_x_offset, chunk_z_offset,
+            &mut opaque_vertices, &mut opaque_indices,
+        );
+
         (opaque_vertices, opaque_indices, trans_vertices, trans_indices)
     }
 
@@ -2785,8 +2923,8 @@ impl Renderer {
             for y in 0..World::CHUNK_HEIGHT {
                 for z in 0..World::CHUNK_SIZE {
                     let block_type = chunk.blocks[x][y][z];
-                    if block_type == BlockType::Air || block_type == BlockType::Barrier {
-                        continue;
+                    if block_type == BlockType::Air || block_type == BlockType::Barrier || block_type == BlockType::Torch {
+                        continue;  // Torches are rendered separately with special geometry
                     }
 
                     let world_x = chunk_x_offset + x as i32;
@@ -2852,6 +2990,207 @@ impl Renderer {
         }
     }
 
+    // Render torches as 3D sticks attached to block faces
+    fn render_torches(
+        world: &World,
+        chunk: &crate::world::Chunk,
+        chunk_x_offset: i32,
+        chunk_z_offset: i32,
+        opaque_vertices: &mut Vec<Vertex>,
+        opaque_indices: &mut Vec<u16>,
+    ) {
+        let block_type_f = Self::block_type_to_float(BlockType::Torch);
+
+        for x in 0..World::CHUNK_SIZE {
+            for y in 0..World::CHUNK_HEIGHT {
+                for z in 0..World::CHUNK_SIZE {
+                    if chunk.blocks[x][y][z] != BlockType::Torch {
+                        continue;
+                    }
+
+                    let world_x = chunk_x_offset + x as i32;
+                    let world_y = y as i32;
+                    let world_z = chunk_z_offset + z as i32;
+
+                    // Get torch orientation (default to Top if not found)
+                    let face = world.get_torch_face(world_x, world_y, world_z)
+                        .unwrap_or(TorchFace::Top);
+
+                    // Torch dimensions
+                    let torch_width = 0.125;   // 2/16 blocks wide
+                    let torch_height = 0.625;  // 10/16 blocks tall
+                    let hw = torch_width / 2.0;
+
+                    // Calculate torch base position and tilt based on face
+                    match face {
+                        TorchFace::Top => {
+                            // Standing torch - centered on top of block below
+                            let cx = world_x as f32 + 0.5;
+                            let cy = world_y as f32;
+                            let cz = world_z as f32 + 0.5;
+
+                            Self::add_torch_stick(
+                                opaque_vertices, opaque_indices,
+                                cx, cy, cz, hw, torch_height,
+                                0.0, 0.0,  // No tilt
+                                block_type_f,
+                            );
+                        }
+                        TorchFace::North => {
+                            // Torch in -Z air block, solid at +Z, tilts toward -Z (toward player)
+                            let cx = world_x as f32 + 0.5;
+                            let cy = world_y as f32 + 0.15;
+                            let cz = world_z as f32 + 0.9;  // Near +Z edge (close to solid)
+
+                            Self::add_torch_stick(
+                                opaque_vertices, opaque_indices,
+                                cx, cy, cz, hw, torch_height * 0.85,
+                                0.0, -0.35,  // Tilt toward -Z
+                                block_type_f,
+                            );
+                        }
+                        TorchFace::South => {
+                            // Torch in +Z air block, solid at -Z, tilts toward +Z (toward player)
+                            let cx = world_x as f32 + 0.5;
+                            let cy = world_y as f32 + 0.15;
+                            let cz = world_z as f32 + 0.1;  // Near -Z edge (close to solid)
+
+                            Self::add_torch_stick(
+                                opaque_vertices, opaque_indices,
+                                cx, cy, cz, hw, torch_height * 0.85,
+                                0.0, 0.35,  // Tilt toward +Z
+                                block_type_f,
+                            );
+                        }
+                        TorchFace::East => {
+                            // Torch in +X air block, solid at -X, tilts toward +X (toward player)
+                            let cx = world_x as f32 + 0.1;  // Near -X edge (close to solid)
+                            let cy = world_y as f32 + 0.15;
+                            let cz = world_z as f32 + 0.5;
+
+                            Self::add_torch_stick(
+                                opaque_vertices, opaque_indices,
+                                cx, cy, cz, hw, torch_height * 0.85,
+                                0.35, 0.0,  // Tilt toward +X
+                                block_type_f,
+                            );
+                        }
+                        TorchFace::West => {
+                            // Torch in -X air block, solid at +X, tilts toward -X (toward player)
+                            let cx = world_x as f32 + 0.9;  // Near +X edge (close to solid)
+                            let cy = world_y as f32 + 0.15;
+                            let cz = world_z as f32 + 0.5;
+
+                            Self::add_torch_stick(
+                                opaque_vertices, opaque_indices,
+                                cx, cy, cz, hw, torch_height * 0.85,
+                                -0.35, 0.0,  // Tilt toward -X
+                                block_type_f,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Add a 3D torch stick (rectangular prism, optionally tilted) with flame on top
+    fn add_torch_stick(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        cx: f32, cy: f32, cz: f32,  // Base center position
+        hw: f32,                     // Half-width
+        height: f32,                 // Height
+        tilt_x: f32, tilt_z: f32,   // Tilt offset at top
+        block_type: f32,
+    ) {
+        // 8 corners of the torch stick
+        // Bottom 4 corners
+        let b0 = [cx - hw, cy, cz - hw];
+        let b1 = [cx + hw, cy, cz - hw];
+        let b2 = [cx + hw, cy, cz + hw];
+        let b3 = [cx - hw, cy, cz + hw];
+
+        // Top 4 corners (with tilt applied)
+        let top_cx = cx + tilt_x;
+        let top_cz = cz + tilt_z;
+        let top_y = cy + height;
+        let t0 = [top_cx - hw, top_y, top_cz - hw];
+        let t1 = [top_cx + hw, top_y, top_cz - hw];
+        let t2 = [top_cx + hw, top_y, top_cz + hw];
+        let t3 = [top_cx - hw, top_y, top_cz + hw];
+
+        // Add 6 faces of the stick (excluding top, flame goes there)
+        // Front face (+Z)
+        Self::add_quad_face(vertices, indices, b3, b2, t2, t3, [0.0, 0.0, 1.0], block_type);
+        // Back face (-Z)
+        Self::add_quad_face(vertices, indices, b1, b0, t0, t1, [0.0, 0.0, -1.0], block_type);
+        // Right face (+X)
+        Self::add_quad_face(vertices, indices, b2, b1, t1, t2, [1.0, 0.0, 0.0], block_type);
+        // Left face (-X)
+        Self::add_quad_face(vertices, indices, b0, b3, t3, t0, [-1.0, 0.0, 0.0], block_type);
+        // Bottom face (-Y)
+        Self::add_quad_face(vertices, indices, b3, b2, b1, b0, [0.0, -1.0, 0.0], block_type);
+
+        // Add flame on top of the torch
+        let flame_type = 25.0;  // Special block type for bright flame
+        let flame_hw = hw * 1.2;  // Slightly wider than stick
+        let flame_height = 0.15;  // Flame height
+
+        // Flame bottom (at top of stick)
+        let f_b0 = [top_cx - flame_hw, top_y, top_cz - flame_hw];
+        let f_b1 = [top_cx + flame_hw, top_y, top_cz - flame_hw];
+        let f_b2 = [top_cx + flame_hw, top_y, top_cz + flame_hw];
+        let f_b3 = [top_cx - flame_hw, top_y, top_cz + flame_hw];
+
+        // Flame top (slightly higher, with additional tilt for animation feel)
+        let flame_top_y = top_y + flame_height;
+        let f_t0 = [top_cx - flame_hw * 0.5, flame_top_y, top_cz - flame_hw * 0.5];
+        let f_t1 = [top_cx + flame_hw * 0.5, flame_top_y, top_cz - flame_hw * 0.5];
+        let f_t2 = [top_cx + flame_hw * 0.5, flame_top_y, top_cz + flame_hw * 0.5];
+        let f_t3 = [top_cx - flame_hw * 0.5, flame_top_y, top_cz + flame_hw * 0.5];
+
+        // Add flame faces (tapered shape)
+        Self::add_quad_face(vertices, indices, f_b3, f_b2, f_t2, f_t3, [0.0, 0.0, 1.0], flame_type);
+        Self::add_quad_face(vertices, indices, f_b1, f_b0, f_t0, f_t1, [0.0, 0.0, -1.0], flame_type);
+        Self::add_quad_face(vertices, indices, f_b2, f_b1, f_t1, f_t2, [1.0, 0.0, 0.0], flame_type);
+        Self::add_quad_face(vertices, indices, f_b0, f_b3, f_t3, f_t0, [-1.0, 0.0, 0.0], flame_type);
+        Self::add_quad_face(vertices, indices, f_t0, f_t1, f_t2, f_t3, [0.0, 1.0, 0.0], flame_type);
+        Self::add_quad_face(vertices, indices, f_b3, f_b2, f_b1, f_b0, [0.0, -1.0, 0.0], flame_type);
+    }
+
+    // Add a single quad face
+    fn add_quad_face(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        v0: [f32; 3], v1: [f32; 3], v2: [f32; 3], v3: [f32; 3],
+        normal: [f32; 3],
+        block_type: f32,
+    ) {
+        let base = vertices.len() as u16;
+
+        let tex_coords = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+        let positions = [v0, v1, v2, v3];
+
+        for i in 0..4 {
+            vertices.push(Vertex {
+                position: positions[i],
+                tex_coords: tex_coords[i],
+                normal,
+                block_type,
+                damage: 0.0,
+            });
+        }
+
+        // Two triangles for the quad
+        indices.push(base);
+        indices.push(base + 1);
+        indices.push(base + 2);
+        indices.push(base);
+        indices.push(base + 2);
+        indices.push(base + 3);
+    }
+
     // Greedy mesh for horizontal faces (top/bottom) - iterates Y layers, merges in XZ plane
     fn greedy_mesh_horizontal<F>(
         world: &World,
@@ -2875,8 +3214,8 @@ impl Renderer {
             for x in 0..size {
                 for z in 0..size {
                     let block_type = chunk.blocks[x][y][z];
-                    if block_type == BlockType::Air || block_type == BlockType::Barrier {
-                        continue;
+                    if block_type == BlockType::Air || block_type == BlockType::Barrier || block_type == BlockType::Torch {
+                        continue;  // Torches are rendered separately with special geometry
                     }
 
                     let world_x = chunk_x_offset + x as i32;
@@ -2994,8 +3333,8 @@ impl Renderer {
             for y in 0..height {
                 for z in 0..size {
                     let block_type = chunk.blocks[x][y][z];
-                    if block_type == BlockType::Air || block_type == BlockType::Barrier {
-                        continue;
+                    if block_type == BlockType::Air || block_type == BlockType::Barrier || block_type == BlockType::Torch {
+                        continue;  // Torches are rendered separately with special geometry
                     }
 
                     let world_x = chunk_x_offset + x as i32;
@@ -3101,8 +3440,8 @@ impl Renderer {
             for y in 0..height {
                 for x in 0..size {
                     let block_type = chunk.blocks[x][y][z];
-                    if block_type == BlockType::Air || block_type == BlockType::Barrier {
-                        continue;
+                    if block_type == BlockType::Air || block_type == BlockType::Barrier || block_type == BlockType::Torch {
+                        continue;  // Torches are rendered separately with special geometry
                     }
 
                     let world_x = chunk_x_offset + x as i32;
@@ -3470,7 +3809,8 @@ impl Renderer {
             if current_type == BlockType::Water {
                 block != BlockType::Water
             } else {
-                block == BlockType::Air
+                // Torch doesn't occlude faces - it's a small object, not a full block
+                block == BlockType::Air || block == BlockType::Torch
             }
         })
     }
@@ -3491,6 +3831,9 @@ impl Renderer {
             BlockType::Iron => 12.0,
             BlockType::Gold => 13.0,
             BlockType::Diamond => 14.0,
+            BlockType::Gravel => 15.0,
+            BlockType::Clay => 16.0,
+            BlockType::Torch => 24.0,  // Torch uses texture
             _ => 0.0,
         }
     }

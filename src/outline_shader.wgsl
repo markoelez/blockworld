@@ -30,6 +30,12 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    // Black color for outline
-    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    // Pulsing glow effect - time_of_day cycles 0-1 over 10 minutes
+    // Multiply by larger value for visible pulse rate
+    let pulse = sin(u_uniform.time_of_day * 50.0) * 0.2 + 0.8;
+
+    // White/cyan glow color - HDR value (>1.0) for bloom pickup
+    let glow_color = vec3<f32>(0.9, 0.95, 1.0) * 2.5 * pulse;
+
+    return vec4<f32>(glow_color, 1.0);
 }

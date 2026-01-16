@@ -1,7 +1,7 @@
 use cgmath::{Matrix4, Vector3, Point3, Deg, perspective, InnerSpace};
 use winit::event::VirtualKeyCode;
 use wgpu::SurfaceConfiguration;
-use crate::world::{World, BlockType};
+use crate::world::{World, BlockType, TorchFace};
 
 const PLAYER_HEIGHT: f32 = 1.8;
 const PLAYER_WIDTH: f32 = 0.6;
@@ -483,31 +483,60 @@ impl Camera {
     }
     
     pub fn get_block_placement_position(&self, world: &World, max_distance: f32) -> Option<(i32, i32, i32)> {
+        self.get_block_placement_with_face(world, max_distance).map(|(pos, _)| pos)
+    }
+
+    pub fn get_block_placement_with_face(&self, world: &World, max_distance: f32) -> Option<((i32, i32, i32), TorchFace)> {
         let direction = self.get_look_direction();
         let step_size = 0.05; // Smaller steps for more precision
         let steps = (max_distance / step_size) as i32;
-        
-        let mut last_air_pos = None;
-        
+
+        let mut last_air_pos: Option<(i32, i32, i32)> = None;
+
         for i in 0..steps {
             let distance = i as f32 * step_size;
             let check_pos = self.position + direction * distance;
-            
+
             let block_x = check_pos.x.floor() as i32;
             let block_y = check_pos.y.floor() as i32;
             let block_z = check_pos.z.floor() as i32;
-            
+
             if let Some(block) = world.get_block(block_x, block_y, block_z) {
-                if block != BlockType::Air && block != BlockType::Barrier {
-                    // Hit a solid block, return the last air position
-                    return last_air_pos;
+                if block != BlockType::Air && block != BlockType::Barrier && block != BlockType::Water {
+                    // Hit a solid block, determine which face we're placing on
+                    if let Some(air_pos) = last_air_pos {
+                        let dx = air_pos.0 - block_x;
+                        let dy = air_pos.1 - block_y;
+                        let dz = air_pos.2 - block_z;
+
+                        // Determine the face based on the difference
+                        // Torch should tilt AWAY from the wall it's attached to
+                        let face = if dy > 0 {
+                            TorchFace::Top  // Placing on top of block
+                        } else if dy < 0 {
+                            TorchFace::Top  // Can't place torch on bottom, default to top
+                        } else if dx > 0 {
+                            TorchFace::East  // Air is to +X, torch tilts toward +X (east)
+                        } else if dx < 0 {
+                            TorchFace::West  // Air is to -X, torch tilts toward -X (west)
+                        } else if dz > 0 {
+                            TorchFace::South  // Air is to +Z, torch tilts toward +Z (south)
+                        } else if dz < 0 {
+                            TorchFace::North  // Air is to -Z, torch tilts toward -Z (north)
+                        } else {
+                            TorchFace::Top  // Fallback
+                        };
+
+                        return Some((air_pos, face));
+                    }
+                    return None;
                 } else if block == BlockType::Air {
                     // Update last known air position
                     last_air_pos = Some((block_x, block_y, block_z));
                 }
             }
         }
-        
+
         None
     }
     

@@ -17,7 +17,7 @@ use camera::Camera;
 use renderer::Renderer;
 use ui::Inventory;
 use entity::EntityManager;
-use particle::ParticleSystem;
+use particle::{ParticleSystem, WeatherState};
 use audio::AudioManager;
 
 #[derive(PartialEq, Clone, Copy)]
@@ -56,6 +56,8 @@ fn main() {
     let mut inventory = Inventory::new();
     let mut entity_manager = EntityManager::new();
     let mut particle_system = ParticleSystem::new();
+    let mut weather_state = WeatherState::new();
+    let mut weather_rng = rand::thread_rng();
     let audio_manager = AudioManager::new();
 
     let mut last_frame = std::time::Instant::now();
@@ -92,16 +94,34 @@ fn main() {
                                     VirtualKeyCode::Key6 => inventory.select_slot(5),
                                     VirtualKeyCode::E => {
                                         if let Some(block_type) = inventory.get_selected_block() {
-                                            if let Some(placement_pos) = camera.get_block_placement_position(&world, 5.0) {
-                                                let (x, y, z) = placement_pos;
-                                                if world.place_block(x, y, z, block_type) {
-                                                    inventory.decrement_selected();
-                                                    if let Some(ref audio) = audio_manager {
-                                                        audio.play_block_place(block_type);
+                                            if block_type == world::BlockType::Torch {
+                                                // Torches need special placement with face orientation
+                                                if let Some((pos, face)) = camera.get_block_placement_with_face(&world, 5.0) {
+                                                    let (x, y, z) = pos;
+                                                    if world.place_torch(x, y, z, face) {
+                                                        inventory.decrement_selected();
+                                                        if let Some(ref audio) = audio_manager {
+                                                            audio.play_block_place(block_type);
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                // Regular block placement
+                                                if let Some(placement_pos) = camera.get_block_placement_position(&world, 5.0) {
+                                                    let (x, y, z) = placement_pos;
+                                                    if world.place_block(x, y, z, block_type) {
+                                                        inventory.decrement_selected();
+                                                        if let Some(ref audio) = audio_manager {
+                                                            audio.play_block_place(block_type);
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
+                                    },
+                                    VirtualKeyCode::T => {
+                                        // Give player a torch for testing
+                                        inventory.add_block(world::BlockType::Torch);
                                     },
                                     VirtualKeyCode::R => {
                                         if let Some((x, y, z)) = targeted_block {
@@ -157,6 +177,8 @@ fn main() {
                     world.update_loaded_chunks(camera.position);
                     camera.update(dt, &world);
                     entity_manager.update(dt, &world, camera.position);
+                    weather_state.update(dt, &mut weather_rng);
+                    particle_system.spawn_weather(camera.position, &weather_state, dt);
                     particle_system.update(dt);
                     targeted_block = camera.get_targeted_block(&world, 5.0);
 
