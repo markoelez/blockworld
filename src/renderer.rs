@@ -405,6 +405,355 @@ impl Renderer {
         texture
     }
 
+    /// Generate a 256x256 UI atlas texture with:
+    /// - Rows 0-3 (Y=0-63): UI elements (slots, 9-slice panels) in 16x16 cells
+    /// - Rows 4-15 (Y=64-255): Bitmap font (8x8 glyphs in 16x16 cells)
+    fn generate_ui_atlas(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::Texture {
+        const ATLAS_SIZE: usize = 256;
+        let mut data = vec![[0u8, 0, 0, 0]; ATLAS_SIZE * ATLAS_SIZE];
+
+        // Helper to set a pixel
+        let set_pixel = |data: &mut Vec<[u8; 4]>, x: usize, y: usize, color: [u8; 4]| {
+            if x < ATLAS_SIZE && y < ATLAS_SIZE {
+                data[y * ATLAS_SIZE + x] = color;
+            }
+        };
+
+        // Colors
+        let slot_bg = [40u8, 40, 48, 255];           // Dark gray slot background
+        let slot_border = [60u8, 60, 70, 255];       // Slot border
+        let slot_inner = [30u8, 30, 35, 255];        // Inner slot darker
+        let selected_border = [255u8, 255, 200, 255]; // Bright yellow selection
+        let selected_glow = [255u8, 255, 180, 100];  // Subtle glow
+        let panel_dark = [25u8, 25, 30, 240];        // Panel background
+        let panel_border = [70u8, 70, 80, 255];      // Panel border
+        let panel_highlight = [90u8, 90, 100, 255];  // Panel highlight edge
+
+        // === SLOT TEXTURES (Row 0) ===
+        // [0,0] Empty slot - 16x16
+        for y in 0..16 {
+            for x in 0..16 {
+                let is_border = x == 0 || x == 15 || y == 0 || y == 15;
+                let is_inner_border = x == 1 || x == 14 || y == 1 || y == 14;
+                let color = if is_border {
+                    slot_border
+                } else if is_inner_border {
+                    slot_inner
+                } else {
+                    slot_bg
+                };
+                set_pixel(&mut data, x, y, color);
+            }
+        }
+
+        // [1,0] Selected slot - 16x16 (at x=16)
+        for y in 0..16 {
+            for x in 0..16 {
+                let is_outer = x == 0 || x == 15 || y == 0 || y == 15;
+                let is_border = x == 1 || x == 14 || y == 1 || y == 14;
+                let color = if is_outer {
+                    selected_glow
+                } else if is_border {
+                    selected_border
+                } else {
+                    slot_bg
+                };
+                set_pixel(&mut data, x + 16, y, color);
+            }
+        }
+
+        // [2,0] Hovered slot - 16x16 (at x=32)
+        for y in 0..16 {
+            for x in 0..16 {
+                let is_border = x == 0 || x == 15 || y == 0 || y == 15;
+                let color = if is_border {
+                    [100u8, 100, 120, 255]
+                } else {
+                    [50u8, 50, 60, 255]
+                };
+                set_pixel(&mut data, x + 32, y, color);
+            }
+        }
+
+        // === 9-SLICE PANEL PIECES (Row 1, Y=16-31) ===
+        // Layout: [TL][T][TR][L][C][R][BL][B][BR] - each 16x16
+        // Top-left corner [0,1]
+        for y in 0..16 {
+            for x in 0..16 {
+                let color = if x < 2 || y < 2 {
+                    panel_highlight
+                } else if x < 3 || y < 3 {
+                    panel_border
+                } else {
+                    panel_dark
+                };
+                set_pixel(&mut data, x, y + 16, color);
+            }
+        }
+
+        // Top edge [1,1]
+        for y in 0..16 {
+            for x in 0..16 {
+                let color = if y < 2 {
+                    panel_highlight
+                } else if y < 3 {
+                    panel_border
+                } else {
+                    panel_dark
+                };
+                set_pixel(&mut data, x + 16, y + 16, color);
+            }
+        }
+
+        // Top-right corner [2,1]
+        for y in 0..16 {
+            for x in 0..16 {
+                let color = if x > 13 || y < 2 {
+                    if y < 2 { panel_highlight } else { panel_border }
+                } else if x > 12 || y < 3 {
+                    panel_border
+                } else {
+                    panel_dark
+                };
+                set_pixel(&mut data, x + 32, y + 16, color);
+            }
+        }
+
+        // Left edge [3,1]
+        for y in 0..16 {
+            for x in 0..16 {
+                let color = if x < 2 {
+                    panel_highlight
+                } else if x < 3 {
+                    panel_border
+                } else {
+                    panel_dark
+                };
+                set_pixel(&mut data, x + 48, y + 16, color);
+            }
+        }
+
+        // Center [4,1]
+        for y in 0..16 {
+            for x in 0..16 {
+                set_pixel(&mut data, x + 64, y + 16, panel_dark);
+            }
+        }
+
+        // Right edge [5,1]
+        for y in 0..16 {
+            for x in 0..16 {
+                let color = if x > 13 {
+                    panel_border
+                } else {
+                    panel_dark
+                };
+                set_pixel(&mut data, x + 80, y + 16, color);
+            }
+        }
+
+        // Bottom-left corner [6,1]
+        for y in 0..16 {
+            for x in 0..16 {
+                let color = if x < 2 {
+                    panel_highlight
+                } else if x < 3 || y > 12 {
+                    panel_border
+                } else {
+                    panel_dark
+                };
+                set_pixel(&mut data, x + 96, y + 16, color);
+            }
+        }
+
+        // Bottom edge [7,1]
+        for y in 0..16 {
+            for x in 0..16 {
+                let color = if y > 13 {
+                    panel_border
+                } else {
+                    panel_dark
+                };
+                set_pixel(&mut data, x + 112, y + 16, color);
+            }
+        }
+
+        // Bottom-right corner [8,1]
+        for y in 0..16 {
+            for x in 0..16 {
+                let color = if x > 13 || y > 13 {
+                    panel_border
+                } else {
+                    panel_dark
+                };
+                set_pixel(&mut data, x + 128, y + 16, color);
+            }
+        }
+
+        // === BITMAP FONT (Rows 4-15, Y=64-255) ===
+        // 8x8 pixel glyphs in 16x16 cells, ASCII 32-127
+        // Using a simple pixel font definition
+        let font_data: std::collections::HashMap<char, [u8; 8]> = [
+            // Space
+            (' ', [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]),
+            ('!', [0x18, 0x18, 0x18, 0x18, 0x18, 0x00, 0x18, 0x00]),
+            ('"', [0x6C, 0x6C, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00]),
+            ('#', [0x24, 0x7E, 0x24, 0x24, 0x7E, 0x24, 0x00, 0x00]),
+            ('$', [0x10, 0x3C, 0x50, 0x38, 0x14, 0x78, 0x10, 0x00]),
+            ('%', [0x62, 0x64, 0x08, 0x10, 0x26, 0x46, 0x00, 0x00]),
+            ('&', [0x30, 0x48, 0x30, 0x56, 0x88, 0x88, 0x76, 0x00]),
+            ('\'', [0x18, 0x18, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00]),
+            ('(', [0x08, 0x10, 0x20, 0x20, 0x20, 0x10, 0x08, 0x00]),
+            (')', [0x20, 0x10, 0x08, 0x08, 0x08, 0x10, 0x20, 0x00]),
+            ('*', [0x00, 0x24, 0x18, 0x7E, 0x18, 0x24, 0x00, 0x00]),
+            ('+', [0x00, 0x10, 0x10, 0x7C, 0x10, 0x10, 0x00, 0x00]),
+            (',', [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x10]),
+            ('-', [0x00, 0x00, 0x00, 0x7E, 0x00, 0x00, 0x00, 0x00]),
+            ('.', [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00]),
+            ('/', [0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x00]),
+            ('0', [0x3C, 0x46, 0x4A, 0x52, 0x62, 0x3C, 0x00, 0x00]),
+            ('1', [0x18, 0x38, 0x18, 0x18, 0x18, 0x7E, 0x00, 0x00]),
+            ('2', [0x3C, 0x42, 0x02, 0x1C, 0x20, 0x7E, 0x00, 0x00]),
+            ('3', [0x3C, 0x42, 0x0C, 0x02, 0x42, 0x3C, 0x00, 0x00]),
+            ('4', [0x08, 0x18, 0x28, 0x48, 0x7E, 0x08, 0x00, 0x00]),
+            ('5', [0x7E, 0x40, 0x7C, 0x02, 0x42, 0x3C, 0x00, 0x00]),
+            ('6', [0x1C, 0x20, 0x7C, 0x42, 0x42, 0x3C, 0x00, 0x00]),
+            ('7', [0x7E, 0x02, 0x04, 0x08, 0x10, 0x10, 0x00, 0x00]),
+            ('8', [0x3C, 0x42, 0x3C, 0x42, 0x42, 0x3C, 0x00, 0x00]),
+            ('9', [0x3C, 0x42, 0x42, 0x3E, 0x04, 0x38, 0x00, 0x00]),
+            (':', [0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00]),
+            (';', [0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x10, 0x00]),
+            ('<', [0x04, 0x08, 0x10, 0x20, 0x10, 0x08, 0x04, 0x00]),
+            ('=', [0x00, 0x00, 0x7E, 0x00, 0x7E, 0x00, 0x00, 0x00]),
+            ('>', [0x20, 0x10, 0x08, 0x04, 0x08, 0x10, 0x20, 0x00]),
+            ('?', [0x3C, 0x42, 0x04, 0x08, 0x00, 0x08, 0x00, 0x00]),
+            ('@', [0x3C, 0x42, 0x5E, 0x52, 0x5E, 0x40, 0x3C, 0x00]),
+            ('A', [0x18, 0x24, 0x42, 0x7E, 0x42, 0x42, 0x00, 0x00]),
+            ('B', [0x7C, 0x42, 0x7C, 0x42, 0x42, 0x7C, 0x00, 0x00]),
+            ('C', [0x3C, 0x42, 0x40, 0x40, 0x42, 0x3C, 0x00, 0x00]),
+            ('D', [0x78, 0x44, 0x42, 0x42, 0x44, 0x78, 0x00, 0x00]),
+            ('E', [0x7E, 0x40, 0x7C, 0x40, 0x40, 0x7E, 0x00, 0x00]),
+            ('F', [0x7E, 0x40, 0x7C, 0x40, 0x40, 0x40, 0x00, 0x00]),
+            ('G', [0x3C, 0x42, 0x40, 0x4E, 0x42, 0x3C, 0x00, 0x00]),
+            ('H', [0x42, 0x42, 0x7E, 0x42, 0x42, 0x42, 0x00, 0x00]),
+            ('I', [0x7E, 0x18, 0x18, 0x18, 0x18, 0x7E, 0x00, 0x00]),
+            ('J', [0x1E, 0x04, 0x04, 0x04, 0x44, 0x38, 0x00, 0x00]),
+            ('K', [0x42, 0x44, 0x78, 0x48, 0x44, 0x42, 0x00, 0x00]),
+            ('L', [0x40, 0x40, 0x40, 0x40, 0x40, 0x7E, 0x00, 0x00]),
+            ('M', [0x42, 0x66, 0x5A, 0x42, 0x42, 0x42, 0x00, 0x00]),
+            ('N', [0x42, 0x62, 0x52, 0x4A, 0x46, 0x42, 0x00, 0x00]),
+            ('O', [0x3C, 0x42, 0x42, 0x42, 0x42, 0x3C, 0x00, 0x00]),
+            ('P', [0x7C, 0x42, 0x42, 0x7C, 0x40, 0x40, 0x00, 0x00]),
+            ('Q', [0x3C, 0x42, 0x42, 0x4A, 0x44, 0x3A, 0x00, 0x00]),
+            ('R', [0x7C, 0x42, 0x42, 0x7C, 0x44, 0x42, 0x00, 0x00]),
+            ('S', [0x3C, 0x40, 0x3C, 0x02, 0x42, 0x3C, 0x00, 0x00]),
+            ('T', [0x7E, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00, 0x00]),
+            ('U', [0x42, 0x42, 0x42, 0x42, 0x42, 0x3C, 0x00, 0x00]),
+            ('V', [0x42, 0x42, 0x42, 0x42, 0x24, 0x18, 0x00, 0x00]),
+            ('W', [0x42, 0x42, 0x42, 0x5A, 0x66, 0x42, 0x00, 0x00]),
+            ('X', [0x42, 0x24, 0x18, 0x18, 0x24, 0x42, 0x00, 0x00]),
+            ('Y', [0x42, 0x42, 0x24, 0x18, 0x18, 0x18, 0x00, 0x00]),
+            ('Z', [0x7E, 0x04, 0x08, 0x10, 0x20, 0x7E, 0x00, 0x00]),
+            ('[', [0x3C, 0x30, 0x30, 0x30, 0x30, 0x3C, 0x00, 0x00]),
+            ('\\', [0x80, 0x40, 0x20, 0x10, 0x08, 0x04, 0x02, 0x00]),
+            (']', [0x3C, 0x0C, 0x0C, 0x0C, 0x0C, 0x3C, 0x00, 0x00]),
+            ('^', [0x10, 0x28, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00]),
+            ('_', [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x7E, 0x00]),
+            ('`', [0x30, 0x30, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00]),
+            ('a', [0x00, 0x00, 0x3C, 0x02, 0x3E, 0x42, 0x3E, 0x00]),
+            ('b', [0x40, 0x40, 0x7C, 0x42, 0x42, 0x7C, 0x00, 0x00]),
+            ('c', [0x00, 0x00, 0x3C, 0x40, 0x40, 0x3C, 0x00, 0x00]),
+            ('d', [0x02, 0x02, 0x3E, 0x42, 0x42, 0x3E, 0x00, 0x00]),
+            ('e', [0x00, 0x00, 0x3C, 0x42, 0x7E, 0x40, 0x3C, 0x00]),
+            ('f', [0x0C, 0x10, 0x3C, 0x10, 0x10, 0x10, 0x00, 0x00]),
+            ('g', [0x00, 0x00, 0x3E, 0x42, 0x3E, 0x02, 0x3C, 0x00]),
+            ('h', [0x40, 0x40, 0x7C, 0x42, 0x42, 0x42, 0x00, 0x00]),
+            ('i', [0x18, 0x00, 0x38, 0x18, 0x18, 0x3C, 0x00, 0x00]),
+            ('j', [0x04, 0x00, 0x0C, 0x04, 0x04, 0x44, 0x38, 0x00]),
+            ('k', [0x40, 0x40, 0x44, 0x78, 0x48, 0x44, 0x00, 0x00]),
+            ('l', [0x38, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00, 0x00]),
+            ('m', [0x00, 0x00, 0x64, 0x5A, 0x42, 0x42, 0x00, 0x00]),
+            ('n', [0x00, 0x00, 0x7C, 0x42, 0x42, 0x42, 0x00, 0x00]),
+            ('o', [0x00, 0x00, 0x3C, 0x42, 0x42, 0x3C, 0x00, 0x00]),
+            ('p', [0x00, 0x00, 0x7C, 0x42, 0x7C, 0x40, 0x40, 0x00]),
+            ('q', [0x00, 0x00, 0x3E, 0x42, 0x3E, 0x02, 0x02, 0x00]),
+            ('r', [0x00, 0x00, 0x5C, 0x60, 0x40, 0x40, 0x00, 0x00]),
+            ('s', [0x00, 0x00, 0x3E, 0x40, 0x3C, 0x02, 0x7C, 0x00]),
+            ('t', [0x10, 0x10, 0x3C, 0x10, 0x10, 0x0C, 0x00, 0x00]),
+            ('u', [0x00, 0x00, 0x42, 0x42, 0x42, 0x3E, 0x00, 0x00]),
+            ('v', [0x00, 0x00, 0x42, 0x42, 0x24, 0x18, 0x00, 0x00]),
+            ('w', [0x00, 0x00, 0x42, 0x42, 0x5A, 0x24, 0x00, 0x00]),
+            ('x', [0x00, 0x00, 0x42, 0x24, 0x18, 0x24, 0x42, 0x00]),
+            ('y', [0x00, 0x00, 0x42, 0x42, 0x3E, 0x02, 0x3C, 0x00]),
+            ('z', [0x00, 0x00, 0x7E, 0x04, 0x18, 0x20, 0x7E, 0x00]),
+            ('{', [0x0C, 0x10, 0x10, 0x20, 0x10, 0x10, 0x0C, 0x00]),
+            ('|', [0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00]),
+            ('}', [0x30, 0x08, 0x08, 0x04, 0x08, 0x08, 0x30, 0x00]),
+            ('~', [0x00, 0x32, 0x4C, 0x00, 0x00, 0x00, 0x00, 0x00]),
+        ].iter().cloned().collect();
+
+        // Render font glyphs starting at Y=64
+        let font_color = [255u8, 255, 255, 255]; // White font
+        for ascii in 32u8..=126u8 {
+            let c = ascii as char;
+            let glyph_index = (ascii - 32) as usize;
+            let cell_x = (glyph_index % 16) * 16;
+            let cell_y = 64 + (glyph_index / 16) * 16;
+
+            if let Some(glyph_data) = font_data.get(&c) {
+                // Center 8x8 glyph in 16x16 cell (offset by 4,4)
+                for row in 0..8 {
+                    let row_data = glyph_data[row];
+                    for col in 0..8 {
+                        if (row_data >> (7 - col)) & 1 == 1 {
+                            let px = cell_x + 4 + col;
+                            let py = cell_y + 4 + row;
+                            set_pixel(&mut data, px, py, font_color);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Create texture
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("UI Atlas Texture"),
+            size: wgpu::Extent3d {
+                width: ATLAS_SIZE as u32,
+                height: ATLAS_SIZE as u32,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        queue.write_texture(
+            wgpu::ImageCopyTexture {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&data),
+            wgpu::ImageDataLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * ATLAS_SIZE as u32),
+                rows_per_image: Some(ATLAS_SIZE as u32),
+            },
+            wgpu::Extent3d {
+                width: ATLAS_SIZE as u32,
+                height: ATLAS_SIZE as u32,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        texture
+    }
+
     pub async fn new(window: &Window) -> Self {
         let size = window.inner_size();
         
@@ -622,6 +971,24 @@ impl Renderer {
                         view_dimension: wgpu::TextureViewDimension::D2,
                         sample_type: wgpu::TextureSampleType::Float { filterable: true },
                     },
+                    count: None,
+                },
+                // UI Atlas texture
+                wgpu::BindGroupLayoutEntry {
+                    binding: 11,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                // UI Atlas sampler (nearest-neighbor for crisp pixels)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 12,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
             ],
@@ -1330,6 +1697,9 @@ impl Renderer {
         let torch_texture = Self::load_texture(&device, &queue, "src/textures/torch.png")
             .unwrap_or_else(|_| Self::create_fallback_texture(&device, &queue, [255, 180, 100, 255]));
 
+        // Generate UI atlas programmatically
+        let ui_atlas_texture = Self::generate_ui_atlas(&device, &queue);
+
         // Create texture views
         let grass_view = grass_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let grass_top_view = grass_top_texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1341,6 +1711,7 @@ impl Renderer {
         let sand_view = sand_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let snow_view = snow_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let torch_view = torch_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let ui_atlas_view = ui_atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         // Create sampler
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -1401,10 +1772,18 @@ impl Renderer {
                     binding: 10,
                     resource: wgpu::BindingResource::TextureView(&torch_view),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 11,
+                    resource: wgpu::BindingResource::TextureView(&ui_atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: wgpu::BindingResource::Sampler(&sampler), // Reuse nearest-neighbor sampler
+                },
             ],
             label: Some("texture_bind_group"),
         });
-        
+
         // Generate sky quad for gradient background
         let (sky_vertices, sky_indices) = Self::generate_sky_quad();
         let sky_vertex_count = sky_indices.len() as u32;
@@ -2673,14 +3052,15 @@ impl Renderer {
         // Render chest UI
         if chest_ui.open {
             if let Some(chest_pos) = chest_ui.chest_pos {
-                let chest_contents = world.chest_contents.get(&chest_pos).cloned().unwrap_or_default();
+                let empty_chest: [Option<(crate::world::BlockType, u32)>; 9] = [None; 9];
+                let chest_contents = world.chest_contents.get(&chest_pos).unwrap_or(&empty_chest);
                 self.ui_renderer.render_chest_ui(
                     &self.device,
                     &self.queue,
                     &view,
                     &self.texture_bind_group,
                     chest_ui,
-                    &chest_contents,
+                    chest_contents,
                     inventory,
                 );
             }

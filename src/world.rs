@@ -75,7 +75,7 @@ pub struct World {
     player_chunk_pos: (i32, i32),
     block_damage: HashMap<(i32, i32, i32), f32>,
     pub torch_orientations: HashMap<(i32, i32, i32), TorchFace>,
-    pub chest_contents: HashMap<(i32, i32, i32), Vec<(BlockType, u32)>>,
+    pub chest_contents: HashMap<(i32, i32, i32), [Option<(BlockType, u32)>; 9]>,
     seed: u32,
 }
 

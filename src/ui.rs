@@ -12,14 +12,14 @@ struct UIVertex {
 }
 
 pub struct Inventory {
-    pub slots: [Option<(BlockType, u32)>; 9],
+    pub slots: [Option<(BlockType, u32)>; HOTBAR_NUM_SLOTS],
     pub selected_slot: usize,
 }
 
 impl Inventory {
     pub fn new() -> Self {
         Self {
-            slots: [None; 9],
+            slots: [None; HOTBAR_NUM_SLOTS],
             selected_slot: 0,
         }
     }
@@ -104,9 +104,8 @@ impl ChestUI {
     }
 
     pub fn navigate(&mut self, dx: i32, dy: i32) {
-        // Chest has 9 slots in a row, player inventory has 6 slots
-        let slots_per_row = if self.in_chest_section { 9 } else { 6 };
-        let max_slot = slots_per_row - 1;
+        // Both sections now have 9 slots
+        let max_slot = 8;
 
         // Handle horizontal navigation
         let new_slot = (self.selected_slot as i32 + dx).clamp(0, max_slot as i32) as usize;
@@ -115,9 +114,6 @@ impl ChestUI {
         // Handle vertical navigation (switch between chest and inventory sections)
         if dy != 0 {
             self.in_chest_section = !self.in_chest_section;
-            // Clamp slot when switching sections
-            let new_max = if self.in_chest_section { 8 } else { 5 };
-            self.selected_slot = self.selected_slot.min(new_max);
         }
     }
 }
@@ -167,10 +163,34 @@ impl Inventory {
 
 // Hotbar layout constants
 const HOTBAR_SLOT_SIZE: f32 = 0.04;
-const HOTBAR_NUM_SLOTS: usize = 6;
+const HOTBAR_NUM_SLOTS: usize = 9;  // Expanded to 9 slots like Minecraft
 const HOTBAR_DIVIDER_WIDTH: f32 = 0.002;
 const HOTBAR_Y: f32 = -0.92;
 const HOTBAR_BG_PADDING: f32 = 0.006;
+
+// UI Atlas constants (256x256 atlas)
+const ATLAS_SIZE: f32 = 256.0;
+const GLYPH_SIZE: f32 = 8.0;       // 8x8 pixel font glyphs
+const GLYPH_CELL: f32 = 16.0;      // Glyphs are centered in 16x16 cells
+const FONT_START_Y: f32 = 64.0;    // Font atlas starts at Y=64
+const GLYPHS_PER_ROW: usize = 16;
+const FIRST_CHAR: u8 = 32;         // ASCII space
+
+// UI Atlas element positions (in 16x16 cell coordinates)
+const SLOT_EMPTY_UV: (f32, f32) = (0.0, 0.0);      // Row 0, Col 0
+const SLOT_SELECTED_UV: (f32, f32) = (16.0, 0.0);  // Row 0, Col 1
+const SLOT_HOVER_UV: (f32, f32) = (32.0, 0.0);     // Row 0, Col 2
+
+// 9-slice panel pieces (Row 1)
+const PANEL_TL_UV: (f32, f32) = (0.0, 16.0);
+const PANEL_T_UV: (f32, f32) = (16.0, 16.0);
+const PANEL_TR_UV: (f32, f32) = (32.0, 16.0);
+const PANEL_L_UV: (f32, f32) = (48.0, 16.0);
+const PANEL_C_UV: (f32, f32) = (64.0, 16.0);
+const PANEL_R_UV: (f32, f32) = (80.0, 16.0);
+const PANEL_BL_UV: (f32, f32) = (96.0, 16.0);
+const PANEL_B_UV: (f32, f32) = (112.0, 16.0);
+const PANEL_BR_UV: (f32, f32) = (128.0, 16.0);
 
 pub struct UIRenderer {
     ui_render_pipeline: wgpu::RenderPipeline,
@@ -390,6 +410,210 @@ impl UIRenderer {
         }
     }
 
+    /// Calculate UV coordinates for a character in the font atlas
+    fn char_to_uv(c: char) -> (f32, f32, f32, f32) {
+        let ascii = c as u8;
+        let index = if ascii >= FIRST_CHAR && ascii <= 126 {
+            (ascii - FIRST_CHAR) as usize
+        } else {
+            0 // Default to space for unsupported chars
+        };
+
+        let col = index % GLYPHS_PER_ROW;
+        let row = index / GLYPHS_PER_ROW;
+
+        // UV coordinates (normalized 0-1)
+        let u0 = (col as f32 * GLYPH_CELL + 4.0) / ATLAS_SIZE; // +4 to center 8x8 in 16x16 cell
+        let v0 = (FONT_START_Y + row as f32 * GLYPH_CELL + 4.0) / ATLAS_SIZE;
+        let u1 = u0 + GLYPH_SIZE / ATLAS_SIZE;
+        let v1 = v0 + GLYPH_SIZE / ATLAS_SIZE;
+
+        (u0, v0, u1, v1)
+    }
+
+    /// Calculate the width of text at a given scale
+    fn text_width(text: &str, scale: f32) -> f32 {
+        let char_width = scale * 0.6; // Characters are slightly narrower than tall
+        text.len() as f32 * char_width
+    }
+
+    /// Generate vertices for bitmap font text
+    /// Returns (vertices, indices) that can be appended to existing buffers
+    /// use_texture = -1.0 signals font mode in shader (uses alpha from atlas, color from vertex)
+    fn generate_text_vertices(
+        text: &str,
+        x: f32,
+        y: f32,
+        scale: f32,
+        color: [f32; 4],
+        base_index: u16,
+    ) -> (Vec<UIVertex>, Vec<u16>) {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        let char_width = scale * 0.6;
+        let char_height = scale;
+
+        for (i, c) in text.chars().enumerate() {
+            let (u0, v0, u1, v1) = Self::char_to_uv(c);
+            let cx = x + i as f32 * char_width;
+
+            let idx = base_index + (i as u16 * 4);
+            vertices.extend_from_slice(&[
+                UIVertex { position: [cx, y], tex_coords: [u0, v1], color, use_texture: -1.0 },
+                UIVertex { position: [cx + char_width, y], tex_coords: [u1, v1], color, use_texture: -1.0 },
+                UIVertex { position: [cx + char_width, y + char_height], tex_coords: [u1, v0], color, use_texture: -1.0 },
+                UIVertex { position: [cx, y + char_height], tex_coords: [u0, v0], color, use_texture: -1.0 },
+            ]);
+            indices.extend_from_slice(&[idx, idx + 1, idx + 2, idx, idx + 2, idx + 3]);
+        }
+
+        (vertices, indices)
+    }
+
+    /// Generate centered text at a given Y position
+    fn generate_centered_text(
+        text: &str,
+        center_x: f32,
+        y: f32,
+        scale: f32,
+        color: [f32; 4],
+        base_index: u16,
+    ) -> (Vec<UIVertex>, Vec<u16>) {
+        let text_w = Self::text_width(text, scale);
+        let start_x = center_x - text_w / 2.0;
+        Self::generate_text_vertices(text, start_x, y, scale, color, base_index)
+    }
+
+    /// Generate text with a shadow effect (like Minecraft item counts)
+    /// Renders dark text offset down-right, then white text on top
+    fn generate_text_with_shadow(
+        text: &str,
+        x: f32,
+        y: f32,
+        scale: f32,
+        color: [f32; 4],
+        base_index: u16,
+    ) -> (Vec<UIVertex>, Vec<u16>) {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        let shadow_offset = scale * 0.12;  // Shadow offset
+        let shadow_color = [0.15, 0.15, 0.15, color[3]];  // Dark shadow
+
+        // Shadow (rendered first, behind)
+        let (shadow_verts, shadow_inds) = Self::generate_text_vertices(
+            text, x + shadow_offset, y - shadow_offset, scale,
+            shadow_color, base_index
+        );
+        vertices.extend(shadow_verts);
+        indices.extend(shadow_inds);
+
+        // Main text (rendered on top)
+        let (text_verts, text_inds) = Self::generate_text_vertices(
+            text, x, y, scale,
+            color, base_index + vertices.len() as u16
+        );
+        vertices.extend(text_verts);
+        indices.extend(text_inds);
+
+        (vertices, indices)
+    }
+
+    /// Generate vertices for a slot from the UI atlas
+    /// slot_type: 0 = empty, 1 = selected, 2 = hovered
+    fn generate_slot_vertices(
+        x: f32,
+        y: f32,
+        size: f32,
+        slot_type: u8,
+        color: [f32; 4],
+        base_index: u16,
+    ) -> (Vec<UIVertex>, Vec<u16>) {
+        let (atlas_x, atlas_y) = match slot_type {
+            1 => SLOT_SELECTED_UV,
+            2 => SLOT_HOVER_UV,
+            _ => SLOT_EMPTY_UV,
+        };
+
+        // UV coordinates for 16x16 slot texture
+        let u0 = atlas_x / ATLAS_SIZE;
+        let v0 = atlas_y / ATLAS_SIZE;
+        let u1 = (atlas_x + 16.0) / ATLAS_SIZE;
+        let v1 = (atlas_y + 16.0) / ATLAS_SIZE;
+
+        let vertices = vec![
+            UIVertex { position: [x - size, y - size], tex_coords: [u0, v1], color, use_texture: -2.0 },
+            UIVertex { position: [x + size, y - size], tex_coords: [u1, v1], color, use_texture: -2.0 },
+            UIVertex { position: [x + size, y + size], tex_coords: [u1, v0], color, use_texture: -2.0 },
+            UIVertex { position: [x - size, y + size], tex_coords: [u0, v0], color, use_texture: -2.0 },
+        ];
+
+        let indices = vec![base_index, base_index + 1, base_index + 2, base_index, base_index + 2, base_index + 3];
+        (vertices, indices)
+    }
+
+    /// Generate vertices for a 9-slice panel
+    /// The panel stretches the center while keeping corners and edges fixed
+    fn generate_nine_slice_panel(
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        border: f32,  // Size of corners/edges in screen coords
+        color: [f32; 4],
+        base_index: u16,
+    ) -> (Vec<UIVertex>, Vec<u16>) {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+
+        // UV size for each piece (16x16 in atlas)
+        let uv_size = 16.0 / ATLAS_SIZE;
+
+        // Helper to add a quad
+        let mut add_quad = |px: f32, py: f32, pw: f32, ph: f32, atlas_x: f32, atlas_y: f32| {
+            let u0 = atlas_x / ATLAS_SIZE;
+            let v0 = atlas_y / ATLAS_SIZE;
+            let u1 = u0 + uv_size;
+            let v1 = v0 + uv_size;
+
+            let idx = base_index + vertices.len() as u16;
+            vertices.extend_from_slice(&[
+                UIVertex { position: [px, py], tex_coords: [u0, v1], color, use_texture: -2.0 },
+                UIVertex { position: [px + pw, py], tex_coords: [u1, v1], color, use_texture: -2.0 },
+                UIVertex { position: [px + pw, py + ph], tex_coords: [u1, v0], color, use_texture: -2.0 },
+                UIVertex { position: [px, py + ph], tex_coords: [u0, v0], color, use_texture: -2.0 },
+            ]);
+            indices.extend_from_slice(&[idx, idx + 1, idx + 2, idx, idx + 2, idx + 3]);
+        };
+
+        let inner_w = width - 2.0 * border;
+        let inner_h = height - 2.0 * border;
+
+        // Bottom-left corner
+        add_quad(x, y, border, border, PANEL_BL_UV.0, PANEL_BL_UV.1);
+        // Bottom edge
+        add_quad(x + border, y, inner_w, border, PANEL_B_UV.0, PANEL_B_UV.1);
+        // Bottom-right corner
+        add_quad(x + border + inner_w, y, border, border, PANEL_BR_UV.0, PANEL_BR_UV.1);
+
+        // Left edge
+        add_quad(x, y + border, border, inner_h, PANEL_L_UV.0, PANEL_L_UV.1);
+        // Center
+        add_quad(x + border, y + border, inner_w, inner_h, PANEL_C_UV.0, PANEL_C_UV.1);
+        // Right edge
+        add_quad(x + border + inner_w, y + border, border, inner_h, PANEL_R_UV.0, PANEL_R_UV.1);
+
+        // Top-left corner
+        add_quad(x, y + border + inner_h, border, border, PANEL_TL_UV.0, PANEL_TL_UV.1);
+        // Top edge
+        add_quad(x + border, y + border + inner_h, inner_w, border, PANEL_T_UV.0, PANEL_T_UV.1);
+        // Top-right corner
+        add_quad(x + border + inner_w, y + border + inner_h, border, border, PANEL_TR_UV.0, PANEL_TR_UV.1);
+
+        (vertices, indices)
+    }
+
     fn create_minecraft_hotbar() -> (Vec<UIVertex>, Vec<u16>) {
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
@@ -397,34 +621,33 @@ impl UIRenderer {
         let total_width = Self::hotbar_total_width();
         let start_x = Self::hotbar_start_x();
 
-        // Pure black background
-        let bg_left = start_x - HOTBAR_SLOT_SIZE - HOTBAR_BG_PADDING;
-        let bg_right = start_x + total_width - HOTBAR_SLOT_SIZE + HOTBAR_BG_PADDING;
-        let bg_top = HOTBAR_Y + HOTBAR_SLOT_SIZE + HOTBAR_BG_PADDING;
-        let bg_bottom = HOTBAR_Y - HOTBAR_SLOT_SIZE - HOTBAR_BG_PADDING;
-        let bg_color = [0.0, 0.0, 0.0, 0.85];
+        // 9-slice panel background
+        let panel_padding = 0.008;
+        let panel_left = start_x - HOTBAR_SLOT_SIZE - panel_padding;
+        let panel_bottom = HOTBAR_Y - HOTBAR_SLOT_SIZE - panel_padding;
+        let panel_width = total_width + panel_padding * 2.0;
+        let panel_height = HOTBAR_SLOT_SIZE * 2.0 + panel_padding * 2.0;
+        let panel_border = 0.008;
+        let panel_color = [1.0, 1.0, 1.0, 0.95];
 
-        let bg_base = vertices.len() as u16;
-        vertices.extend_from_slice(&[
-            UIVertex { position: [bg_left, bg_bottom], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 },
-            UIVertex { position: [bg_right, bg_bottom], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 },
-            UIVertex { position: [bg_right, bg_top], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 },
-            UIVertex { position: [bg_left, bg_top], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 },
-        ]);
-        indices.extend_from_slice(&[bg_base, bg_base + 1, bg_base + 2, bg_base, bg_base + 2, bg_base + 3]);
+        let (panel_verts, panel_inds) = Self::generate_nine_slice_panel(
+            panel_left, panel_bottom, panel_width, panel_height,
+            panel_border, panel_color, vertices.len() as u16
+        );
+        vertices.extend(panel_verts);
+        indices.extend(panel_inds);
 
-        // White dividers between slots
-        let divider_color = [1.0, 1.0, 1.0, 0.3];
-        for i in 1..HOTBAR_NUM_SLOTS {
-            let div_x = start_x - HOTBAR_SLOT_SIZE + i as f32 * (HOTBAR_SLOT_SIZE * 2.0 + HOTBAR_DIVIDER_WIDTH) - HOTBAR_DIVIDER_WIDTH / 2.0;
-            let div_base = vertices.len() as u16;
-            vertices.extend_from_slice(&[
-                UIVertex { position: [div_x - HOTBAR_DIVIDER_WIDTH / 2.0, bg_bottom + 0.004], tex_coords: [0.0, 0.0], color: divider_color, use_texture: 0.0 },
-                UIVertex { position: [div_x + HOTBAR_DIVIDER_WIDTH / 2.0, bg_bottom + 0.004], tex_coords: [0.0, 0.0], color: divider_color, use_texture: 0.0 },
-                UIVertex { position: [div_x + HOTBAR_DIVIDER_WIDTH / 2.0, bg_top - 0.004], tex_coords: [0.0, 0.0], color: divider_color, use_texture: 0.0 },
-                UIVertex { position: [div_x - HOTBAR_DIVIDER_WIDTH / 2.0, bg_top - 0.004], tex_coords: [0.0, 0.0], color: divider_color, use_texture: 0.0 },
-            ]);
-            indices.extend_from_slice(&[div_base, div_base + 1, div_base + 2, div_base, div_base + 2, div_base + 3]);
+        // Render slot backgrounds
+        let slot_color = [1.0, 1.0, 1.0, 1.0];
+        for i in 0..HOTBAR_NUM_SLOTS {
+            let slot_x = start_x + i as f32 * (HOTBAR_SLOT_SIZE * 2.0 + HOTBAR_DIVIDER_WIDTH);
+            let (slot_verts, slot_inds) = Self::generate_slot_vertices(
+                slot_x, HOTBAR_Y, HOTBAR_SLOT_SIZE * 0.95,
+                0, // Empty slot
+                slot_color, vertices.len() as u16
+            );
+            vertices.extend(slot_verts);
+            indices.extend(slot_inds);
         }
 
         (vertices, indices)
@@ -475,33 +698,46 @@ impl UIRenderer {
     }
     
     pub fn update_inventory_selection(&mut self, device: &wgpu::Device, inventory: &Inventory) {
-        let (mut vertices, mut indices) = Self::create_minecraft_hotbar();
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
 
+        let total_width = Self::hotbar_total_width();
         let start_x = Self::hotbar_start_x();
-        let bg_bottom = HOTBAR_Y - HOTBAR_SLOT_SIZE - HOTBAR_BG_PADDING;
+
+        // 9-slice panel background
+        let panel_padding = 0.008;
+        let panel_left = start_x - HOTBAR_SLOT_SIZE - panel_padding;
+        let panel_bottom = HOTBAR_Y - HOTBAR_SLOT_SIZE - panel_padding;
+        let panel_width = total_width + panel_padding * 2.0;
+        let panel_height = HOTBAR_SLOT_SIZE * 2.0 + panel_padding * 2.0;
+        let panel_border = 0.008;
+        let panel_color = [1.0, 1.0, 1.0, 0.95];
+
+        let (panel_verts, panel_inds) = Self::generate_nine_slice_panel(
+            panel_left, panel_bottom, panel_width, panel_height,
+            panel_border, panel_color, vertices.len() as u16
+        );
+        vertices.extend(panel_verts);
+        indices.extend(panel_inds);
 
         let selected = inventory.selected_slot;
-        let icon_size = HOTBAR_SLOT_SIZE * 0.8;
+        let icon_size = HOTBAR_SLOT_SIZE * 0.7;
         let icon_color = [1.0, 1.0, 1.0, 1.0];
 
         for i in 0..HOTBAR_NUM_SLOTS {
             let slot_x = start_x + i as f32 * (HOTBAR_SLOT_SIZE * 2.0 + HOTBAR_DIVIDER_WIDTH);
             let is_selected = i == selected;
 
-            // Selection highlight - subtle white underline
-            if is_selected {
-                let highlight_color = [1.0, 1.0, 1.0, 0.9];
-                let hl_base = vertices.len() as u16;
-                vertices.extend_from_slice(&[
-                    UIVertex { position: [slot_x - HOTBAR_SLOT_SIZE + 0.005, bg_bottom], tex_coords: [0.0, 0.0], color: highlight_color, use_texture: 0.0 },
-                    UIVertex { position: [slot_x + HOTBAR_SLOT_SIZE - 0.005, bg_bottom], tex_coords: [0.0, 0.0], color: highlight_color, use_texture: 0.0 },
-                    UIVertex { position: [slot_x + HOTBAR_SLOT_SIZE - 0.005, bg_bottom + 0.003], tex_coords: [0.0, 0.0], color: highlight_color, use_texture: 0.0 },
-                    UIVertex { position: [slot_x - HOTBAR_SLOT_SIZE + 0.005, bg_bottom + 0.003], tex_coords: [0.0, 0.0], color: highlight_color, use_texture: 0.0 },
-                ]);
-                indices.extend_from_slice(&[hl_base, hl_base + 1, hl_base + 2, hl_base, hl_base + 2, hl_base + 3]);
-            }
+            // Slot background from atlas (selected or empty)
+            let slot_type = if is_selected { 1 } else { 0 };
+            let (slot_verts, slot_inds) = Self::generate_slot_vertices(
+                slot_x, HOTBAR_Y, HOTBAR_SLOT_SIZE * 0.95,
+                slot_type, [1.0, 1.0, 1.0, 1.0], vertices.len() as u16
+            );
+            vertices.extend(slot_verts);
+            indices.extend(slot_inds);
 
-            // Slot content
+            // Slot content (block texture)
             if let Some((block_type, qty)) = inventory.slots[i] {
                 if qty > 0 {
                     let block_type_val = Self::block_type_to_ui_index(block_type);
@@ -514,25 +750,19 @@ impl UIRenderer {
                     ]);
                     indices.extend_from_slice(&[icon_base, icon_base + 1, icon_base + 2, icon_base, icon_base + 2, icon_base + 3]);
 
-                    // Quantity in corner
+                    // Quantity in bottom-right corner with shadow (Minecraft style)
                     if qty > 1 {
-                        let digit_color = [1.0, 1.0, 1.0, 0.9];
-                        let digit_size = HOTBAR_SLOT_SIZE * 0.35;
                         let qty_str = qty.to_string();
-                        let digit_width = digit_size * 0.6;
-                        let total_w = digit_width * qty_str.len() as f32;
-                        let mut digit_x = slot_x + HOTBAR_SLOT_SIZE - total_w - 0.003;
-                        let digit_y = HOTBAR_Y - HOTBAR_SLOT_SIZE + 0.003;
-                        for ch in qty_str.chars() {
-                            let dig = ch.to_digit(10).unwrap() as usize;
-                            let (mut dig_verts, dig_inds) = Self::get_digit_vertices(dig, digit_x, digit_y, digit_size, digit_color);
-                            let dig_base = vertices.len() as u16;
-                            vertices.append(&mut dig_verts);
-                            for &idx in &dig_inds {
-                                indices.push(dig_base + idx);
-                            }
-                            digit_x += digit_width;
-                        }
+                        let text_scale = HOTBAR_SLOT_SIZE * 0.7;  // Larger text
+                        let text_w = Self::text_width(&qty_str, text_scale);
+                        let text_x = slot_x + HOTBAR_SLOT_SIZE * 0.85 - text_w;
+                        let text_y = HOTBAR_Y - HOTBAR_SLOT_SIZE * 0.85;
+                        let (text_verts, text_inds) = Self::generate_text_with_shadow(
+                            &qty_str, text_x, text_y, text_scale,
+                            [1.0, 1.0, 1.0, 1.0], vertices.len() as u16
+                        );
+                        vertices.extend(text_verts);
+                        indices.extend(text_inds);
                     }
                 }
             }
@@ -820,55 +1050,43 @@ impl UIRenderer {
         let mut indices: Vec<u16> = Vec::new();
 
         let text_color = [1.0, 1.0, 1.0, 1.0];
-        let bg_color = [0.0, 0.0, 0.0, 0.6];
         let char_size = 0.025;
-        let char_spacing = char_size * 0.7;
-        let line_height = char_size * 1.5;
+        let line_height = char_size * 1.4;
         let start_x = -0.95;
         let start_y = 0.92;
-        let padding = 0.01;
+        let padding = 0.015;
 
         // Build debug lines
         let lines = vec![
             format!("FPS: {}", fps as i32),
             format!("XYZ: {:.1} / {:.1} / {:.1}", position.x, position.y, position.z),
-            format!("FACING: {}", facing),
-            format!("CHUNKS: {}", chunk_count),
-            format!("PARTICLES: {}", particle_count),
+            format!("Facing: {}", facing),
+            format!("Chunks: {}", chunk_count),
+            format!("Particles: {}", particle_count),
         ];
 
         // Calculate background size
         let max_line_len = lines.iter().map(|l| l.len()).max().unwrap_or(0);
-        let bg_width = max_line_len as f32 * char_spacing + padding * 2.0;
+        let bg_width = Self::text_width(&"X".repeat(max_line_len), char_size) + padding * 2.0;
         let bg_height = lines.len() as f32 * line_height + padding * 2.0;
 
-        // Draw background
-        let base = vertices.len() as u16;
-        vertices.push(UIVertex { position: [start_x - padding, start_y + padding], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
-        vertices.push(UIVertex { position: [start_x + bg_width, start_y + padding], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
-        vertices.push(UIVertex { position: [start_x + bg_width, start_y - bg_height], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
-        vertices.push(UIVertex { position: [start_x - padding, start_y - bg_height], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
-        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        // Draw 9-slice panel background
+        let (panel_verts, panel_inds) = Self::generate_nine_slice_panel(
+            start_x - padding, start_y - bg_height,
+            bg_width + padding, bg_height + padding,
+            0.01, [0.1, 0.1, 0.15, 0.85], vertices.len() as u16
+        );
+        vertices.extend(panel_verts);
+        indices.extend(panel_inds);
 
-        // Draw text lines
+        // Draw text lines using bitmap font
         for (line_idx, line) in lines.iter().enumerate() {
-            let mut text_x = start_x;
-            let text_y = start_y - (line_idx as f32 + 1.0) * line_height + char_size * 0.5;
-
-            for ch in line.chars() {
-                if ch.is_ascii_digit() {
-                    let dig = ch.to_digit(10).unwrap() as usize;
-                    let (dig_verts, dig_inds) = Self::get_digit_vertices(dig, text_x, text_y, char_size, text_color);
-                    let base = vertices.len() as u16;
-                    for v in dig_verts { vertices.push(v); }
-                    for i in dig_inds { indices.push(base + i); }
-                } else {
-                    let (letter_verts, letter_inds) = Self::get_letter_vertices(ch.to_ascii_uppercase(), text_x, text_y, char_size, text_color, vertices.len() as u16);
-                    vertices.extend(letter_verts);
-                    indices.extend(letter_inds);
-                }
-                text_x += char_spacing;
-            }
+            let text_y = start_y - (line_idx as f32 + 1.0) * line_height + char_size * 0.3;
+            let (text_verts, text_inds) = Self::generate_text_vertices(
+                line, start_x, text_y, char_size, text_color, vertices.len() as u16
+            );
+            vertices.extend(text_verts);
+            indices.extend(text_inds);
         }
 
         // Create buffers and render
@@ -924,12 +1142,8 @@ impl UIRenderer {
         let mut vertices: Vec<UIVertex> = Vec::new();
         let mut indices: Vec<u16> = Vec::new();
 
-        let overlay_color = [0.0, 0.0, 0.0, 0.7];
-        let title_color = [1.0, 1.0, 1.0, 1.0];
-        let option_color = [0.8, 0.8, 0.8, 1.0];
-        let selected_color = [1.0, 1.0, 0.3, 1.0];
-
         // Full screen dark overlay
+        let overlay_color = [0.0, 0.0, 0.0, 0.6];
         let base = vertices.len() as u16;
         vertices.push(UIVertex { position: [-1.0, -1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
         vertices.push(UIVertex { position: [1.0, -1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
@@ -937,47 +1151,52 @@ impl UIRenderer {
         vertices.push(UIVertex { position: [-1.0, 1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 
-        // Title "PAUSED"
-        let title = "PAUSED";
-        let title_size = 0.08;
-        let title_spacing = title_size * 0.7;
-        let title_width = title.len() as f32 * title_spacing;
-        let mut title_x = -title_width / 2.0;
-        let title_y = 0.3;
+        // Panel background
+        let panel_width = 0.5;
+        let panel_height = 0.55;
+        let panel_x = -panel_width / 2.0;
+        let panel_y = -0.15;
+        let panel_border = 0.02;
 
-        for ch in title.chars() {
-            let (letter_verts, letter_inds) = Self::get_letter_vertices(ch, title_x, title_y, title_size, title_color, vertices.len() as u16);
-            vertices.extend(letter_verts);
-            indices.extend(letter_inds);
-            title_x += title_spacing;
-        }
+        let (panel_verts, panel_inds) = Self::generate_nine_slice_panel(
+            panel_x, panel_y, panel_width, panel_height,
+            panel_border, [1.0, 1.0, 1.0, 0.95], vertices.len() as u16
+        );
+        vertices.extend(panel_verts);
+        indices.extend(panel_inds);
 
-        // Menu options
-        let options = ["RESUME", "OPTIONS", "QUIT"];
+        // Title "Game Paused" using bitmap font
+        let (title_verts, title_inds) = Self::generate_centered_text(
+            "Game Paused", 0.0, 0.28, 0.06, [1.0, 1.0, 1.0, 1.0], vertices.len() as u16
+        );
+        vertices.extend(title_verts);
+        indices.extend(title_inds);
+
+        // Menu options using bitmap font
+        let options = ["Resume", "Options", "Quit"];
         let option_size = 0.04;
-        let option_spacing = option_size * 0.7;
-        let option_line_height = 0.12;
+        let option_line_height = 0.1;
+        let option_color = [0.85, 0.85, 0.85, 1.0];
+        let selected_color = [1.0, 1.0, 0.5, 1.0];
 
         for (idx, option) in options.iter().enumerate() {
             let color = if idx == selected_option { selected_color } else { option_color };
-            let option_width = option.len() as f32 * option_spacing;
-            let mut option_x = -option_width / 2.0;
-            let option_y = 0.0 - idx as f32 * option_line_height;
+            let option_y = 0.1 - idx as f32 * option_line_height;
 
             // Selection indicator
             if idx == selected_option {
-                let indicator_x = option_x - option_spacing * 1.5;
-                let (arrow_verts, arrow_inds) = Self::get_letter_vertices('>', indicator_x, option_y, option_size, color, vertices.len() as u16);
+                let (arrow_verts, arrow_inds) = Self::generate_text_vertices(
+                    ">", -0.15, option_y, option_size, color, vertices.len() as u16
+                );
                 vertices.extend(arrow_verts);
                 indices.extend(arrow_inds);
             }
 
-            for ch in option.chars() {
-                let (letter_verts, letter_inds) = Self::get_letter_vertices(ch, option_x, option_y, option_size, color, vertices.len() as u16);
-                vertices.extend(letter_verts);
-                indices.extend(letter_inds);
-                option_x += option_spacing;
-            }
+            let (opt_verts, opt_inds) = Self::generate_centered_text(
+                option, 0.0, option_y, option_size, color, vertices.len() as u16
+            );
+            vertices.extend(opt_verts);
+            indices.extend(opt_inds);
         }
 
         // Create buffers and render
@@ -1029,18 +1248,14 @@ impl UIRenderer {
         view: &wgpu::TextureView,
         texture_bind_group: &wgpu::BindGroup,
         chest_ui: &ChestUI,
-        chest_contents: &[(BlockType, u32)],
+        chest_contents: &[Option<(BlockType, u32)>; 9],
         inventory: &Inventory,
     ) {
         let mut vertices: Vec<UIVertex> = Vec::new();
         let mut indices: Vec<u16> = Vec::new();
 
-        let overlay_color = [0.0, 0.0, 0.0, 0.7];
-        let title_color = [1.0, 1.0, 1.0, 1.0];
-        let slot_bg_color = [0.2, 0.2, 0.2, 0.9];
-        let selected_color = [1.0, 1.0, 0.3, 1.0];
-
         // Full screen dark overlay
+        let overlay_color = [0.0, 0.0, 0.0, 0.6];
         let base = vertices.len() as u16;
         vertices.push(UIVertex { position: [-1.0, -1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
         vertices.push(UIVertex { position: [1.0, -1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
@@ -1048,44 +1263,52 @@ impl UIRenderer {
         vertices.push(UIVertex { position: [-1.0, 1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 
-        // Title "CHEST"
-        let title = "CHEST";
-        let title_size = 0.06;
-        let title_spacing = title_size * 0.7;
-        let title_width = title.len() as f32 * title_spacing;
-        let mut title_x = -title_width / 2.0;
-        let title_y = 0.5;
+        // Layout constants
+        let slot_size = 0.055;
+        let slot_spacing = 0.075;
+        let num_slots = 9;
+        let panel_border = 0.015;
+        let row_width = num_slots as f32 * slot_spacing;
 
-        for ch in title.chars() {
-            let (letter_verts, letter_inds) = Self::get_letter_vertices(ch, title_x, title_y, title_size, title_color, vertices.len() as u16);
-            vertices.extend(letter_verts);
-            indices.extend(letter_inds);
-            title_x += title_spacing;
-        }
+        // Main container panel
+        let panel_width = row_width + 0.08;
+        let panel_height = 0.65;
+        let panel_x = -panel_width / 2.0;
+        let panel_y = -0.35;
 
-        // Chest slots (9 slots in a row)
-        let slot_size = 0.06;
-        let slot_spacing = 0.08;
-        let chest_row_y = 0.3;
-        let chest_slots = 9;
-        let chest_start_x = -(chest_slots as f32 * slot_spacing) / 2.0 + slot_spacing / 2.0;
+        let (panel_verts, panel_inds) = Self::generate_nine_slice_panel(
+            panel_x, panel_y, panel_width, panel_height,
+            panel_border, [1.0, 1.0, 1.0, 0.95], vertices.len() as u16
+        );
+        vertices.extend(panel_verts);
+        indices.extend(panel_inds);
 
-        for i in 0..chest_slots {
-            let slot_x = chest_start_x + i as f32 * slot_spacing;
+        // Title "Chest" using bitmap font
+        let (title_verts, title_inds) = Self::generate_centered_text(
+            "Chest", 0.0, 0.22, 0.05, [1.0, 1.0, 1.0, 1.0], vertices.len() as u16
+        );
+        vertices.extend(title_verts);
+        indices.extend(title_inds);
+
+        // Chest section
+        let chest_row_y = 0.1;
+        let row_start_x = -(num_slots as f32 * slot_spacing) / 2.0 + slot_spacing / 2.0;
+
+        for i in 0..num_slots {
+            let slot_x = row_start_x + i as f32 * slot_spacing;
             let is_selected = chest_ui.in_chest_section && chest_ui.selected_slot == i;
 
-            // Slot background
-            let bg_color = if is_selected { selected_color } else { slot_bg_color };
-            let base = vertices.len() as u16;
-            vertices.push(UIVertex { position: [slot_x - slot_size, chest_row_y - slot_size], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
-            vertices.push(UIVertex { position: [slot_x + slot_size, chest_row_y - slot_size], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
-            vertices.push(UIVertex { position: [slot_x + slot_size, chest_row_y + slot_size], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
-            vertices.push(UIVertex { position: [slot_x - slot_size, chest_row_y + slot_size], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
-            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            // Slot background from atlas
+            let slot_type = if is_selected { 1 } else { 0 };
+            let (slot_verts, slot_inds) = Self::generate_slot_vertices(
+                slot_x, chest_row_y, slot_size, slot_type,
+                [1.0, 1.0, 1.0, 1.0], vertices.len() as u16
+            );
+            vertices.extend(slot_verts);
+            indices.extend(slot_inds);
 
             // Draw item if present
-            if i < chest_contents.len() {
-                let (block_type, _qty) = chest_contents[i];
+            if let Some((block_type, qty)) = chest_contents[i] {
                 let block_type_val = Self::block_type_to_ui_index(block_type);
                 let icon_size = slot_size * 0.7;
                 let icon_base = vertices.len() as u16;
@@ -1094,44 +1317,49 @@ impl UIRenderer {
                 vertices.push(UIVertex { position: [slot_x + icon_size, chest_row_y + icon_size], tex_coords: [1.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
                 vertices.push(UIVertex { position: [slot_x - icon_size, chest_row_y + icon_size], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
                 indices.extend_from_slice(&[icon_base, icon_base + 1, icon_base + 2, icon_base, icon_base + 2, icon_base + 3]);
+
+                // Quantity display with shadow (Minecraft style) - bottom right corner
+                if qty > 1 {
+                    let qty_str = qty.to_string();
+                    let text_scale = slot_size * 0.6;
+                    // Position at bottom-right, offset from center
+                    let text_x = slot_x - slot_size * 0.1;
+                    let text_y = chest_row_y - slot_size * 0.75;
+                    let (qty_verts, qty_inds) = Self::generate_text_with_shadow(
+                        &qty_str, text_x, text_y, text_scale,
+                        [1.0, 1.0, 1.0, 1.0], vertices.len() as u16
+                    );
+                    vertices.extend(qty_verts);
+                    indices.extend(qty_inds);
+                }
             }
         }
 
-        // "YOUR INVENTORY" label
-        let inv_label = "INVENTORY";
-        let label_size = 0.03;
-        let label_spacing = label_size * 0.7;
-        let label_width = inv_label.len() as f32 * label_spacing;
-        let mut label_x = -label_width / 2.0;
-        let label_y = 0.05;
+        // "Inventory" label using bitmap font
+        let (inv_label_verts, inv_label_inds) = Self::generate_centered_text(
+            "Inventory", 0.0, -0.05, 0.035, [0.9, 0.9, 0.9, 1.0], vertices.len() as u16
+        );
+        vertices.extend(inv_label_verts);
+        indices.extend(inv_label_inds);
 
-        for ch in inv_label.chars() {
-            let (letter_verts, letter_inds) = Self::get_letter_vertices(ch, label_x, label_y, label_size, title_color, vertices.len() as u16);
-            vertices.extend(letter_verts);
-            indices.extend(letter_inds);
-            label_x += label_spacing;
-        }
+        // Player inventory section (9 slots)
+        let inv_row_y = -0.15;
 
-        // Player inventory slots (6 slots)
-        let inv_row_y = -0.1;
-        let inv_slots = 6;
-        let inv_start_x = -(inv_slots as f32 * slot_spacing) / 2.0 + slot_spacing / 2.0;
-
-        for i in 0..inv_slots {
-            let slot_x = inv_start_x + i as f32 * slot_spacing;
+        for i in 0..num_slots {
+            let slot_x = row_start_x + i as f32 * slot_spacing;
             let is_selected = !chest_ui.in_chest_section && chest_ui.selected_slot == i;
 
-            // Slot background
-            let bg_color = if is_selected { selected_color } else { slot_bg_color };
-            let base = vertices.len() as u16;
-            vertices.push(UIVertex { position: [slot_x - slot_size, inv_row_y - slot_size], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
-            vertices.push(UIVertex { position: [slot_x + slot_size, inv_row_y - slot_size], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
-            vertices.push(UIVertex { position: [slot_x + slot_size, inv_row_y + slot_size], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
-            vertices.push(UIVertex { position: [slot_x - slot_size, inv_row_y + slot_size], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
-            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            // Slot background from atlas
+            let slot_type = if is_selected { 1 } else { 0 };
+            let (slot_verts, slot_inds) = Self::generate_slot_vertices(
+                slot_x, inv_row_y, slot_size, slot_type,
+                [1.0, 1.0, 1.0, 1.0], vertices.len() as u16
+            );
+            vertices.extend(slot_verts);
+            indices.extend(slot_inds);
 
             // Draw item if present
-            if let Some((block_type, _qty)) = inventory.slots[i] {
+            if let Some((block_type, qty)) = inventory.slots[i] {
                 let block_type_val = Self::block_type_to_ui_index(block_type);
                 let icon_size = slot_size * 0.7;
                 let icon_base = vertices.len() as u16;
@@ -1140,31 +1368,31 @@ impl UIRenderer {
                 vertices.push(UIVertex { position: [slot_x + icon_size, inv_row_y + icon_size], tex_coords: [1.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
                 vertices.push(UIVertex { position: [slot_x - icon_size, inv_row_y + icon_size], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
                 indices.extend_from_slice(&[icon_base, icon_base + 1, icon_base + 2, icon_base, icon_base + 2, icon_base + 3]);
+
+                // Quantity display with shadow (Minecraft style) - bottom right corner
+                if qty > 1 {
+                    let qty_str = qty.to_string();
+                    let text_scale = slot_size * 0.6;
+                    // Position at bottom-right, offset from center
+                    let text_x = slot_x - slot_size * 0.1;
+                    let text_y = inv_row_y - slot_size * 0.75;
+                    let (qty_verts, qty_inds) = Self::generate_text_with_shadow(
+                        &qty_str, text_x, text_y, text_scale,
+                        [1.0, 1.0, 1.0, 1.0], vertices.len() as u16
+                    );
+                    vertices.extend(qty_verts);
+                    indices.extend(qty_inds);
+                }
             }
         }
 
-        // Instructions at bottom
-        let instructions = "ARROWS: NAVIGATE  ENTER: TRANSFER  ESC: CLOSE";
-        let inst_size = 0.02;
-        let inst_spacing = inst_size * 0.7;
-        let inst_width = instructions.len() as f32 * inst_spacing;
-        let mut inst_x = -inst_width / 2.0;
-        let inst_y = -0.4;
-
-        for ch in instructions.chars() {
-            if ch.is_ascii_digit() {
-                let dig = ch.to_digit(10).unwrap() as usize;
-                let (dig_verts, dig_inds) = Self::get_digit_vertices(dig, inst_x, inst_y, inst_size, [0.7, 0.7, 0.7, 1.0]);
-                let base = vertices.len() as u16;
-                for v in dig_verts { vertices.push(v); }
-                for i in dig_inds { indices.push(base + i); }
-            } else {
-                let (letter_verts, letter_inds) = Self::get_letter_vertices(ch.to_ascii_uppercase(), inst_x, inst_y, inst_size, [0.7, 0.7, 0.7, 1.0], vertices.len() as u16);
-                vertices.extend(letter_verts);
-                indices.extend(letter_inds);
-            }
-            inst_x += inst_spacing;
-        }
+        // Instructions at bottom using bitmap font
+        let (inst_verts, inst_inds) = Self::generate_centered_text(
+            "Arrows: Move  Enter: Transfer  Esc: Close",
+            0.0, -0.28, 0.022, [0.7, 0.7, 0.7, 1.0], vertices.len() as u16
+        );
+        vertices.extend(inst_verts);
+        indices.extend(inst_inds);
 
         // Create buffers and render
         let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

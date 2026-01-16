@@ -429,15 +429,26 @@ impl EntityManager {
     /// Collect dropped items near the player, returns list of collected block types
     pub fn collect_nearby_items(&mut self, player_pos: Point3<f32>) -> Vec<BlockType> {
         let mut collected = Vec::new();
-        let pickup_distance_sq = 2.25;  // 1.5 block radius squared
+
+        // Horizontal pickup radius (squared) - 1.5 blocks
+        let horizontal_dist_sq = 2.25;
+        // Vertical pickup range - player can reach items from feet to above head
+        // player_pos is at eye level (~1.7 above ground), so check items from -2.0 to +1.0 relative
+        let vertical_range_below = 2.0;  // Items at feet level
+        let vertical_range_above = 1.0;  // Items slightly above eye level
 
         self.dropped_items.retain(|item| {
             let dx = item.position.x - player_pos.x;
             let dy = item.position.y - player_pos.y;
             let dz = item.position.z - player_pos.z;
-            let dist_sq = dx * dx + dy * dy + dz * dz;
 
-            if dist_sq < pickup_distance_sq {
+            // Check horizontal distance (XZ plane)
+            let horiz_dist_sq = dx * dx + dz * dz;
+
+            // Check vertical range (items can be below feet to above head)
+            let in_vertical_range = dy > -vertical_range_below && dy < vertical_range_above;
+
+            if horiz_dist_sq < horizontal_dist_sq && in_vertical_range {
                 collected.push(item.block_type);
                 false  // Remove from list
             } else {

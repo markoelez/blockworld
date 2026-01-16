@@ -139,41 +139,49 @@ fn main() {
                                     VirtualKeyCode::Return => {
                                         // Transfer item between chest and inventory
                                         if let Some(chest_pos) = chest_ui.chest_pos {
+                                            let contents = world.chest_contents.entry(chest_pos).or_insert([None; 9]);
                                             if chest_ui.in_chest_section {
                                                 // Take from chest to inventory
-                                                if let Some(contents) = world.chest_contents.get_mut(&chest_pos) {
-                                                    if chest_ui.selected_slot < contents.len() {
-                                                        let (block_type, qty) = contents[chest_ui.selected_slot];
-                                                        if inventory.add_block(block_type) {
-                                                            if qty <= 1 {
-                                                                contents.remove(chest_ui.selected_slot);
-                                                            } else {
-                                                                contents[chest_ui.selected_slot].1 -= 1;
-                                                            }
+                                                if let Some((block_type, qty)) = contents[chest_ui.selected_slot] {
+                                                    if inventory.add_block(block_type) {
+                                                        if qty <= 1 {
+                                                            contents[chest_ui.selected_slot] = None;
+                                                        } else {
+                                                            contents[chest_ui.selected_slot] = Some((block_type, qty - 1));
                                                         }
                                                     }
                                                 }
                                             } else {
                                                 // Put from inventory to chest
                                                 if let Some((block_type, qty)) = inventory.slots[chest_ui.selected_slot] {
-                                                    let contents = world.chest_contents.entry(chest_pos).or_insert_with(Vec::new);
-                                                    // Try to stack with existing
+                                                    // Try to stack with existing item in chest
                                                     let mut stacked = false;
-                                                    for item in contents.iter_mut() {
-                                                        if item.0 == block_type {
-                                                            item.1 += 1;
-                                                            stacked = true;
-                                                            break;
+                                                    for slot in contents.iter_mut() {
+                                                        if let Some((bt, q)) = slot {
+                                                            if *bt == block_type {
+                                                                *q += 1;
+                                                                stacked = true;
+                                                                break;
+                                                            }
                                                         }
                                                     }
+                                                    // If not stacked, find empty slot
                                                     if !stacked {
-                                                        contents.push((block_type, 1));
+                                                        for slot in contents.iter_mut() {
+                                                            if slot.is_none() {
+                                                                *slot = Some((block_type, 1));
+                                                                stacked = true;
+                                                                break;
+                                                            }
+                                                        }
                                                     }
-                                                    // Decrement inventory
-                                                    if qty <= 1 {
-                                                        inventory.slots[chest_ui.selected_slot] = None;
-                                                    } else {
-                                                        inventory.slots[chest_ui.selected_slot] = Some((block_type, qty - 1));
+                                                    // Only decrement inventory if transfer succeeded
+                                                    if stacked {
+                                                        if qty <= 1 {
+                                                            inventory.slots[chest_ui.selected_slot] = None;
+                                                        } else {
+                                                            inventory.slots[chest_ui.selected_slot] = Some((block_type, qty - 1));
+                                                        }
                                                     }
                                                 }
                                             }
