@@ -316,8 +316,94 @@ impl Villager {
     }
 }
 
+// Dropped item that can be picked up
+pub struct DroppedItem {
+    pub position: Point3<f32>,
+    pub velocity: Vector3<f32>,
+    pub block_type: BlockType,
+    pub rotation: f32,
+    pub lifetime: f32,
+    pub bobbing_phase: f32,
+}
+
+impl DroppedItem {
+    pub fn new(position: Point3<f32>, block_type: BlockType) -> Self {
+        let mut rng = rand::thread_rng();
+        Self {
+            position,
+            velocity: Vector3::new(
+                rng.gen_range(-1.5..1.5),
+                rng.gen_range(4.0..6.0),  // Pop up
+                rng.gen_range(-1.5..1.5),
+            ),
+            block_type,
+            rotation: rng.gen_range(0.0..std::f32::consts::TAU),
+            lifetime: 300.0,  // 5 minutes
+            bobbing_phase: rng.gen_range(0.0..std::f32::consts::TAU),
+        }
+    }
+
+    pub fn update(&mut self, dt: f32, world: &World) -> bool {
+        self.lifetime -= dt;
+        if self.lifetime <= 0.0 {
+            return false;
+        }
+
+        // Apply gravity
+        self.velocity.y -= 25.0 * dt;
+        self.velocity.y = self.velocity.y.max(-30.0);
+
+        // Horizontal friction
+        self.velocity.x *= 0.98;
+        self.velocity.z *= 0.98;
+
+        // Try to move
+        let new_x = self.position.x + self.velocity.x * dt;
+        let new_y = self.position.y + self.velocity.y * dt;
+        let new_z = self.position.z + self.velocity.z * dt;
+
+        // Ground collision - simple check
+        let ground_y = self.find_ground_y(world, new_x as i32, new_z as i32);
+        let item_radius = 0.2;
+
+        if new_y < ground_y + item_radius {
+            self.position.y = ground_y + item_radius;
+            self.velocity.y *= -0.4;  // Bounce
+            self.velocity.x *= 0.6;   // Friction on ground
+            self.velocity.z *= 0.6;
+        } else {
+            self.position.y = new_y;
+        }
+
+        self.position.x = new_x;
+        self.position.z = new_z;
+
+        // Rotate
+        self.rotation += dt * 2.0;
+        if self.rotation > std::f32::consts::TAU {
+            self.rotation -= std::f32::consts::TAU;
+        }
+
+        true
+    }
+
+    fn find_ground_y(&self, world: &World, x: i32, z: i32) -> f32 {
+        // Start from current position and search downward
+        let start_y = self.position.y.floor() as i32;
+        for y in (0..=start_y).rev() {
+            if let Some(block) = world.get_block(x, y, z) {
+                if block != BlockType::Air && block != BlockType::Water {
+                    return (y + 1) as f32;
+                }
+            }
+        }
+        0.0
+    }
+}
+
 pub struct EntityManager {
     pub villagers: Vec<Villager>,
+    pub dropped_items: Vec<DroppedItem>,
     next_id: u32,
     rng: rand::rngs::ThreadRng,
     ai_update_timer: f32,
@@ -328,11 +414,42 @@ impl EntityManager {
     pub fn new() -> Self {
         Self {
             villagers: Vec::new(),
+            dropped_items: Vec::new(),
             next_id: 0,
             rng: rand::thread_rng(),
             ai_update_timer: 0.0,
             spawn_check_timer: 0.0,
         }
+    }
+
+    /// Spawn a dropped item at a position
+    pub fn spawn_dropped_item(&mut self, position: Point3<f32>, block_type: BlockType) {
+        // Limit total dropped items
+        if self.dropped_items.len() < 200 {
+            self.dropped_items.push(DroppedItem::new(position, block_type));
+        }
+    }
+
+    /// Collect dropped items near the player, returns list of collected block types
+    pub fn collect_nearby_items(&mut self, player_pos: Point3<f32>) -> Vec<BlockType> {
+        let mut collected = Vec::new();
+        let pickup_distance_sq = 2.25;  // 1.5 block radius squared
+
+        self.dropped_items.retain(|item| {
+            let dx = item.position.x - player_pos.x;
+            let dy = item.position.y - player_pos.y;
+            let dz = item.position.z - player_pos.z;
+            let dist_sq = dx * dx + dy * dy + dz * dz;
+
+            if dist_sq < pickup_distance_sq {
+                collected.push(item.block_type);
+                false  // Remove from list
+            } else {
+                true   // Keep in list
+            }
+        });
+
+        collected
     }
 
     pub fn update(&mut self, dt: f32, world: &World, player_pos: Point3<f32>) {
@@ -361,6 +478,9 @@ impl EntityManager {
                 }
             }
         }
+
+        // Update dropped items
+        self.dropped_items.retain_mut(|item| item.update(dt, world));
 
         // Periodically check for spawning
         self.spawn_check_timer -= dt;
@@ -467,5 +587,9 @@ impl EntityManager {
 
     pub fn get_villagers(&self) -> &[Villager] {
         &self.villagers
+    }
+
+    pub fn get_dropped_items(&self) -> &[DroppedItem] {
+        &self.dropped_items
     }
 }

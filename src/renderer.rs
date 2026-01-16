@@ -306,6 +306,15 @@ pub struct Renderer {
     // Point lighting
     lighting_buffer: wgpu::Buffer,
     lighting_bind_group: wgpu::BindGroup,
+    // Block preview (ghost block)
+    preview_vertex_buffer: wgpu::Buffer,
+    preview_index_buffer: wgpu::Buffer,
+    preview_index_count: u32,
+    preview_visible: bool,
+    // Dropped item rendering
+    dropped_item_vertex_buffer: wgpu::Buffer,
+    dropped_item_index_buffer: wgpu::Buffer,
+    dropped_item_index_count: u32,
 }
 
 impl Renderer {
@@ -1819,6 +1828,36 @@ impl Renderer {
             label: Some("lighting_bind_group"),
         });
 
+        // Block preview buffers (6 faces * 4 vertices = 24 vertices, 36 indices)
+        let preview_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Preview Vertex Buffer"),
+            size: (24 * std::mem::size_of::<Vertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let preview_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Preview Index Buffer"),
+            size: (36 * std::mem::size_of::<u16>()) as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Dropped item buffers (200 items max * 24 vertices, 36 indices each)
+        let dropped_item_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Dropped Item Vertex Buffer"),
+            size: (200 * 24 * std::mem::size_of::<Vertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let dropped_item_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Dropped Item Index Buffer"),
+            size: (200 * 36 * std::mem::size_of::<u16>()) as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let particle_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Particle Pipeline"),
             layout: Some(&particle_pipeline_layout),
@@ -1966,6 +2005,15 @@ impl Renderer {
             // Point lighting
             lighting_buffer,
             lighting_bind_group,
+            // Block preview
+            preview_vertex_buffer,
+            preview_index_buffer,
+            preview_index_count: 0,
+            preview_visible: false,
+            // Dropped items
+            dropped_item_vertex_buffer,
+            dropped_item_index_buffer,
+            dropped_item_index_count: 0,
         }
     }
 
@@ -2190,6 +2238,9 @@ impl Renderer {
         // Update villager mesh
         self.update_villager_mesh(entity_manager.get_villagers());
 
+        // Update dropped item mesh
+        self.update_dropped_items(entity_manager.get_dropped_items());
+
         // Update particle mesh
         self.update_particle_mesh(camera, particle_system);
 
@@ -2383,6 +2434,13 @@ impl Renderer {
                 render_pass.draw_indexed(0..self.villager_index_count, 0, 0..1);
             }
 
+            // Render dropped items
+            if self.dropped_item_index_count > 0 {
+                render_pass.set_vertex_buffer(0, self.dropped_item_vertex_buffer.slice(..));
+                render_pass.set_index_buffer(self.dropped_item_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed(0..self.dropped_item_index_count, 0, 0..1);
+            }
+
             // Render transparent chunks with frustum culling
             render_pass.set_pipeline(&self.transparent_pipeline);
             render_pass.set_bind_group(2, &self.shadow_texture_bind_group, &[]);
@@ -2410,6 +2468,14 @@ impl Renderer {
                     render_pass.set_index_buffer(chunk_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                     render_pass.draw_indexed(0..chunk_mesh.index_count, 0, 0..1);
                 }
+            }
+
+            // Render block preview (ghost block)
+            if self.preview_visible && self.preview_index_count > 0 {
+                // Uses same transparent pipeline (already set)
+                render_pass.set_vertex_buffer(0, self.preview_vertex_buffer.slice(..));
+                render_pass.set_index_buffer(self.preview_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed(0..self.preview_index_count, 0, 0..1);
             }
 
             // Render particles
@@ -4085,6 +4151,184 @@ impl Renderer {
         if !vertices.is_empty() {
             self.queue.write_buffer(&self.villager_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
             self.queue.write_buffer(&self.villager_index_buffer, 0, bytemuck::cast_slice(&indices));
+        }
+    }
+
+    /// Update the block preview mesh for placement visualization
+    pub fn update_block_preview(&mut self, placement_pos: Option<(i32, i32, i32)>, block_type: Option<crate::world::BlockType>) {
+        use crate::world::BlockType;
+
+        if let (Some((x, y, z)), Some(bt)) = (placement_pos, block_type) {
+            // Skip preview for non-placeable blocks
+            if bt == BlockType::Air || bt == BlockType::Barrier {
+                self.preview_visible = false;
+                return;
+            }
+
+            let mut vertices: Vec<Vertex> = Vec::with_capacity(24);
+            let mut indices: Vec<u16> = Vec::with_capacity(36);
+
+            let x = x as f32;
+            let y = y as f32;
+            let z = z as f32;
+
+            // Block type as f32 for shader
+            let block_type_f = bt as u32 as f32;
+
+            // Generate a full cube with all 6 faces
+            // Bottom face (Y-)
+            Self::add_preview_face(
+                &mut vertices, &mut indices,
+                [x, y, z + 1.0], [x + 1.0, y, z + 1.0], [x + 1.0, y, z], [x, y, z],
+                [0.0, -1.0, 0.0], block_type_f,
+            );
+            // Top face (Y+)
+            Self::add_preview_face(
+                &mut vertices, &mut indices,
+                [x, y + 1.0, z], [x + 1.0, y + 1.0, z], [x + 1.0, y + 1.0, z + 1.0], [x, y + 1.0, z + 1.0],
+                [0.0, 1.0, 0.0], block_type_f,
+            );
+            // Front face (Z-)
+            Self::add_preview_face(
+                &mut vertices, &mut indices,
+                [x, y, z], [x + 1.0, y, z], [x + 1.0, y + 1.0, z], [x, y + 1.0, z],
+                [0.0, 0.0, -1.0], block_type_f,
+            );
+            // Back face (Z+)
+            Self::add_preview_face(
+                &mut vertices, &mut indices,
+                [x + 1.0, y, z + 1.0], [x, y, z + 1.0], [x, y + 1.0, z + 1.0], [x + 1.0, y + 1.0, z + 1.0],
+                [0.0, 0.0, 1.0], block_type_f,
+            );
+            // Left face (X-)
+            Self::add_preview_face(
+                &mut vertices, &mut indices,
+                [x, y, z + 1.0], [x, y, z], [x, y + 1.0, z], [x, y + 1.0, z + 1.0],
+                [-1.0, 0.0, 0.0], block_type_f,
+            );
+            // Right face (X+)
+            Self::add_preview_face(
+                &mut vertices, &mut indices,
+                [x + 1.0, y, z], [x + 1.0, y, z + 1.0], [x + 1.0, y + 1.0, z + 1.0], [x + 1.0, y + 1.0, z],
+                [1.0, 0.0, 0.0], block_type_f,
+            );
+
+            self.preview_index_count = indices.len() as u32;
+            self.preview_visible = true;
+
+            self.queue.write_buffer(&self.preview_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+            self.queue.write_buffer(&self.preview_index_buffer, 0, bytemuck::cast_slice(&indices));
+        } else {
+            self.preview_visible = false;
+        }
+    }
+
+    // Add a preview face with semi-transparent flag (damage = -1.0)
+    fn add_preview_face(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        v0: [f32; 3], v1: [f32; 3], v2: [f32; 3], v3: [f32; 3],
+        normal: [f32; 3],
+        block_type: f32,
+    ) {
+        let base = vertices.len() as u16;
+
+        let tex_coords = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+        let positions = [v0, v1, v2, v3];
+
+        for i in 0..4 {
+            vertices.push(Vertex {
+                position: positions[i],
+                tex_coords: tex_coords[i],
+                normal,
+                block_type,
+                damage: -1.0,  // Flag for semi-transparent preview
+            });
+        }
+
+        // Two triangles for the quad
+        indices.push(base);
+        indices.push(base + 1);
+        indices.push(base + 2);
+        indices.push(base);
+        indices.push(base + 2);
+        indices.push(base + 3);
+    }
+
+    /// Update dropped item meshes for rendering
+    pub fn update_dropped_items(&mut self, items: &[crate::entity::DroppedItem]) {
+        if items.is_empty() {
+            self.dropped_item_index_count = 0;
+            return;
+        }
+
+        let mut vertices: Vec<Vertex> = Vec::with_capacity(items.len() * 24);
+        let mut indices: Vec<u16> = Vec::with_capacity(items.len() * 36);
+
+        let item_size = 0.3;  // Small cube size
+        let half_size = item_size / 2.0;
+
+        for item in items {
+            let x = item.position.x;
+            let y = item.position.y;
+            let z = item.position.z;
+
+            // Bobbing animation
+            let bob = (item.bobbing_phase + self.time_of_day * 200.0).sin() * 0.1;
+            let y = y + bob;
+
+            // Rotation
+            let cos_r = item.rotation.cos();
+            let sin_r = item.rotation.sin();
+
+            // Rotate cube corners around Y axis
+            let rotate = |dx: f32, dz: f32| -> (f32, f32) {
+                (dx * cos_r - dz * sin_r, dx * sin_r + dz * cos_r)
+            };
+
+            // 8 corners of the rotated cube
+            let (rx0, rz0) = rotate(-half_size, -half_size);
+            let (rx1, rz1) = rotate(half_size, -half_size);
+            let (rx2, rz2) = rotate(half_size, half_size);
+            let (rx3, rz3) = rotate(-half_size, half_size);
+            let corners: [[f32; 3]; 8] = [
+                [x + rx0, y - half_size, z + rz0],  // 0: bottom-back-left
+                [x + rx1, y - half_size, z + rz1],  // 1: bottom-back-right
+                [x + rx2, y - half_size, z + rz2],  // 2: bottom-front-right
+                [x + rx3, y - half_size, z + rz3],  // 3: bottom-front-left
+                [x + rx0, y + half_size, z + rz0],  // 4: top-back-left
+                [x + rx1, y + half_size, z + rz1],  // 5: top-back-right
+                [x + rx2, y + half_size, z + rz2],  // 6: top-front-right
+                [x + rx3, y + half_size, z + rz3],  // 7: top-front-left
+            ];
+
+            let block_type_f = item.block_type as u32 as f32;
+
+            // Add 6 faces (order: bottom, top, front, back, left, right)
+            let faces = [
+                ([0, 1, 2, 3], [0.0, -1.0, 0.0]),  // Bottom (Y-)
+                ([4, 7, 6, 5], [0.0, 1.0, 0.0]),   // Top (Y+)
+                ([3, 2, 6, 7], [0.0, 0.0, 1.0]),   // Front (Z+) rotated
+                ([1, 0, 4, 5], [0.0, 0.0, -1.0]),  // Back (Z-) rotated
+                ([0, 3, 7, 4], [-1.0, 0.0, 0.0]),  // Left (X-) rotated
+                ([2, 1, 5, 6], [1.0, 0.0, 0.0]),   // Right (X+) rotated
+            ];
+
+            for (face_indices, normal) in faces {
+                Self::add_quad_face(
+                    &mut vertices, &mut indices,
+                    corners[face_indices[0]], corners[face_indices[1]],
+                    corners[face_indices[2]], corners[face_indices[3]],
+                    normal, block_type_f,
+                );
+            }
+        }
+
+        self.dropped_item_index_count = indices.len() as u32;
+
+        if !vertices.is_empty() {
+            self.queue.write_buffer(&self.dropped_item_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+            self.queue.write_buffer(&self.dropped_item_index_buffer, 0, bytemuck::cast_slice(&indices));
         }
     }
 

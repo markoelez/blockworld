@@ -264,11 +264,10 @@ fn main() {
                                             let block_type = world.get_block(x, y, z);
                                             if let Some(broken_type) = world.damage_block(x, y, z) {
                                                 // Block was fully destroyed - spawn more particles
-                                                particle_system.spawn_block_break(
-                                                    cgmath::Point3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
-                                                    broken_type
-                                                );
-                                                inventory.add_block(broken_type);
+                                                let block_center = cgmath::Point3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                                                particle_system.spawn_block_break(block_center, broken_type);
+                                                // Spawn dropped item instead of directly adding to inventory
+                                                entity_manager.spawn_dropped_item(block_center, broken_type);
                                                 if let Some(ref audio) = audio_manager {
                                                     audio.play_block_break(broken_type);
                                                 }
@@ -312,6 +311,12 @@ fn main() {
                     world.update_loaded_chunks(camera.position);
                     camera.update(dt, &world);
                     entity_manager.update(dt, &world, camera.position);
+
+                    // Collect nearby dropped items
+                    for block_type in entity_manager.collect_nearby_items(camera.position) {
+                        inventory.add_block(block_type);
+                    }
+
                     weather_state.update(dt, &mut weather_rng);
                     particle_system.spawn_weather(camera.position, &weather_state, dt);
 
@@ -335,6 +340,22 @@ fn main() {
 
                     particle_system.update(dt);
                     targeted_block = camera.get_targeted_block(&world, 5.0);
+
+                    // Update block preview for placement visualization
+                    let preview_pos = if !pause_menu.visible && !chest_ui.open {
+                        if let Some(block_type) = inventory.get_selected_block() {
+                            if block_type == world::BlockType::Torch {
+                                camera.get_block_placement_with_face(&world, 5.0).map(|(pos, _)| pos)
+                            } else {
+                                camera.get_block_placement_position(&world, 5.0)
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    renderer.update_block_preview(preview_pos, inventory.get_selected_block());
 
                     // Handle sound and particle events
                     if let Some(ref audio) = audio_manager {

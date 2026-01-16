@@ -48,49 +48,108 @@ var t_normal_map: texture_2d<f32>;
 @group(1) @binding(4)
 var s_sampler: sampler;
 
-// Wave generation using multiple sine waves
-fn wave_height(pos: vec2<f32>, time: f32) -> f32 {
-    var height = 0.0;
+// Gerstner wave parameters - (direction.x, direction.y, frequency, amplitude)
+const WAVE1: vec4<f32> = vec4<f32>(1.0, 0.3, 0.4, 0.12);
+const WAVE2: vec4<f32> = vec4<f32>(-0.7, 1.0, 0.6, 0.08);
+const WAVE3: vec4<f32> = vec4<f32>(0.4, -0.8, 0.9, 0.05);
+const WAVE4: vec4<f32> = vec4<f32>(0.8, 0.6, 1.2, 0.03);
+const GERSTNER_STEEPNESS: f32 = 0.4;
 
-    // Multiple wave layers for realistic water movement
-    height += sin(pos.x * 0.5 + time * 0.8) * 0.1;
-    height += sin(pos.y * 0.7 + time * 1.1) * 0.08;
-    height += sin((pos.x + pos.y) * 0.3 + time * 0.6) * 0.12;
-    height += sin((pos.x - pos.y) * 0.4 + time * 0.9) * 0.06;
+// Single Gerstner wave contribution
+fn gerstner_wave(pos: vec2<f32>, time: f32, wave: vec4<f32>) -> vec3<f32> {
+    let dir = normalize(wave.xy);
+    let freq = wave.z;
+    let amp = wave.w;
+    let steepness = GERSTNER_STEEPNESS;
 
-    // Small ripples
-    height += sin(pos.x * 2.0 + time * 2.0) * 0.02;
-    height += sin(pos.y * 2.5 + time * 2.3) * 0.02;
+    let phase = dot(dir, pos) * freq + time;
+    let s = sin(phase);
+    let c = cos(phase);
 
-    return height;
+    // Gerstner displacement: horizontal circular motion + vertical sine
+    return vec3<f32>(
+        dir.x * steepness * amp * c,
+        amp * s,
+        dir.y * steepness * amp * c
+    );
 }
 
-// Calculate wave normal from height derivatives
+// Combined wave displacement
+fn wave_displacement(pos: vec2<f32>, time: f32) -> vec3<f32> {
+    var displacement = vec3<f32>(0.0, 0.0, 0.0);
+
+    displacement += gerstner_wave(pos, time * 1.2, WAVE1);
+    displacement += gerstner_wave(pos, time * 0.9, WAVE2);
+    displacement += gerstner_wave(pos, time * 1.5, WAVE3);
+    displacement += gerstner_wave(pos, time * 2.0, WAVE4);
+
+    // Add small ripples on top
+    displacement.y += sin(pos.x * 2.0 + time * 2.5) * 0.015;
+    displacement.y += sin(pos.y * 2.5 + time * 2.8) * 0.015;
+
+    return displacement;
+}
+
+// Gerstner wave normal contribution
+fn gerstner_wave_normal(pos: vec2<f32>, time: f32, wave: vec4<f32>) -> vec3<f32> {
+    let dir = normalize(wave.xy);
+    let freq = wave.z;
+    let amp = wave.w;
+    let steepness = GERSTNER_STEEPNESS;
+
+    let phase = dot(dir, pos) * freq + time;
+    let s = sin(phase);
+    let c = cos(phase);
+
+    // Partial derivatives for normal calculation
+    return vec3<f32>(
+        -dir.x * freq * amp * c,
+        -steepness * freq * amp * s,
+        -dir.y * freq * amp * c
+    );
+}
+
+// Calculate wave normal from combined Gerstner waves
 fn wave_normal(pos: vec2<f32>, time: f32) -> vec3<f32> {
-    let epsilon = 0.1;
-    let h_center = wave_height(pos, time);
-    let h_right = wave_height(pos + vec2<f32>(epsilon, 0.0), time);
-    let h_forward = wave_height(pos + vec2<f32>(0.0, epsilon), time);
+    var n = vec3<f32>(0.0, 1.0, 0.0);
 
-    let dx = (h_right - h_center) / epsilon;
-    let dz = (h_forward - h_center) / epsilon;
+    n.x += gerstner_wave_normal(pos, time * 1.2, WAVE1).x;
+    n.z += gerstner_wave_normal(pos, time * 1.2, WAVE1).z;
 
-    return normalize(vec3<f32>(-dx, 1.0, -dz));
+    n.x += gerstner_wave_normal(pos, time * 0.9, WAVE2).x;
+    n.z += gerstner_wave_normal(pos, time * 0.9, WAVE2).z;
+
+    n.x += gerstner_wave_normal(pos, time * 1.5, WAVE3).x;
+    n.z += gerstner_wave_normal(pos, time * 1.5, WAVE3).z;
+
+    n.x += gerstner_wave_normal(pos, time * 2.0, WAVE4).x;
+    n.z += gerstner_wave_normal(pos, time * 2.0, WAVE4).z;
+
+    return normalize(n);
+}
+
+// Wave height for foam calculation (legacy function for compatibility)
+fn wave_height(pos: vec2<f32>, time: f32) -> f32 {
+    return wave_displacement(pos, time).y;
 }
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
-    // Apply wave displacement
+    // Apply Gerstner wave displacement (horizontal + vertical)
     var pos = in.position;
-    let wave_offset = wave_height(pos.xz, u_uniform.time_of_day * 100.0);
-    pos.y += wave_offset * 0.3;
+    let time = u_uniform.time_of_day * 80.0;
+    let displacement = wave_displacement(pos.xz, time);
+
+    pos.x += displacement.x;
+    pos.y += displacement.y;
+    pos.z += displacement.z;
 
     out.clip_position = u_uniform.view_proj * vec4<f32>(pos, 1.0);
     out.tex_coords = in.tex_coords;
     out.world_position = pos;
-    out.normal = wave_normal(pos.xz, u_uniform.time_of_day * 100.0);
+    out.normal = wave_normal(in.position.xz, time);  // Use original position for normal
     out.clip_space = out.clip_position;
 
     return out;
@@ -148,11 +207,15 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let day_factor = max(u_uniform.sun_direction.y, 0.0);
     let sun_specular = vec3<f32>(1.0, 0.95, 0.8) * specular * day_factor;
 
-    // Foam at edges (simplified)
-    let foam = 0.0; // Would need depth comparison for proper foam
+    // Foam at wave peaks and where normal points strongly upward
+    let time = u_uniform.time_of_day * 80.0;
+    let wave_y = wave_height(in.world_position.xz, time);
+    let foam_threshold = 0.08;
+    let foam_amount = smoothstep(foam_threshold, foam_threshold + 0.06, wave_y) * 0.25;
+    let foam_color = vec3<f32>(0.9, 0.95, 1.0);
 
     // Final color
-    var final_color = water_surface + sun_specular;
+    var final_color = water_surface + sun_specular + foam_color * foam_amount;
 
     // Fog
     let distance = length(in.world_position - u_uniform.camera_pos);
@@ -195,7 +258,14 @@ fn fs_simple(in: VertexOutput) -> @location(0) vec4<f32> {
     let NdotL = max(dot(N, L), 0.0);
     let diffuse = water_color * NdotL * day_factor * 0.3;
 
-    var final_color = ambient + diffuse + sun_specular + surface_color * 0.5;
+    // Foam at wave peaks
+    let time = u_uniform.time_of_day * 80.0;
+    let wave_y = wave_height(in.world_position.xz, time);
+    let foam_threshold = 0.08;
+    let foam_amount = smoothstep(foam_threshold, foam_threshold + 0.06, wave_y) * 0.2;
+    let foam_color = vec3<f32>(0.85, 0.9, 0.95);
+
+    var final_color = ambient + diffuse + sun_specular + surface_color * 0.5 + foam_color * foam_amount;
 
     // Fog
     let distance = length(in.world_position - u_uniform.camera_pos);

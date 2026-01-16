@@ -30,10 +30,20 @@ var<uniform> u_uniform: Uniform;
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.clip_position = u_uniform.view_proj * vec4<f32>(in.position, 1.0);
-    out.world_position = in.position;
+
+    // Drift animation - clouds slowly move with time
+    var pos = in.position;
+    let drift_speed = 8.0;  // Units per full day cycle
+    pos.x += u_uniform.time_of_day * drift_speed;
+
+    // Wrap clouds around when they drift too far (seamless looping)
+    let wrap_range = 200.0;
+    pos.x = pos.x - floor((pos.x + wrap_range) / (wrap_range * 2.0)) * (wrap_range * 2.0);
+
+    out.clip_position = u_uniform.view_proj * vec4<f32>(pos, 1.0);
+    out.world_position = pos;
     out.normal = in.normal;
-    out.distance = length(in.position - u_uniform.camera_pos);
+    out.distance = length(pos - u_uniform.camera_pos);
     return out;
 }
 
@@ -69,10 +79,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Cloud color with lighting
     var cloud_color = mix(shadow_cloud, base_cloud, lighting);
 
+    // Soft edge effect based on viewing angle (Fresnel-like)
+    let view_dir = normalize(u_uniform.camera_pos - in.world_position);
+    let edge_fade = pow(abs(dot(view_dir, in.normal)), 0.5);  // Softer edges at grazing angles
+
+    // Add subtle puffiness variation using position-based noise
+    let noise_scale = 0.15;
+    let pos_noise = fract(sin(dot(in.world_position.xz * noise_scale, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+    let puff_variation = 0.85 + pos_noise * 0.15;
+
     // Distance-based alpha fade
     let max_distance = 500.0;
     let alpha_fade = 1.0 - smoothstep(300.0, max_distance, in.distance);
-    let cloud_alpha = (0.7 + 0.1 * day_factor) * alpha_fade;
+
+    // Combine all alpha factors
+    let base_alpha = 0.75 + 0.1 * day_factor;
+    let cloud_alpha = base_alpha * alpha_fade * edge_fade * puff_variation;
 
     return vec4<f32>(cloud_color, cloud_alpha);
 }

@@ -470,7 +470,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Higher alpha so water color is more visible
         final_alpha = 0.7 + normalized_depth * 0.25;
     } else {
-        final_alpha = select(1.0, 0.0, in.block_type < 0.0);
+        // Check for preview block (damage == -1.0 indicates preview mode)
+        if in.damage < -0.5 {
+            final_alpha = 0.4;  // Semi-transparent preview
+        } else {
+            final_alpha = select(1.0, 0.0, in.block_type < 0.0);
+        }
     }
 
     return vec4<f32>(lit_color, final_alpha);
