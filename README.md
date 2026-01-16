@@ -2,7 +2,7 @@
 
 [![Rust](https://github.com/markoelez/blockworld/actions/workflows/rust.yml/badge.svg)](https://github.com/markoelez/blockworld/actions/workflows/rust.yml)
 
-A Minecraft-inspired voxel game built in Rust with wgpu.
+Minecraft clone in Rust
 
 ![p1](img/p1.png)
 ![p2](img/p2.png)
