@@ -378,11 +378,7 @@ impl DroppedItem {
         self.position.x = new_x;
         self.position.z = new_z;
 
-        // Rotate
-        self.rotation += dt * 2.0;
-        if self.rotation > std::f32::consts::TAU {
-            self.rotation -= std::f32::consts::TAU;
-        }
+        self.rotation = (self.rotation + dt * 2.0).rem_euclid(std::f32::consts::TAU);
 
         true
     }

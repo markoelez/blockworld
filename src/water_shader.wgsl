@@ -113,17 +113,13 @@ fn gerstner_wave_normal(pos: vec2<f32>, time: f32, wave: vec4<f32>) -> vec3<f32>
 fn wave_normal(pos: vec2<f32>, time: f32) -> vec3<f32> {
     var n = vec3<f32>(0.0, 1.0, 0.0);
 
-    n.x += gerstner_wave_normal(pos, time * 1.2, WAVE1).x;
-    n.z += gerstner_wave_normal(pos, time * 1.2, WAVE1).z;
+    let n1 = gerstner_wave_normal(pos, time * 1.2, WAVE1);
+    let n2 = gerstner_wave_normal(pos, time * 0.9, WAVE2);
+    let n3 = gerstner_wave_normal(pos, time * 1.5, WAVE3);
+    let n4 = gerstner_wave_normal(pos, time * 2.0, WAVE4);
 
-    n.x += gerstner_wave_normal(pos, time * 0.9, WAVE2).x;
-    n.z += gerstner_wave_normal(pos, time * 0.9, WAVE2).z;
-
-    n.x += gerstner_wave_normal(pos, time * 1.5, WAVE3).x;
-    n.z += gerstner_wave_normal(pos, time * 1.5, WAVE3).z;
-
-    n.x += gerstner_wave_normal(pos, time * 2.0, WAVE4).x;
-    n.z += gerstner_wave_normal(pos, time * 2.0, WAVE4).z;
+    n.x += n1.x + n2.x + n3.x + n4.x;
+    n.z += n1.z + n2.z + n3.z + n4.z;
 
     return normalize(n);
 }

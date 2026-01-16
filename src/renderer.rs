@@ -3230,30 +3230,23 @@ impl Renderer {
         let t2 = [top_cx + hw, top_y, top_cz + hw];
         let t3 = [top_cx - hw, top_y, top_cz + hw];
 
-        // Add 6 faces of the stick (excluding top, flame goes there)
-        // Front face (+Z)
-        Self::add_quad_face(vertices, indices, b3, b2, t2, t3, [0.0, 0.0, 1.0], block_type);
-        // Back face (-Z)
-        Self::add_quad_face(vertices, indices, b1, b0, t0, t1, [0.0, 0.0, -1.0], block_type);
-        // Right face (+X)
-        Self::add_quad_face(vertices, indices, b2, b1, t1, t2, [1.0, 0.0, 0.0], block_type);
-        // Left face (-X)
-        Self::add_quad_face(vertices, indices, b0, b3, t3, t0, [-1.0, 0.0, 0.0], block_type);
-        // Bottom face (-Y)
-        Self::add_quad_face(vertices, indices, b3, b2, b1, b0, [0.0, -1.0, 0.0], block_type);
+        // Add 5 faces of the stick (excluding top, flame goes there)
+        Self::add_quad_face(vertices, indices, b3, b2, t2, t3, [0.0, 0.0, 1.0], block_type, 0.0);
+        Self::add_quad_face(vertices, indices, b1, b0, t0, t1, [0.0, 0.0, -1.0], block_type, 0.0);
+        Self::add_quad_face(vertices, indices, b2, b1, t1, t2, [1.0, 0.0, 0.0], block_type, 0.0);
+        Self::add_quad_face(vertices, indices, b0, b3, t3, t0, [-1.0, 0.0, 0.0], block_type, 0.0);
+        Self::add_quad_face(vertices, indices, b3, b2, b1, b0, [0.0, -1.0, 0.0], block_type, 0.0);
 
         // Add flame on top of the torch
-        let flame_type = 25.0;  // Special block type for bright flame
-        let flame_hw = hw * 1.2;  // Slightly wider than stick
-        let flame_height = 0.15;  // Flame height
+        let flame_type = 25.0;
+        let flame_hw = hw * 1.2;
+        let flame_height = 0.15;
 
-        // Flame bottom (at top of stick)
         let f_b0 = [top_cx - flame_hw, top_y, top_cz - flame_hw];
         let f_b1 = [top_cx + flame_hw, top_y, top_cz - flame_hw];
         let f_b2 = [top_cx + flame_hw, top_y, top_cz + flame_hw];
         let f_b3 = [top_cx - flame_hw, top_y, top_cz + flame_hw];
 
-        // Flame top (slightly higher, with additional tilt for animation feel)
         let flame_top_y = top_y + flame_height;
         let f_t0 = [top_cx - flame_hw * 0.5, flame_top_y, top_cz - flame_hw * 0.5];
         let f_t1 = [top_cx + flame_hw * 0.5, flame_top_y, top_cz - flame_hw * 0.5];
@@ -3261,21 +3254,23 @@ impl Renderer {
         let f_t3 = [top_cx - flame_hw * 0.5, flame_top_y, top_cz + flame_hw * 0.5];
 
         // Add flame faces (tapered shape)
-        Self::add_quad_face(vertices, indices, f_b3, f_b2, f_t2, f_t3, [0.0, 0.0, 1.0], flame_type);
-        Self::add_quad_face(vertices, indices, f_b1, f_b0, f_t0, f_t1, [0.0, 0.0, -1.0], flame_type);
-        Self::add_quad_face(vertices, indices, f_b2, f_b1, f_t1, f_t2, [1.0, 0.0, 0.0], flame_type);
-        Self::add_quad_face(vertices, indices, f_b0, f_b3, f_t3, f_t0, [-1.0, 0.0, 0.0], flame_type);
-        Self::add_quad_face(vertices, indices, f_t0, f_t1, f_t2, f_t3, [0.0, 1.0, 0.0], flame_type);
-        Self::add_quad_face(vertices, indices, f_b3, f_b2, f_b1, f_b0, [0.0, -1.0, 0.0], flame_type);
+        Self::add_quad_face(vertices, indices, f_b3, f_b2, f_t2, f_t3, [0.0, 0.0, 1.0], flame_type, 0.0);
+        Self::add_quad_face(vertices, indices, f_b1, f_b0, f_t0, f_t1, [0.0, 0.0, -1.0], flame_type, 0.0);
+        Self::add_quad_face(vertices, indices, f_b2, f_b1, f_t1, f_t2, [1.0, 0.0, 0.0], flame_type, 0.0);
+        Self::add_quad_face(vertices, indices, f_b0, f_b3, f_t3, f_t0, [-1.0, 0.0, 0.0], flame_type, 0.0);
+        Self::add_quad_face(vertices, indices, f_t0, f_t1, f_t2, f_t3, [0.0, 1.0, 0.0], flame_type, 0.0);
+        Self::add_quad_face(vertices, indices, f_b3, f_b2, f_b1, f_b0, [0.0, -1.0, 0.0], flame_type, 0.0);
     }
 
-    // Add a single quad face
+    // Add a single quad face with configurable damage value
+    // Use damage = -1.0 for semi-transparent preview blocks
     fn add_quad_face(
         vertices: &mut Vec<Vertex>,
         indices: &mut Vec<u16>,
         v0: [f32; 3], v1: [f32; 3], v2: [f32; 3], v3: [f32; 3],
         normal: [f32; 3],
         block_type: f32,
+        damage: f32,
     ) {
         let base = vertices.len() as u16;
 
@@ -3288,7 +3283,7 @@ impl Renderer {
                 tex_coords: tex_coords[i],
                 normal,
                 block_type,
-                damage: 0.0,
+                damage,
             });
         }
 
@@ -4171,47 +4166,28 @@ impl Renderer {
             let x = x as f32;
             let y = y as f32;
             let z = z as f32;
-
-            // Block type as f32 for shader
             let block_type_f = bt as u32 as f32;
+            let preview_damage = -1.0; // Flag for semi-transparent preview
 
-            // Generate a full cube with all 6 faces
-            // Bottom face (Y-)
-            Self::add_preview_face(
-                &mut vertices, &mut indices,
+            // Generate all 6 faces of the cube
+            Self::add_quad_face(&mut vertices, &mut indices,
                 [x, y, z + 1.0], [x + 1.0, y, z + 1.0], [x + 1.0, y, z], [x, y, z],
-                [0.0, -1.0, 0.0], block_type_f,
-            );
-            // Top face (Y+)
-            Self::add_preview_face(
-                &mut vertices, &mut indices,
+                [0.0, -1.0, 0.0], block_type_f, preview_damage);
+            Self::add_quad_face(&mut vertices, &mut indices,
                 [x, y + 1.0, z], [x + 1.0, y + 1.0, z], [x + 1.0, y + 1.0, z + 1.0], [x, y + 1.0, z + 1.0],
-                [0.0, 1.0, 0.0], block_type_f,
-            );
-            // Front face (Z-)
-            Self::add_preview_face(
-                &mut vertices, &mut indices,
+                [0.0, 1.0, 0.0], block_type_f, preview_damage);
+            Self::add_quad_face(&mut vertices, &mut indices,
                 [x, y, z], [x + 1.0, y, z], [x + 1.0, y + 1.0, z], [x, y + 1.0, z],
-                [0.0, 0.0, -1.0], block_type_f,
-            );
-            // Back face (Z+)
-            Self::add_preview_face(
-                &mut vertices, &mut indices,
+                [0.0, 0.0, -1.0], block_type_f, preview_damage);
+            Self::add_quad_face(&mut vertices, &mut indices,
                 [x + 1.0, y, z + 1.0], [x, y, z + 1.0], [x, y + 1.0, z + 1.0], [x + 1.0, y + 1.0, z + 1.0],
-                [0.0, 0.0, 1.0], block_type_f,
-            );
-            // Left face (X-)
-            Self::add_preview_face(
-                &mut vertices, &mut indices,
+                [0.0, 0.0, 1.0], block_type_f, preview_damage);
+            Self::add_quad_face(&mut vertices, &mut indices,
                 [x, y, z + 1.0], [x, y, z], [x, y + 1.0, z], [x, y + 1.0, z + 1.0],
-                [-1.0, 0.0, 0.0], block_type_f,
-            );
-            // Right face (X+)
-            Self::add_preview_face(
-                &mut vertices, &mut indices,
+                [-1.0, 0.0, 0.0], block_type_f, preview_damage);
+            Self::add_quad_face(&mut vertices, &mut indices,
                 [x + 1.0, y, z], [x + 1.0, y, z + 1.0], [x + 1.0, y + 1.0, z + 1.0], [x + 1.0, y + 1.0, z],
-                [1.0, 0.0, 0.0], block_type_f,
-            );
+                [1.0, 0.0, 0.0], block_type_f, preview_damage);
 
             self.preview_index_count = indices.len() as u32;
             self.preview_visible = true;
@@ -4221,38 +4197,6 @@ impl Renderer {
         } else {
             self.preview_visible = false;
         }
-    }
-
-    // Add a preview face with semi-transparent flag (damage = -1.0)
-    fn add_preview_face(
-        vertices: &mut Vec<Vertex>,
-        indices: &mut Vec<u16>,
-        v0: [f32; 3], v1: [f32; 3], v2: [f32; 3], v3: [f32; 3],
-        normal: [f32; 3],
-        block_type: f32,
-    ) {
-        let base = vertices.len() as u16;
-
-        let tex_coords = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
-        let positions = [v0, v1, v2, v3];
-
-        for i in 0..4 {
-            vertices.push(Vertex {
-                position: positions[i],
-                tex_coords: tex_coords[i],
-                normal,
-                block_type,
-                damage: -1.0,  // Flag for semi-transparent preview
-            });
-        }
-
-        // Two triangles for the quad
-        indices.push(base);
-        indices.push(base + 1);
-        indices.push(base + 2);
-        indices.push(base);
-        indices.push(base + 2);
-        indices.push(base + 3);
     }
 
     /// Update dropped item meshes for rendering
@@ -4319,7 +4263,7 @@ impl Renderer {
                     &mut vertices, &mut indices,
                     corners[face_indices[0]], corners[face_indices[1]],
                     corners[face_indices[2]], corners[face_indices[3]],
-                    normal, block_type_f,
+                    normal, block_type_f, 0.0,
                 );
             }
         }

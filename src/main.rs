@@ -342,18 +342,12 @@ fn main() {
                     targeted_block = camera.get_targeted_block(&world, 5.0);
 
                     // Update block preview for placement visualization
-                    let preview_pos = if !pause_menu.visible && !chest_ui.open {
-                        if let Some(block_type) = inventory.get_selected_block() {
-                            if block_type == world::BlockType::Torch {
-                                camera.get_block_placement_with_face(&world, 5.0).map(|(pos, _)| pos)
-                            } else {
-                                camera.get_block_placement_position(&world, 5.0)
-                            }
-                        } else {
-                            None
+                    let preview_pos = match (pause_menu.visible || chest_ui.open, inventory.get_selected_block()) {
+                        (true, _) | (_, None) => None,
+                        (_, Some(world::BlockType::Torch)) => {
+                            camera.get_block_placement_with_face(&world, 5.0).map(|(pos, _)| pos)
                         }
-                    } else {
-                        None
+                        (_, Some(_)) => camera.get_block_placement_position(&world, 5.0),
                     };
                     renderer.update_block_preview(preview_pos, inventory.get_selected_block());
 
