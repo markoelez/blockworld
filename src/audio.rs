@@ -24,16 +24,22 @@ pub struct MusicManager {
 impl MusicManager {
     pub fn new() -> Option<Self> {
         match OutputStream::try_default() {
-            Ok((stream, handle)) => Some(Self {
-                _stream: stream,
-                handle,
-                music_sink: None,
-                current_track: None,
-                music_volume: 0.3,  // Lower volume for background
-                track_timer: 0.0,
-                enabled: true,
-            }),
-            Err(_) => None,
+            Ok((stream, handle)) => {
+                eprintln!("Music: MusicManager initialized successfully");
+                Some(Self {
+                    _stream: stream,
+                    handle,
+                    music_sink: None,
+                    current_track: None,
+                    music_volume: 0.7,  // Background music volume
+                    track_timer: 0.0,
+                    enabled: true,
+                })
+            },
+            Err(e) => {
+                eprintln!("Music: Failed to initialize MusicManager: {:?}", e);
+                None
+            }
         }
     }
 
@@ -87,6 +93,9 @@ impl MusicManager {
             self.music_sink = Some(sink);
             self.current_track = Some(track);
             self.track_timer = duration_secs - 1.0;  // Restart slightly before end
+            eprintln!("Music: Playing {:?} track (duration: {:.1}s)", track, duration_secs);
+        } else {
+            eprintln!("Music: Failed to create sink");
         }
     }
 
@@ -101,18 +110,18 @@ impl MusicManager {
                 // Peaceful C major chord with slow modulation
                 // C4 (261.63), E4 (329.63), G4 (392.00)
                 let freqs = [130.81, 164.81, 196.00, 261.63];  // C3, E3, G3, C4
-                Self::add_layered_tones(&mut samples, &freqs, 0.15, 0.02, sample_rate);
+                Self::add_layered_tones(&mut samples, &freqs, 0.5, 0.02, sample_rate);
             }
             MusicTrack::CalmNight => {
                 // Minor key, lower frequencies
                 // A minor: A2, C3, E3
                 let freqs = [110.00, 130.81, 164.81, 220.00];  // A2, C3, E3, A3
-                Self::add_layered_tones(&mut samples, &freqs, 0.12, 0.015, sample_rate);
+                Self::add_layered_tones(&mut samples, &freqs, 0.4, 0.015, sample_rate);
             }
             MusicTrack::Underwater => {
                 // Muffled, low frequencies with heavy filtering effect
                 let freqs = [65.41, 82.41, 98.00];  // C2, E2, G2 (very low)
-                Self::add_layered_tones(&mut samples, &freqs, 0.18, 0.025, sample_rate);
+                Self::add_layered_tones(&mut samples, &freqs, 0.5, 0.025, sample_rate);
                 // Apply simple low-pass effect by averaging
                 Self::apply_lowpass(&mut samples, 0.3);
             }

@@ -331,6 +331,50 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Sheep - white wool
         texture_color = vec4<f32>(0.92, 0.90, 0.88, 1.0);
         roughness = 0.8;
+    } else if (bt == 30.0) {
+        // Chicken - white/cream
+        texture_color = vec4<f32>(0.95, 0.92, 0.85, 1.0);
+        roughness = 0.6;
+    } else if (bt == 31.0) {
+        // Rabbit - brown
+        texture_color = vec4<f32>(0.55, 0.40, 0.30, 1.0);
+        roughness = 0.7;
+    } else if (bt == 32.0) {
+        // Horse - chestnut brown
+        texture_color = vec4<f32>(0.55, 0.35, 0.20, 1.0);
+        roughness = 0.6;
+    } else if (bt == 33.0) {
+        // Wolf - gray
+        texture_color = vec4<f32>(0.55, 0.55, 0.55, 1.0);
+        roughness = 0.7;
+    } else if (bt == 34.0) {
+        // Fox - orange
+        texture_color = vec4<f32>(0.85, 0.45, 0.15, 1.0);
+        roughness = 0.6;
+    } else if (bt == 35.0) {
+        // Fish - orange/gold
+        texture_color = vec4<f32>(0.95, 0.60, 0.20, 1.0);
+        roughness = 0.3;
+    } else if (bt == 36.0) {
+        // Squid - pink/purple
+        texture_color = vec4<f32>(0.70, 0.50, 0.65, 1.0);
+        roughness = 0.4;
+    } else if (bt == 37.0) {
+        // Dolphin - gray-blue
+        texture_color = vec4<f32>(0.50, 0.55, 0.65, 1.0);
+        roughness = 0.3;
+    } else if (bt == 38.0) {
+        // Bee - yellow
+        texture_color = vec4<f32>(0.95, 0.80, 0.20, 1.0);
+        roughness = 0.5;
+    } else if (bt == 39.0) {
+        // Parrot - green
+        texture_color = vec4<f32>(0.30, 0.75, 0.35, 1.0);
+        roughness = 0.5;
+    } else if (bt == 40.0) {
+        // Bat - dark brown
+        texture_color = vec4<f32>(0.25, 0.20, 0.18, 1.0);
+        roughness = 0.7;
     }
 
     // Crack effect - dark cracks that spread as damage increases

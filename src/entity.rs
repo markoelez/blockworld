@@ -319,13 +319,36 @@ impl Villager {
 // Animal constants
 pub const ANIMAL_GRAVITY: f32 = 32.0;
 pub const ANIMAL_TERMINAL_VELOCITY: f32 = 50.0;
-pub const MAX_ANIMALS: usize = 40;
+pub const MAX_ANIMALS: usize = 200;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum AnimalType {
+    // Existing farm animals
     Pig,
     Cow,
     Sheep,
+    // Land animals
+    Chicken,
+    Rabbit,
+    Horse,
+    // Predators
+    Wolf,
+    Fox,
+    // Aquatic
+    Fish,
+    Squid,
+    Dolphin,
+    // Flying
+    Bee,
+    Parrot,
+    Bat,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum MovementType {
+    Ground,
+    Aquatic,
+    Flying,
 }
 
 impl AnimalType {
@@ -335,6 +358,17 @@ impl AnimalType {
             AnimalType::Pig => (0.9, 0.9),
             AnimalType::Cow => (0.9, 1.4),
             AnimalType::Sheep => (0.9, 1.2),
+            AnimalType::Chicken => (0.4, 0.7),
+            AnimalType::Rabbit => (0.4, 0.5),
+            AnimalType::Horse => (1.4, 1.6),
+            AnimalType::Wolf => (0.6, 0.85),
+            AnimalType::Fox => (0.5, 0.7),
+            AnimalType::Fish => (0.5, 0.3),
+            AnimalType::Squid => (0.8, 0.8),
+            AnimalType::Dolphin => (1.2, 0.6),
+            AnimalType::Bee => (0.3, 0.3),
+            AnimalType::Parrot => (0.3, 0.5),
+            AnimalType::Bat => (0.4, 0.3),
         }
     }
 
@@ -343,15 +377,84 @@ impl AnimalType {
             AnimalType::Pig => 1.2,
             AnimalType::Cow => 1.0,
             AnimalType::Sheep => 1.3,
+            AnimalType::Chicken => 1.0,
+            AnimalType::Rabbit => 2.5,
+            AnimalType::Horse => 3.0,
+            AnimalType::Wolf => 2.0,
+            AnimalType::Fox => 2.2,
+            AnimalType::Fish => 1.5,
+            AnimalType::Squid => 0.8,
+            AnimalType::Dolphin => 3.0,
+            AnimalType::Bee => 1.5,
+            AnimalType::Parrot => 1.2,
+            AnimalType::Bat => 1.8,
         }
     }
 
     /// Color index for rendering (block type index)
     pub fn color_index(&self) -> f32 {
         match self {
-            AnimalType::Pig => 27.0,   // Pink
-            AnimalType::Cow => 28.0,   // Brown
-            AnimalType::Sheep => 29.0, // White wool
+            AnimalType::Pig => 27.0,
+            AnimalType::Cow => 28.0,
+            AnimalType::Sheep => 29.0,
+            AnimalType::Chicken => 30.0,
+            AnimalType::Rabbit => 31.0,
+            AnimalType::Horse => 32.0,
+            AnimalType::Wolf => 33.0,
+            AnimalType::Fox => 34.0,
+            AnimalType::Fish => 35.0,
+            AnimalType::Squid => 36.0,
+            AnimalType::Dolphin => 37.0,
+            AnimalType::Bee => 38.0,
+            AnimalType::Parrot => 39.0,
+            AnimalType::Bat => 40.0,
+        }
+    }
+
+    /// Movement type for physics
+    pub fn movement_type(&self) -> MovementType {
+        match self {
+            AnimalType::Pig | AnimalType::Cow | AnimalType::Sheep |
+            AnimalType::Chicken | AnimalType::Rabbit | AnimalType::Horse |
+            AnimalType::Wolf | AnimalType::Fox => MovementType::Ground,
+            AnimalType::Fish | AnimalType::Squid | AnimalType::Dolphin => MovementType::Aquatic,
+            AnimalType::Bee | AnimalType::Parrot | AnimalType::Bat => MovementType::Flying,
+        }
+    }
+
+    /// Whether this animal is a predator
+    pub fn is_predator(&self) -> bool {
+        matches!(self, AnimalType::Wolf | AnimalType::Fox)
+    }
+
+    /// Whether this animal is prey (flees from predators)
+    pub fn is_prey(&self) -> bool {
+        matches!(self, AnimalType::Chicken | AnimalType::Rabbit | AnimalType::Sheep)
+    }
+
+    /// How many additional animals can spawn in a group (herds, flocks, schools)
+    pub fn group_size(&self) -> usize {
+        match self {
+            // Herding animals
+            AnimalType::Cow => 4,
+            AnimalType::Sheep => 5,
+            AnimalType::Pig => 3,
+            AnimalType::Horse => 3,
+            // Flocking birds
+            AnimalType::Chicken => 5,
+            AnimalType::Parrot => 3,
+            AnimalType::Bat => 4,
+            // Pack animals
+            AnimalType::Wolf => 3,
+            AnimalType::Fox => 2,
+            // Small animals
+            AnimalType::Rabbit => 4,
+            // Swarms
+            AnimalType::Bee => 6,
+            // Schools of fish
+            AnimalType::Fish => 8,
+            AnimalType::Squid => 3,
+            AnimalType::Dolphin => 4,
         }
     }
 }
@@ -361,6 +464,10 @@ pub enum AnimalState {
     Idle,
     Walking,
     Eating,
+    Running,    // Predators chasing or prey fleeing
+    Swimming,   // Aquatic movement
+    Flying,     // Airborne movement
+    Hovering,   // Stationary in air (bees)
 }
 
 pub struct Animal {
@@ -378,13 +485,19 @@ pub struct Animal {
 impl Animal {
     pub fn new(id: u32, animal_type: AnimalType, position: Point3<f32>) -> Self {
         let mut rng = rand::thread_rng();
+        // Set initial state based on movement type
+        let (state, velocity) = match animal_type.movement_type() {
+            MovementType::Ground => (AnimalState::Idle, Vector3::new(0.0, 0.0, 0.0)),
+            MovementType::Aquatic => (AnimalState::Swimming, Vector3::new(0.0, 0.0, 0.0)),
+            MovementType::Flying => (AnimalState::Hovering, Vector3::new(0.0, 0.0, 0.0)),
+        };
         Self {
             id,
             animal_type,
             position,
-            velocity: Vector3::new(0.0, 0.0, 0.0),
+            velocity,
             yaw: rng.gen_range(0.0..360.0),
-            state: AnimalState::Idle,
+            state,
             state_timer: rng.gen_range(1.0..3.0),
             animation_time: 0.0,
             on_ground: false,
@@ -397,6 +510,14 @@ impl Animal {
     }
 
     fn update_physics(&mut self, dt: f32, world: &World) {
+        match self.animal_type.movement_type() {
+            MovementType::Ground => self.update_ground_physics(dt, world),
+            MovementType::Aquatic => self.update_aquatic_physics(dt, world),
+            MovementType::Flying => self.update_flying_physics(dt, world),
+        }
+    }
+
+    fn update_ground_physics(&mut self, dt: f32, world: &World) {
         let (width, height) = self.animal_type.dimensions();
         let half_width = width / 2.0;
 
@@ -405,8 +526,12 @@ impl Animal {
         self.velocity.y = self.velocity.y.max(-ANIMAL_TERMINAL_VELOCITY).min(ANIMAL_TERMINAL_VELOCITY);
 
         // Apply horizontal movement based on state
-        if self.state == AnimalState::Walking {
-            let speed = self.animal_type.speed();
+        if self.state == AnimalState::Walking || self.state == AnimalState::Running {
+            let speed = if self.state == AnimalState::Running {
+                self.animal_type.speed() * 1.8
+            } else {
+                self.animal_type.speed()
+            };
             let yaw_rad = self.yaw.to_radians();
             self.velocity.x = -yaw_rad.sin() * speed;
             self.velocity.z = -yaw_rad.cos() * speed;
@@ -493,30 +618,176 @@ impl Animal {
         self.position.y = new_y;
     }
 
+    fn update_aquatic_physics(&mut self, dt: f32, world: &World) {
+        let (_, height) = self.animal_type.dimensions();
+
+        // Check if currently in water
+        let center_y = (self.position.y - height / 2.0).floor() as i32;
+        let in_water = world.get_block(
+            self.position.x.floor() as i32,
+            center_y,
+            self.position.z.floor() as i32
+        ) == Some(BlockType::Water);
+
+        if in_water {
+            // Swimming - 3D movement, no gravity
+            if self.state == AnimalState::Swimming {
+                let speed = self.animal_type.speed();
+                let yaw_rad = self.yaw.to_radians();
+                self.velocity.x = -yaw_rad.sin() * speed;
+                self.velocity.z = -yaw_rad.cos() * speed;
+
+                // Gentle vertical movement
+                self.velocity.y *= 0.95;
+            } else {
+                // Slow down when idle
+                self.velocity.x *= 0.9;
+                self.velocity.z *= 0.9;
+                self.velocity.y *= 0.9;
+            }
+
+            // Apply movement
+            self.position.x += self.velocity.x * dt;
+            self.position.y += self.velocity.y * dt;
+            self.position.z += self.velocity.z * dt;
+        } else {
+            // Out of water - apply gravity (flopping)
+            self.velocity.y -= ANIMAL_GRAVITY * 0.5 * dt;
+            self.velocity.x *= 0.95;
+            self.velocity.z *= 0.95;
+
+            self.position.x += self.velocity.x * dt;
+            self.position.y += self.velocity.y * dt;
+            self.position.z += self.velocity.z * dt;
+
+            // Ground collision
+            let feet_y = (self.position.y - height).floor() as i32;
+            if let Some(block) = world.get_block(
+                self.position.x.floor() as i32,
+                feet_y,
+                self.position.z.floor() as i32
+            ) {
+                if block != BlockType::Air && block != BlockType::Water {
+                    self.position.y = (feet_y + 1) as f32 + height;
+                    self.velocity.y = 0.0;
+                }
+            }
+        }
+    }
+
+    fn update_flying_physics(&mut self, dt: f32, world: &World) {
+        let (width, height) = self.animal_type.dimensions();
+
+        // Flying - no gravity, maintain altitude
+        if self.state == AnimalState::Flying {
+            let speed = self.animal_type.speed();
+            let yaw_rad = self.yaw.to_radians();
+            self.velocity.x = -yaw_rad.sin() * speed;
+            self.velocity.z = -yaw_rad.cos() * speed;
+        } else if self.state == AnimalState::Hovering {
+            // Hover in place with gentle bobbing
+            self.velocity.x *= 0.9;
+            self.velocity.z *= 0.9;
+            self.velocity.y = (self.animation_time * 2.0).sin() * 0.3;
+        } else {
+            // Idle - slow descent
+            self.velocity.x *= 0.9;
+            self.velocity.z *= 0.9;
+            self.velocity.y = -0.5;
+        }
+
+        // Find ground level below
+        let mut ground_y = 0;
+        for y in (0..(self.position.y as i32)).rev() {
+            if let Some(block) = world.get_block(
+                self.position.x.floor() as i32,
+                y,
+                self.position.z.floor() as i32
+            ) {
+                if block != BlockType::Air && block != BlockType::Water {
+                    ground_y = y + 1;
+                    break;
+                }
+            }
+        }
+
+        // Maintain altitude above ground (2-8 blocks)
+        let target_min_y = ground_y as f32 + 2.0 + height;
+        let target_max_y = ground_y as f32 + 8.0 + height;
+
+        if self.position.y < target_min_y && (self.state == AnimalState::Flying || self.state == AnimalState::Hovering) {
+            self.velocity.y += 5.0 * dt;
+        } else if self.position.y > target_max_y {
+            self.velocity.y -= 3.0 * dt;
+        }
+
+        // Apply movement
+        let new_x = self.position.x + self.velocity.x * dt;
+        let new_z = self.position.z + self.velocity.z * dt;
+
+        // Simple collision check for flying
+        let check_y = self.position.y.floor() as i32;
+        let blocked_x = world.get_block(new_x.floor() as i32, check_y, self.position.z.floor() as i32)
+            .map(|b| b != BlockType::Air && b != BlockType::Water)
+            .unwrap_or(false);
+        let blocked_z = world.get_block(self.position.x.floor() as i32, check_y, new_z.floor() as i32)
+            .map(|b| b != BlockType::Air && b != BlockType::Water)
+            .unwrap_or(false);
+
+        if !blocked_x {
+            self.position.x = new_x;
+        } else {
+            self.velocity.x = 0.0;
+        }
+        if !blocked_z {
+            self.position.z = new_z;
+        } else {
+            self.velocity.z = 0.0;
+        }
+
+        self.position.y += self.velocity.y * dt;
+        self.position.y = self.position.y.max(target_min_y);
+    }
+
+    /// Check if this animal is in water
+    fn is_in_water(&self, world: &World) -> bool {
+        let (_, height) = self.animal_type.dimensions();
+        let center_y = (self.position.y - height / 2.0).floor() as i32;
+        world.get_block(
+            self.position.x.floor() as i32,
+            center_y,
+            self.position.z.floor() as i32
+        ) == Some(BlockType::Water)
+    }
+
     pub fn update_ai(&mut self, dt: f32, world: &World, rng: &mut impl Rng) {
         self.state_timer -= dt;
 
+        match self.animal_type.movement_type() {
+            MovementType::Ground => self.update_ground_ai(dt, world, rng),
+            MovementType::Aquatic => self.update_aquatic_ai(dt, world, rng),
+            MovementType::Flying => self.update_flying_ai(dt, world, rng),
+        }
+    }
+
+    fn update_ground_ai(&mut self, _dt: f32, world: &World, rng: &mut impl Rng) {
         match self.state {
             AnimalState::Idle => {
                 if self.state_timer <= 0.0 {
                     let roll: f32 = rng.gen();
                     if roll < 0.5 {
-                        // Start walking
                         self.state = AnimalState::Walking;
                         self.yaw = rng.gen_range(0.0..360.0);
                         self.state_timer = rng.gen_range(3.0..8.0);
                     } else if roll < 0.8 {
-                        // Start eating
                         self.state = AnimalState::Eating;
                         self.state_timer = rng.gen_range(2.0..4.0);
                     } else {
-                        // Stay idle longer
                         self.state_timer = rng.gen_range(2.0..5.0);
                     }
                 }
             }
             AnimalState::Walking => {
-                // Check for obstacles
                 if self.is_blocked(world) || self.is_cliff_ahead(world) || self.is_water_ahead(world) {
                     self.yaw += 90.0 + rng.gen::<f32>() * 90.0;
                     if self.yaw >= 360.0 { self.yaw -= 360.0; }
@@ -528,11 +799,116 @@ impl Animal {
                     self.state_timer = rng.gen_range(1.0..3.0);
                 }
             }
+            AnimalState::Running => {
+                // Running from predator or chasing prey
+                if self.state_timer <= 0.0 {
+                    self.state = AnimalState::Idle;
+                    self.state_timer = rng.gen_range(1.0..3.0);
+                }
+                if self.is_blocked(world) || self.is_cliff_ahead(world) {
+                    self.yaw += 90.0 + rng.gen::<f32>() * 90.0;
+                    if self.yaw >= 360.0 { self.yaw -= 360.0; }
+                }
+            }
             AnimalState::Eating => {
                 if self.state_timer <= 0.0 {
                     self.state = AnimalState::Idle;
                     self.state_timer = rng.gen_range(1.0..3.0);
                 }
+            }
+            _ => {
+                // Invalid state for ground animal
+                self.state = AnimalState::Idle;
+                self.state_timer = 1.0;
+            }
+        }
+    }
+
+    fn update_aquatic_ai(&mut self, _dt: f32, world: &World, rng: &mut impl Rng) {
+        let in_water = self.is_in_water(world);
+
+        match self.state {
+            AnimalState::Idle => {
+                if self.state_timer <= 0.0 {
+                    if in_water {
+                        self.state = AnimalState::Swimming;
+                        self.yaw = rng.gen_range(0.0..360.0);
+                        // Vertical direction
+                        self.velocity.y = rng.gen_range(-0.5..0.5);
+                        self.state_timer = rng.gen_range(3.0..8.0);
+                    } else {
+                        // Try to get back to water - random flop direction
+                        self.yaw = rng.gen_range(0.0..360.0);
+                        self.state_timer = rng.gen_range(0.5..1.5);
+                    }
+                }
+            }
+            AnimalState::Swimming => {
+                if !in_water {
+                    self.state = AnimalState::Idle;
+                    self.state_timer = 0.5;
+                } else if self.state_timer <= 0.0 {
+                    // Change direction or stop
+                    if rng.gen::<f32>() < 0.3 {
+                        self.state = AnimalState::Idle;
+                        self.state_timer = rng.gen_range(1.0..3.0);
+                    } else {
+                        self.yaw = rng.gen_range(0.0..360.0);
+                        self.velocity.y = rng.gen_range(-0.5..0.5);
+                        self.state_timer = rng.gen_range(2.0..6.0);
+                    }
+                }
+            }
+            _ => {
+                self.state = AnimalState::Idle;
+                self.state_timer = 1.0;
+            }
+        }
+    }
+
+    fn update_flying_ai(&mut self, _dt: f32, world: &World, rng: &mut impl Rng) {
+        match self.state {
+            AnimalState::Idle => {
+                if self.state_timer <= 0.0 {
+                    let roll: f32 = rng.gen();
+                    if roll < 0.4 {
+                        self.state = AnimalState::Flying;
+                        self.yaw = rng.gen_range(0.0..360.0);
+                        self.state_timer = rng.gen_range(3.0..8.0);
+                    } else if roll < 0.7 {
+                        self.state = AnimalState::Hovering;
+                        self.state_timer = rng.gen_range(2.0..5.0);
+                    } else {
+                        self.state_timer = rng.gen_range(1.0..3.0);
+                    }
+                }
+            }
+            AnimalState::Flying => {
+                if self.is_blocked(world) {
+                    self.yaw += 90.0 + rng.gen::<f32>() * 90.0;
+                    if self.yaw >= 360.0 { self.yaw -= 360.0; }
+                }
+                if self.state_timer <= 0.0 {
+                    self.state = AnimalState::Hovering;
+                    self.state_timer = rng.gen_range(2.0..4.0);
+                }
+            }
+            AnimalState::Hovering => {
+                if self.state_timer <= 0.0 {
+                    let roll: f32 = rng.gen();
+                    if roll < 0.6 {
+                        self.state = AnimalState::Flying;
+                        self.yaw = rng.gen_range(0.0..360.0);
+                        self.state_timer = rng.gen_range(3.0..8.0);
+                    } else {
+                        self.state = AnimalState::Idle;
+                        self.state_timer = rng.gen_range(1.0..3.0);
+                    }
+                }
+            }
+            _ => {
+                self.state = AnimalState::Hovering;
+                self.state_timer = 1.0;
             }
         }
     }
@@ -910,8 +1286,9 @@ impl EntityManager {
         let player_chunk_x = (player_pos.x / 16.0).floor() as i32;
         let player_chunk_z = (player_pos.z / 16.0).floor() as i32;
 
-        for dx in -4..=4 {
-            for dz in -4..=4 {
+        // Check a wider area for spawning (6 chunk radius = ~100 block radius)
+        for dx in -6..=6 {
+            for dz in -6..=6 {
                 let chunk_x = player_chunk_x + dx;
                 let chunk_z = player_chunk_z + dz;
                 let chunk_key = (chunk_x, chunk_z);
@@ -921,19 +1298,13 @@ impl EntityManager {
                     continue;
                 }
 
-                // Check biome - animals spawn in Plains and Forest
+                // Get biome for this chunk
                 let world_x = (chunk_x * 16 + 8) as f64;
                 let world_z = (chunk_z * 16 + 8) as f64;
                 let biome = world.get_biome(world_x, world_z);
 
-                // Only spawn in Plains or Forest biomes
-                use crate::world::Biome;
-                if biome != Biome::Plains && biome != Biome::Forest {
-                    continue;
-                }
-
-                // Low chance to spawn per chunk per check (1%)
-                if self.rng.gen::<f32>() > 0.01 {
+                // Higher spawn chance per chunk (8%) for a more alive world
+                if self.rng.gen::<f32>() > 0.08 {
                     continue;
                 }
 
@@ -949,15 +1320,72 @@ impl EntityManager {
                     dist_sq < 20.0 * 20.0
                 }).count();
 
-                if animals_in_chunk >= 4 {
+                // Allow more animals per chunk area
+                if animals_in_chunk >= 12 {
                     continue;
                 }
 
-                // Pick random animal type
-                let animal_type = match self.rng.gen_range(0..3) {
-                    0 => AnimalType::Pig,
-                    1 => AnimalType::Cow,
-                    _ => AnimalType::Sheep,
+                // Pick animal type based on biome
+                use crate::world::Biome;
+                let animal_type = match biome {
+                    Biome::Plains => {
+                        match self.rng.gen_range(0..100) {
+                            0..=10 => AnimalType::Pig,
+                            11..=18 => AnimalType::Cow,
+                            19..=26 => AnimalType::Sheep,
+                            27..=34 => AnimalType::Chicken,
+                            35..=42 => AnimalType::Rabbit,
+                            43..=46 => AnimalType::Horse,
+                            47..=72 => AnimalType::Bee,     // 25% bees
+                            73..=90 => AnimalType::Parrot,  // 18% parrots
+                            _ => AnimalType::Bat,           // 9% bats
+                        }
+                    }
+                    Biome::Forest => {
+                        match self.rng.gen_range(0..100) {
+                            0..=8 => AnimalType::Pig,
+                            9..=14 => AnimalType::Sheep,
+                            15..=22 => AnimalType::Chicken,
+                            23..=30 => AnimalType::Rabbit,
+                            31..=36 => AnimalType::Wolf,
+                            37..=42 => AnimalType::Fox,
+                            43..=68 => AnimalType::Bee,     // 25% bees
+                            69..=88 => AnimalType::Parrot,  // 20% parrots
+                            _ => AnimalType::Bat,           // 11% bats
+                        }
+                    }
+                    Biome::Tundra => {
+                        match self.rng.gen_range(0..100) {
+                            0..=40 => AnimalType::Sheep,
+                            41..=60 => AnimalType::Rabbit,
+                            61..=85 => AnimalType::Wolf,
+                            _ => AnimalType::Sheep,
+                        }
+                    }
+                    Biome::Mountains => {
+                        match self.rng.gen_range(0..100) {
+                            0..=60 => AnimalType::Sheep,
+                            61..=80 => AnimalType::Rabbit,
+                            81..=95 => AnimalType::Bat,
+                            _ => AnimalType::Sheep,
+                        }
+                    }
+                    Biome::Ocean => {
+                        match self.rng.gen_range(0..100) {
+                            0..=50 => AnimalType::Fish,
+                            51..=75 => AnimalType::Squid,
+                            76..=100 => AnimalType::Dolphin,
+                            _ => AnimalType::Fish,
+                        }
+                    }
+                    Biome::Desert => {
+                        // Few animals in desert
+                        if self.rng.gen::<f32>() < 0.3 {
+                            AnimalType::Rabbit
+                        } else {
+                            continue;
+                        }
+                    }
                 };
 
                 // Try to find spawn position
@@ -966,13 +1394,112 @@ impl EntityManager {
                 let try_x = chunk_x * 16 + 8 + offset_x;
                 let try_z = chunk_z * 16 + 8 + offset_z;
 
-                if let Some(spawn_pos) = self.find_animal_spawn_position(world, try_x, try_z, animal_type) {
-                    let animal = Animal::new(self.next_id, animal_type, spawn_pos);
-                    self.next_id += 1;
-                    self.animals.push(animal);
+                // For aquatic animals, search multiple positions since water is harder to find
+                let is_aquatic = animal_type.movement_type() == MovementType::Aquatic;
+                let mut first_spawn_pos = None;
 
-                    if self.animals.len() >= MAX_ANIMALS {
-                        return;
+                if is_aquatic {
+                    // Search in expanding pattern for water
+                    let search_offsets = [
+                        (0, 0), (4, 0), (-4, 0), (0, 4), (0, -4),
+                        (8, 0), (-8, 0), (0, 8), (0, -8),
+                        (4, 4), (-4, 4), (4, -4), (-4, -4),
+                    ];
+                    for (dx, dz) in search_offsets {
+                        let search_x = try_x + dx;
+                        let search_z = try_z + dz;
+                        if let Some(spawn_pos) = self.find_animal_spawn_position(world, search_x, search_z, animal_type) {
+                            let animal = Animal::new(self.next_id, animal_type, spawn_pos);
+                            self.next_id += 1;
+                            self.animals.push(animal);
+                            first_spawn_pos = Some((spawn_pos, search_x, search_z));
+                            break;
+                        }
+                    }
+                } else {
+                    // First try the selected animal type
+                    if let Some(spawn_pos) = self.find_animal_spawn_position(world, try_x, try_z, animal_type) {
+                        let animal = Animal::new(self.next_id, animal_type, spawn_pos);
+                        self.next_id += 1;
+                        self.animals.push(animal);
+                        first_spawn_pos = Some((spawn_pos, try_x, try_z));
+                    }
+                }
+
+                // Group spawning - spawn additional animals of the same type nearby
+                if let Some((_, base_x, base_z)) = first_spawn_pos {
+                    let group_size = animal_type.group_size();
+                    let extra_to_spawn = self.rng.gen_range(0..group_size);
+
+                    for _ in 0..extra_to_spawn {
+                        if self.animals.len() >= MAX_ANIMALS {
+                            return;
+                        }
+
+                        // Try nearby positions for group members
+                        let offset_x = self.rng.gen_range(-4..=4);
+                        let offset_z = self.rng.gen_range(-4..=4);
+                        let group_x = base_x + offset_x;
+                        let group_z = base_z + offset_z;
+
+                        if let Some(group_pos) = self.find_animal_spawn_position(world, group_x, group_z, animal_type) {
+                            let animal = Animal::new(self.next_id, animal_type, group_pos);
+                            self.next_id += 1;
+                            self.animals.push(animal);
+                        }
+                    }
+                }
+
+                if self.animals.len() >= MAX_ANIMALS {
+                    return;
+                }
+
+                // Always also try to spawn aquatic animals if there's water nearby
+                // Search a wide area for water - check in expanding circles
+                let water_offsets = [
+                    (0, 0), (4, 0), (-4, 0), (0, 4), (0, -4),
+                    (8, 0), (-8, 0), (0, 8), (0, -8),
+                    (8, 8), (-8, 8), (8, -8), (-8, -8),
+                    (12, 0), (-12, 0), (0, 12), (0, -12),
+                    (16, 0), (-16, 0), (0, 16), (0, -16),
+                ];
+                for water_offset in water_offsets {
+                    let water_x = try_x + water_offset.0;
+                    let water_z = try_z + water_offset.1;
+                    let aquatic_type = match self.rng.gen_range(0..3) {
+                        0 => AnimalType::Fish,
+                        1 => AnimalType::Squid,
+                        _ => AnimalType::Dolphin,
+                    };
+                    if let Some(spawn_pos) = self.find_animal_spawn_position(world, water_x, water_z, aquatic_type) {
+                        // 70% chance to spawn aquatic when water found
+                        if self.rng.gen::<f32>() < 0.7 {
+                            // Spawn first aquatic animal
+                            let animal = Animal::new(self.next_id, aquatic_type, spawn_pos);
+                            self.next_id += 1;
+                            self.animals.push(animal);
+
+                            // Spawn a school/pod around it
+                            let group_size = aquatic_type.group_size();
+                            let extra_to_spawn = self.rng.gen_range(1..=group_size);
+                            for _ in 0..extra_to_spawn {
+                                if self.animals.len() >= MAX_ANIMALS {
+                                    return;
+                                }
+                                let gx = water_x + self.rng.gen_range(-3..=3);
+                                let gz = water_z + self.rng.gen_range(-3..=3);
+                                if let Some(gpos) = self.find_animal_spawn_position(world, gx, gz, aquatic_type) {
+                                    let animal = Animal::new(self.next_id, aquatic_type, gpos);
+                                    self.next_id += 1;
+                                    self.animals.push(animal);
+                                }
+                            }
+
+                            if self.animals.len() >= MAX_ANIMALS {
+                                return;
+                            }
+                            break; // Only spawn one group per chunk check
+                        }
                     }
                 }
             }
@@ -982,26 +1509,66 @@ impl EntityManager {
     fn find_animal_spawn_position(&self, world: &World, world_x: i32, world_z: i32, animal_type: AnimalType) -> Option<Point3<f32>> {
         let (_, height) = animal_type.dimensions();
 
-        // Search for valid ground position
-        for y in (30..90).rev() {
-            if let Some(block) = world.get_block(world_x, y, world_z) {
-                // Must spawn on grass or dirt
-                if block == BlockType::Grass || block == BlockType::Dirt {
-                    // Check clearance above
-                    let above1 = world.get_block(world_x, y + 1, world_z);
-                    let above2 = world.get_block(world_x, y + 2, world_z);
+        match animal_type.movement_type() {
+            MovementType::Ground => {
+                // Search for valid ground position
+                for y in (30..90).rev() {
+                    if let Some(block) = world.get_block(world_x, y, world_z) {
+                        // Must spawn on grass, dirt, sand, or snow
+                        if block == BlockType::Grass || block == BlockType::Dirt
+                            || block == BlockType::Sand || block == BlockType::Snow {
+                            let above1 = world.get_block(world_x, y + 1, world_z);
+                            let above2 = world.get_block(world_x, y + 2, world_z);
 
-                    if above1 == Some(BlockType::Air) && above2 == Some(BlockType::Air) {
-                        return Some(Point3::new(
-                            world_x as f32 + 0.5,
-                            (y + 1) as f32 + height,
-                            world_z as f32 + 0.5,
-                        ));
+                            if above1 == Some(BlockType::Air) && above2 == Some(BlockType::Air) {
+                                return Some(Point3::new(
+                                    world_x as f32 + 0.5,
+                                    (y + 1) as f32 + height,
+                                    world_z as f32 + 0.5,
+                                ));
+                            }
+                        }
                     }
                 }
+                None
+            }
+            MovementType::Aquatic => {
+                // Search for water position - search wide range
+                for y in (5..70).rev() {
+                    if let Some(block) = world.get_block(world_x, y, world_z) {
+                        if block == BlockType::Water {
+                            // Allow spawning in any water
+                            return Some(Point3::new(
+                                world_x as f32 + 0.5,
+                                y as f32 + 0.5 + height,
+                                world_z as f32 + 0.5,
+                            ));
+                        }
+                    }
+                }
+                None
+            }
+            MovementType::Flying => {
+                // Find ground level, then spawn above it
+                for y in (30..90).rev() {
+                    if let Some(block) = world.get_block(world_x, y, world_z) {
+                        if block != BlockType::Air && block != BlockType::Water {
+                            // Found ground, spawn 3-6 blocks above
+                            let spawn_y = y + 4;
+                            if world.get_block(world_x, spawn_y, world_z) == Some(BlockType::Air) {
+                                return Some(Point3::new(
+                                    world_x as f32 + 0.5,
+                                    spawn_y as f32 + height,
+                                    world_z as f32 + 0.5,
+                                ));
+                            }
+                            break;
+                        }
+                    }
+                }
+                None
             }
         }
-        None
     }
 
     fn cleanup_distant_animals(&mut self, player_pos: Point3<f32>) {

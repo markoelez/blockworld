@@ -2243,17 +2243,17 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
-        // Animal buffers (40 animals max, each with ~6 body parts * 24 vertices)
+        // Animal buffers (200 animals max, each with ~10 body parts * 24 vertices for wings/fins)
         let animal_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Animal Vertex Buffer"),
-            size: (40 * 6 * 24 * std::mem::size_of::<Vertex>()) as u64,
+            size: (200 * 10 * 24 * std::mem::size_of::<Vertex>()) as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
         let animal_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Animal Index Buffer"),
-            size: (40 * 6 * 36 * std::mem::size_of::<u16>()) as u64,
+            size: (200 * 10 * 36 * std::mem::size_of::<u16>()) as u64,
             usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -4614,12 +4614,12 @@ impl Renderer {
         }
     }
 
-    /// Update the animal mesh (pigs, cows, sheep)
+    /// Update the animal mesh (all animal types including flying)
     pub fn update_animal_mesh(&mut self, animals: &[crate::entity::Animal]) {
-        use crate::entity::{AnimalState, AnimalType};
+        use crate::entity::{AnimalState, AnimalType, MovementType};
 
-        let mut vertices: Vec<Vertex> = Vec::with_capacity(animals.len() * 6 * 24);
-        let mut indices: Vec<u16> = Vec::with_capacity(animals.len() * 6 * 36);
+        let mut vertices: Vec<Vertex> = Vec::with_capacity(animals.len() * 8 * 24);
+        let mut indices: Vec<u16> = Vec::with_capacity(animals.len() * 8 * 36);
 
         for animal in animals {
             let x = animal.position.x;
@@ -4628,73 +4628,187 @@ impl Renderer {
             let yaw = animal.yaw.to_radians();
             let color = animal.animal_type.color_index();
             let (width, height) = animal.animal_type.dimensions();
-
-            // Animation
-            let swing = if animal.state == AnimalState::Walking {
-                (animal.animation_time * 6.0).sin() * 0.25
-            } else {
-                0.0
-            };
-
-            // Head offset when eating
-            let head_y_offset = if animal.state == AnimalState::Eating { -0.15 } else { 0.0 };
+            let movement_type = animal.animal_type.movement_type();
 
             let pivot = [x, y, z];
 
-            // Body (main mass)
-            let body_y = y - height * 0.4;
-            Self::generate_villager_cube(
-                &mut vertices,
-                &mut indices,
-                [x, body_y, z],
-                [width * 0.5, height * 0.35, width * 0.7],
-                color,
-                yaw,
-                pivot,
-            );
+            match movement_type {
+                MovementType::Flying => {
+                    // Flying animals: body + head + 2 flapping wings
+                    let wing_flap = (animal.animation_time * 15.0).sin() * 0.8; // Fast wing flap
 
-            // Head (front of body)
-            let head_forward = width * 0.5 + width * 0.2;
-            let head_x = x - yaw.sin() * head_forward;
-            let head_z = z - yaw.cos() * head_forward;
-            let head_y = y - height * 0.25 + head_y_offset;
-            Self::generate_villager_cube(
-                &mut vertices,
-                &mut indices,
-                [head_x, head_y, head_z],
-                [width * 0.3, width * 0.3, width * 0.35],
-                color,
-                yaw,
-                pivot,
-            );
+                    // Body (smaller, rounder)
+                    let body_y = y - height * 0.5;
+                    Self::generate_villager_cube(
+                        &mut vertices,
+                        &mut indices,
+                        [x, body_y, z],
+                        [width * 0.4, height * 0.5, width * 0.5],
+                        color,
+                        yaw,
+                        pivot,
+                    );
 
-            // 4 Legs
-            let leg_height = height * 0.35;
-            let leg_y = y - height + leg_height * 0.5;
-            let leg_offsets = [
-                (-0.15 * width, 0.25 * width, 1.0),   // Front left
-                (0.15 * width, 0.25 * width, -1.0),   // Front right
-                (-0.15 * width, -0.25 * width, -1.0), // Back left
-                (0.15 * width, -0.25 * width, 1.0),   // Back right
-            ];
+                    // Head (front)
+                    let head_forward = width * 0.35;
+                    let head_x = x - yaw.sin() * head_forward;
+                    let head_z = z - yaw.cos() * head_forward;
+                    let head_y = y - height * 0.3;
+                    Self::generate_villager_cube(
+                        &mut vertices,
+                        &mut indices,
+                        [head_x, head_y, head_z],
+                        [width * 0.25, width * 0.25, width * 0.25],
+                        color,
+                        yaw,
+                        pivot,
+                    );
 
-            for (dx, dz, phase) in leg_offsets {
-                // Rotate offset by yaw
-                let rot_dx = dx * yaw.cos() - dz * yaw.sin();
-                let rot_dz = dx * yaw.sin() + dz * yaw.cos();
-                let leg_swing = swing * phase;
-                let swing_x = -yaw.sin() * leg_swing * 0.3;
-                let swing_z = -yaw.cos() * leg_swing * 0.3;
+                    // Left wing (flapping)
+                    let wing_width = width * 0.8;
+                    let wing_height = height * 0.1;
+                    let wing_depth = width * 0.4;
+                    let wing_y_offset = wing_flap * 0.3; // Wing goes up and down
 
-                Self::generate_villager_cube(
-                    &mut vertices,
-                    &mut indices,
-                    [x + rot_dx + swing_x, leg_y, z + rot_dz + swing_z],
-                    [0.12, leg_height, 0.12],
-                    color,
-                    yaw,
-                    pivot,
-                );
+                    // Left wing position
+                    let left_wing_dx = width * 0.4;
+                    let left_rot_dx = left_wing_dx * yaw.cos();
+                    let left_rot_dz = left_wing_dx * yaw.sin();
+                    Self::generate_villager_cube(
+                        &mut vertices,
+                        &mut indices,
+                        [x + left_rot_dx, body_y + wing_y_offset, z + left_rot_dz],
+                        [wing_width, wing_height, wing_depth],
+                        color,
+                        yaw,
+                        pivot,
+                    );
+
+                    // Right wing position
+                    let right_wing_dx = -width * 0.4;
+                    let right_rot_dx = right_wing_dx * yaw.cos();
+                    let right_rot_dz = right_wing_dx * yaw.sin();
+                    Self::generate_villager_cube(
+                        &mut vertices,
+                        &mut indices,
+                        [x + right_rot_dx, body_y - wing_y_offset, z + right_rot_dz],
+                        [wing_width, wing_height, wing_depth],
+                        color,
+                        yaw,
+                        pivot,
+                    );
+                }
+                MovementType::Aquatic => {
+                    // Aquatic animals: streamlined body + tail + fins
+                    let swim_wiggle = (animal.animation_time * 4.0).sin() * 0.15;
+
+                    // Main body (elongated)
+                    let body_y = y - height * 0.5;
+                    Self::generate_villager_cube(
+                        &mut vertices,
+                        &mut indices,
+                        [x, body_y, z],
+                        [width * 0.3, height * 0.4, width * 0.8],
+                        color,
+                        yaw,
+                        pivot,
+                    );
+
+                    // Tail (wiggling)
+                    let tail_back = width * 0.6;
+                    let tail_x = x + yaw.sin() * tail_back + yaw.cos() * swim_wiggle;
+                    let tail_z = z + yaw.cos() * tail_back - yaw.sin() * swim_wiggle;
+                    Self::generate_villager_cube(
+                        &mut vertices,
+                        &mut indices,
+                        [tail_x, body_y, tail_z],
+                        [width * 0.2, height * 0.5, width * 0.15],
+                        color,
+                        yaw,
+                        pivot,
+                    );
+
+                    // Side fins
+                    let fin_dx = width * 0.25;
+                    for side in [-1.0, 1.0] {
+                        let fin_rot_dx = (fin_dx * side) * yaw.cos();
+                        let fin_rot_dz = (fin_dx * side) * yaw.sin();
+                        Self::generate_villager_cube(
+                            &mut vertices,
+                            &mut indices,
+                            [x + fin_rot_dx, body_y, z + fin_rot_dz],
+                            [width * 0.3, height * 0.1, width * 0.2],
+                            color,
+                            yaw,
+                            pivot,
+                        );
+                    }
+                }
+                MovementType::Ground => {
+                    // Ground animals: body + head + 4 legs (original code)
+                    let swing = if animal.state == AnimalState::Walking || animal.state == AnimalState::Running {
+                        (animal.animation_time * 6.0).sin() * 0.25
+                    } else {
+                        0.0
+                    };
+
+                    let head_y_offset = if animal.state == AnimalState::Eating { -0.15 } else { 0.0 };
+
+                    // Body
+                    let body_y = y - height * 0.4;
+                    Self::generate_villager_cube(
+                        &mut vertices,
+                        &mut indices,
+                        [x, body_y, z],
+                        [width * 0.5, height * 0.35, width * 0.7],
+                        color,
+                        yaw,
+                        pivot,
+                    );
+
+                    // Head
+                    let head_forward = width * 0.5 + width * 0.2;
+                    let head_x = x - yaw.sin() * head_forward;
+                    let head_z = z - yaw.cos() * head_forward;
+                    let head_y = y - height * 0.25 + head_y_offset;
+                    Self::generate_villager_cube(
+                        &mut vertices,
+                        &mut indices,
+                        [head_x, head_y, head_z],
+                        [width * 0.3, width * 0.3, width * 0.35],
+                        color,
+                        yaw,
+                        pivot,
+                    );
+
+                    // 4 Legs
+                    let leg_height = height * 0.35;
+                    let leg_y = y - height + leg_height * 0.5;
+                    let leg_offsets = [
+                        (-0.15 * width, 0.25 * width, 1.0),
+                        (0.15 * width, 0.25 * width, -1.0),
+                        (-0.15 * width, -0.25 * width, -1.0),
+                        (0.15 * width, -0.25 * width, 1.0),
+                    ];
+
+                    for (dx, dz, phase) in leg_offsets {
+                        let rot_dx = dx * yaw.cos() - dz * yaw.sin();
+                        let rot_dz = dx * yaw.sin() + dz * yaw.cos();
+                        let leg_swing = swing * phase;
+                        let swing_x = -yaw.sin() * leg_swing * 0.3;
+                        let swing_z = -yaw.cos() * leg_swing * 0.3;
+
+                        Self::generate_villager_cube(
+                            &mut vertices,
+                            &mut indices,
+                            [x + rot_dx + swing_x, leg_y, z + rot_dz + swing_z],
+                            [0.12, leg_height, 0.12],
+                            color,
+                            yaw,
+                            pivot,
+                        );
+                    }
+                }
             }
         }
 
