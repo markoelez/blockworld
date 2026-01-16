@@ -1785,8 +1785,8 @@ impl Renderer {
             label: Some("particle_bind_group"),
         });
 
-        // Particle vertex buffer (500 particles * 4 vertices each)
-        let max_particle_vertices = 500 * 4;
+        // Particle vertex buffer (2000 particles * 4 vertices each)
+        let max_particle_vertices = 2000 * 4;
         let particle_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Particle Vertex Buffer"),
             size: (max_particle_vertices * std::mem::size_of::<ParticleVertex>()) as u64,
