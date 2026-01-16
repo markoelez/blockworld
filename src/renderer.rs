@@ -7,6 +7,7 @@ use cgmath::SquareMatrix;
 use std::time::Instant;
 use cgmath::{Matrix4, Deg, Vector3, Vector4, InnerSpace, Matrix, Point3};
 use rayon::prelude::*;
+use rand::Rng;
 
 use crate::camera::Camera;
 use crate::world::{World, BlockType, TorchFace};
@@ -292,6 +293,7 @@ pub struct Renderer {
     bloom_uniform_buffer: wgpu::Buffer,
     // Time tracking
     start_time: Instant,
+    time_offset: f32,  // Random starting time offset (0.0-1.0)
     time_of_day: f32,
     // Villager rendering
     villager_vertex_buffer: wgpu::Buffer,
@@ -2370,7 +2372,8 @@ impl Renderer {
             bloom_uniform_buffer,
             // Time tracking
             start_time,
-            time_of_day: 0.25,  // Start at morning
+            time_offset: rand::thread_rng().gen_range(0.0..1.0),  // Random starting time
+            time_of_day: 0.0,
             // Villager rendering
             villager_vertex_buffer,
             villager_index_buffer,
@@ -2585,7 +2588,7 @@ impl Renderer {
 
         // Update time of day (full cycle every 10 minutes)
         let elapsed = (now - self.start_time).as_secs_f32();
-        self.time_of_day = (elapsed / 600.0).fract();
+        self.time_of_day = (self.time_offset + elapsed / 600.0).fract();
 
         // Calculate sun direction based on time of day
         let sun_angle = self.time_of_day * 2.0 * std::f32::consts::PI - std::f32::consts::PI / 2.0;
