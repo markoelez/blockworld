@@ -160,7 +160,7 @@ fn main() {
                     particle_system.update(dt);
                     targeted_block = camera.get_targeted_block(&world, 5.0);
 
-                    // Handle sound events
+                    // Handle sound and particle events
                     if let Some(ref audio) = audio_manager {
                         if let Some(block_type) = camera.get_footstep_event() {
                             audio.play_footstep(block_type);
@@ -171,10 +171,12 @@ fn main() {
                         if camera.check_land_event() {
                             audio.play_land();
                         }
-                        if camera.check_water_enter_event() {
+                    }
+                    if camera.check_water_enter_event() {
+                        if let Some(ref audio) = audio_manager {
                             audio.play_splash();
-                            particle_system.spawn_water_splash(camera.position);
                         }
+                        particle_system.spawn_water_splash(camera.position);
                     }
                 }
                 window.request_redraw();

@@ -109,7 +109,7 @@ impl Camera {
         self.pitch -= delta_y * sensitivity;
 
         // Clamp pitch to prevent camera flipping
-        self.pitch = self.pitch.max(-89.0).min(89.0);
+        self.pitch = self.pitch.clamp(-89.0, 89.0);
 
         self.update_view_proj();
     }
@@ -125,21 +125,15 @@ impl Camera {
     }
 
     pub fn check_jump_event(&mut self) -> bool {
-        let jumped = self.just_jumped;
-        self.just_jumped = false;
-        jumped
+        std::mem::take(&mut self.just_jumped)
     }
 
     pub fn check_land_event(&mut self) -> bool {
-        let landed = self.just_landed;
-        self.just_landed = false;
-        landed
+        std::mem::take(&mut self.just_landed)
     }
 
     pub fn check_water_enter_event(&mut self) -> bool {
-        let entered = self.just_entered_water;
-        self.just_entered_water = false;
-        entered
+        std::mem::take(&mut self.just_entered_water)
     }
 
     pub fn is_underwater(&self, world: &World) -> bool {
@@ -234,7 +228,7 @@ impl Camera {
         self.velocity.y -= GRAVITY * dt;
 
         // Clamp to terminal velocity
-        self.velocity.y = self.velocity.y.max(-TERMINAL_VELOCITY).min(TERMINAL_VELOCITY);
+        self.velocity.y = self.velocity.y.clamp(-TERMINAL_VELOCITY, TERMINAL_VELOCITY);
 
         if is_in_water {
             self.velocity.y += GRAVITY * 0.9 * dt;
