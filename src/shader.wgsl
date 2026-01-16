@@ -82,15 +82,46 @@ var<uniform> u_lighting: LightingUniform;
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.clip_position = u_uniform.view_proj * vec4<f32>(in.position, 1.0);
+
+    // Start with original position
+    var animated_pos = in.position;
+
+    // Foliage animation for grass tops (2.0) and leaves (6.0)
+    let bt = in.block_type;
+    if (bt == 2.0 || bt == 6.0) {
+        // Wind sway parameters
+        let sway_speed = 2.5;
+        let sway_amount = 0.06;
+
+        // Use world position to create varied phase across the world
+        let phase = in.position.x * 0.4 + in.position.z * 0.3 + in.position.y * 0.2;
+
+        // Calculate sway based on time
+        let time = u_uniform.time_of_day * 600.0;  // Convert back from day fraction to seconds
+        let sway = sin(time * sway_speed + phase) * sway_amount;
+        let sway2 = cos(time * sway_speed * 0.7 + phase * 1.3) * sway_amount * 0.5;
+
+        // Only sway blocks that are in the upper portion (for grass, top face only)
+        // For leaves, sway all of them
+        var height_factor = 1.0;
+        if (bt == 2.0) {
+            // For grass, only sway if this is an upward-facing normal (top face)
+            height_factor = max(0.0, in.normal.y);
+        }
+
+        animated_pos.x += sway * height_factor;
+        animated_pos.z += sway2 * height_factor;
+    }
+
+    out.clip_position = u_uniform.view_proj * vec4<f32>(animated_pos, 1.0);
     out.tex_coords = in.tex_coords;
-    out.world_position = in.position;
+    out.world_position = animated_pos;
     out.normal = in.normal;
     out.block_type = in.block_type;
     out.damage = in.damage;
 
-    // Calculate shadow map coordinates
-    let light_space_pos = u_uniform.light_view_proj * vec4<f32>(in.position, 1.0);
+    // Calculate shadow map coordinates using animated position
+    let light_space_pos = u_uniform.light_view_proj * vec4<f32>(animated_pos, 1.0);
     let ndc = light_space_pos.xyz / light_space_pos.w;
     out.shadow_coord = vec3<f32>(
         ndc.x * 0.5 + 0.5,
@@ -283,6 +314,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         // Torch flame - bright yellow/orange HDR glow
         texture_color = vec4<f32>(1.0, 0.8, 0.3, 1.0) * 4.0;  // Very bright for bloom
         roughness = 1.0;
+    } else if (bt == 26.0) {
+        // Chest - darker wood color with some variation
+        let wood_grain = noise(in.tex_coords * 8.0) * 0.1;
+        texture_color = vec4<f32>(0.45 + wood_grain, 0.3 + wood_grain * 0.5, 0.15, 1.0);
+        roughness = 0.8;
     }
 
     // Crack effect - dark cracks that spread as damage increases

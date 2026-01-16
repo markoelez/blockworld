@@ -10,7 +10,7 @@ use rayon::prelude::*;
 
 use crate::camera::Camera;
 use crate::world::{World, BlockType, TorchFace};
-use crate::ui::{Inventory, UIRenderer};
+use crate::ui::{Inventory, UIRenderer, DebugInfo, PauseMenu, ChestUI};
 use crate::entity::{EntityManager, Villager, VillagerState, VILLAGER_HEIGHT};
 use crate::particle::ParticleSystem;
 
@@ -2150,7 +2150,7 @@ impl Renderer {
         }
     }
     
-    pub fn render(&mut self, camera: &Camera, world: &mut World, inventory: &Inventory, targeted_block: Option<(i32, i32, i32)>, entity_manager: &EntityManager, particle_system: &ParticleSystem, underwater: bool) {
+    pub fn render(&mut self, camera: &Camera, world: &mut World, inventory: &Inventory, targeted_block: Option<(i32, i32, i32)>, entity_manager: &EntityManager, particle_system: &ParticleSystem, underwater: bool, debug_info: &DebugInfo, pause_menu: &PauseMenu, chest_ui: &ChestUI) {
         let now = Instant::now();
         let dt = (now - self.last_render).as_secs_f32();
         self.last_render = now;
@@ -2576,6 +2576,50 @@ impl Renderer {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
+
+        // Render debug overlay (F3 screen)
+        if debug_info.visible {
+            let fps = 1.0 / dt;
+            self.ui_renderer.render_debug_overlay(
+                &self.device,
+                &self.queue,
+                &view,
+                &self.texture_bind_group,
+                fps,
+                camera.position,
+                camera.get_facing_direction(),
+                world.chunks.len(),
+                particle_system.len(),
+            );
+        }
+
+        // Render pause menu
+        if pause_menu.visible {
+            self.ui_renderer.render_pause_menu(
+                &self.device,
+                &self.queue,
+                &view,
+                &self.texture_bind_group,
+                pause_menu.selected_option,
+            );
+        }
+
+        // Render chest UI
+        if chest_ui.open {
+            if let Some(chest_pos) = chest_ui.chest_pos {
+                let chest_contents = world.chest_contents.get(&chest_pos).cloned().unwrap_or_default();
+                self.ui_renderer.render_chest_ui(
+                    &self.device,
+                    &self.queue,
+                    &view,
+                    &self.texture_bind_group,
+                    chest_ui,
+                    &chest_contents,
+                    inventory,
+                );
+            }
+        }
+
         output.present();
     }
 
@@ -3834,6 +3878,7 @@ impl Renderer {
             BlockType::Gravel => 15.0,
             BlockType::Clay => 16.0,
             BlockType::Torch => 24.0,  // Torch uses texture
+            BlockType::Chest => 26.0,  // Chest uses wood-like color
             _ => 0.0,
         }
     }

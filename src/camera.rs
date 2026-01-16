@@ -540,6 +540,29 @@ impl Camera {
         None
     }
     
+    pub fn get_facing_direction(&self) -> &'static str {
+        // Normalize yaw to 0-360 range
+        let mut yaw_deg = self.yaw % 360.0;
+        if yaw_deg < 0.0 {
+            yaw_deg += 360.0;
+        }
+
+        // Determine cardinal direction based on yaw
+        // yaw 0 = looking toward +X (East)
+        // yaw 90 = looking toward +Z (South)
+        // yaw 180 = looking toward -X (West)
+        // yaw 270 = looking toward -Z (North)
+        if yaw_deg >= 315.0 || yaw_deg < 45.0 {
+            "East (+X)"
+        } else if yaw_deg >= 45.0 && yaw_deg < 135.0 {
+            "South (+Z)"
+        } else if yaw_deg >= 135.0 && yaw_deg < 225.0 {
+            "West (-X)"
+        } else {
+            "North (-Z)"
+        }
+    }
+
     fn update_view_proj(&mut self) {
         let yaw_rad = self.yaw.to_radians();
         let pitch_rad = self.pitch.to_radians();

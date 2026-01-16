@@ -23,7 +23,106 @@ impl Inventory {
             selected_slot: 0,
         }
     }
-    
+}
+
+pub struct DebugInfo {
+    pub visible: bool,
+}
+
+impl DebugInfo {
+    pub fn new() -> Self {
+        Self { visible: false }
+    }
+
+    pub fn toggle(&mut self) {
+        self.visible = !self.visible;
+    }
+}
+
+pub struct PauseMenu {
+    pub visible: bool,
+    pub selected_option: usize,
+}
+
+impl PauseMenu {
+    pub fn new() -> Self {
+        Self {
+            visible: false,
+            selected_option: 0,
+        }
+    }
+
+    pub fn toggle(&mut self) {
+        self.visible = !self.visible;
+        if self.visible {
+            self.selected_option = 0;
+        }
+    }
+
+    pub fn navigate(&mut self, delta: i32) {
+        let num_options = 3i32;
+        self.selected_option = ((self.selected_option as i32 + delta).rem_euclid(num_options)) as usize;
+    }
+
+    pub fn get_selected_action(&self) -> &'static str {
+        match self.selected_option {
+            0 => "RESUME",
+            1 => "OPTIONS",
+            2 => "QUIT",
+            _ => "RESUME",
+        }
+    }
+}
+
+pub struct ChestUI {
+    pub open: bool,
+    pub chest_pos: Option<(i32, i32, i32)>,
+    pub selected_slot: usize,
+    pub in_chest_section: bool,  // true = chest slots, false = player inventory
+}
+
+impl ChestUI {
+    pub fn new() -> Self {
+        Self {
+            open: false,
+            chest_pos: None,
+            selected_slot: 0,
+            in_chest_section: true,
+        }
+    }
+
+    pub fn open_chest(&mut self, pos: (i32, i32, i32)) {
+        self.open = true;
+        self.chest_pos = Some(pos);
+        self.selected_slot = 0;
+        self.in_chest_section = true;
+    }
+
+    pub fn close(&mut self) {
+        self.open = false;
+        self.chest_pos = None;
+    }
+
+    pub fn navigate(&mut self, dx: i32, dy: i32) {
+        // Chest has 9 slots in a row, player inventory has 6 slots
+        let slots_per_row = if self.in_chest_section { 9 } else { 6 };
+        let max_slot = slots_per_row - 1;
+
+        // Handle horizontal navigation
+        let new_slot = (self.selected_slot as i32 + dx).clamp(0, max_slot as i32) as usize;
+        self.selected_slot = new_slot;
+
+        // Handle vertical navigation (switch between chest and inventory sections)
+        if dy != 0 {
+            self.in_chest_section = !self.in_chest_section;
+            // Clamp slot when switching sections
+            let new_max = if self.in_chest_section { 8 } else { 5 };
+            self.selected_slot = self.selected_slot.min(new_max);
+        }
+    }
+}
+
+impl Inventory {
     pub fn select_slot(&mut self, slot: usize) {
         if slot < self.slots.len() {
             self.selected_slot = slot;
@@ -286,6 +385,7 @@ impl UIRenderer {
             BlockType::Gravel => 15.0,
             BlockType::Clay => 16.0,
             BlockType::Torch => 24.0,
+            BlockType::Chest => 26.0,
             BlockType::Air | BlockType::Barrier => 0.0,
         }
     }
@@ -663,6 +763,34 @@ impl UIRenderer {
             'I' => { add_line(w / 2.0, 0.0, w / 2.0, h); add_line(0.0, 0.0, w, 0.0); add_line(0.0, h, w, h); }
             'N' => { add_line(0.0, 0.0, 0.0, h); add_line(0.0, h, w, 0.0); add_line(w, 0.0, w, h); }
             'G' => { add_line(0.0, 0.0, 0.0, h); add_line(0.0, h, w, h); add_line(w, h, w, h / 2.0); add_line(w / 2.0, h / 2.0, w, h / 2.0); add_line(0.0, 0.0, w, 0.0); }
+            'F' => { add_line(0.0, 0.0, 0.0, h); add_line(0.0, h, w, h); add_line(0.0, h / 2.0, w * 0.7, h / 2.0); }
+            'P' => { add_line(0.0, 0.0, 0.0, h); add_line(0.0, h, w, h); add_line(w, h, w, h / 2.0); add_line(0.0, h / 2.0, w, h / 2.0); }
+            'S' => { add_line(w, h, 0.0, h); add_line(0.0, h, 0.0, h / 2.0); add_line(0.0, h / 2.0, w, h / 2.0); add_line(w, h / 2.0, w, 0.0); add_line(0.0, 0.0, w, 0.0); }
+            'X' => { add_line(0.0, 0.0, w, h); add_line(0.0, h, w, 0.0); }
+            'Y' => { add_line(0.0, h, w / 2.0, h / 2.0); add_line(w, h, w / 2.0, h / 2.0); add_line(w / 2.0, h / 2.0, w / 2.0, 0.0); }
+            'Z' => { add_line(0.0, h, w, h); add_line(w, h, 0.0, 0.0); add_line(0.0, 0.0, w, 0.0); }
+            'C' => { add_line(w, h, 0.0, h); add_line(0.0, h, 0.0, 0.0); add_line(0.0, 0.0, w, 0.0); }
+            'H' => { add_line(0.0, 0.0, 0.0, h); add_line(w, 0.0, w, h); add_line(0.0, h / 2.0, w, h / 2.0); }
+            'U' => { add_line(0.0, h, 0.0, 0.0); add_line(0.0, 0.0, w, 0.0); add_line(w, 0.0, w, h); }
+            'K' => { add_line(0.0, 0.0, 0.0, h); add_line(0.0, h / 2.0, w, h); add_line(0.0, h / 2.0, w, 0.0); }
+            'T' => { add_line(0.0, h, w, h); add_line(w / 2.0, h, w / 2.0, 0.0); }
+            'R' => { add_line(0.0, 0.0, 0.0, h); add_line(0.0, h, w, h); add_line(w, h, w, h / 2.0); add_line(0.0, h / 2.0, w, h / 2.0); add_line(0.0, h / 2.0, w, 0.0); }
+            'E' => { add_line(0.0, 0.0, 0.0, h); add_line(0.0, h, w, h); add_line(0.0, h / 2.0, w * 0.7, h / 2.0); add_line(0.0, 0.0, w, 0.0); }
+            'M' => { add_line(0.0, 0.0, 0.0, h); add_line(0.0, h, w / 2.0, h / 2.0); add_line(w / 2.0, h / 2.0, w, h); add_line(w, h, w, 0.0); }
+            'W' => { add_line(0.0, h, 0.0, 0.0); add_line(0.0, 0.0, w / 2.0, h / 2.0); add_line(w / 2.0, h / 2.0, w, 0.0); add_line(w, 0.0, w, h); }
+            'B' => { add_line(0.0, 0.0, 0.0, h); add_line(0.0, h, w, h); add_line(w, h, w, h / 2.0); add_line(0.0, h / 2.0, w, h / 2.0); add_line(w, h / 2.0, w, 0.0); add_line(0.0, 0.0, w, 0.0); }
+            'Q' => { add_line(0.0, 0.0, 0.0, h); add_line(0.0, h, w, h); add_line(w, h, w, 0.0); add_line(0.0, 0.0, w, 0.0); add_line(w * 0.5, h * 0.3, w, 0.0); }
+            'V' => { add_line(0.0, h, w / 2.0, 0.0); add_line(w / 2.0, 0.0, w, h); }
+            ':' => { add_line(w / 2.0, h * 0.7, w / 2.0 + t, h * 0.7 + t); add_line(w / 2.0, h * 0.3, w / 2.0 + t, h * 0.3 + t); }
+            '/' => { add_line(0.0, 0.0, w, h); }
+            '+' => { add_line(w / 2.0, 0.0, w / 2.0, h); add_line(0.0, h / 2.0, w, h / 2.0); }
+            '-' => { add_line(0.0, h / 2.0, w, h / 2.0); }
+            '.' => { add_line(w / 2.0 - t, t, w / 2.0 + t, t); }
+            '(' => { add_line(w * 0.7, h, w * 0.3, h * 0.5); add_line(w * 0.3, h * 0.5, w * 0.7, 0.0); }
+            ')' => { add_line(w * 0.3, h, w * 0.7, h * 0.5); add_line(w * 0.7, h * 0.5, w * 0.3, 0.0); }
+            '>' => { add_line(0.0, h, w, h / 2.0); add_line(w, h / 2.0, 0.0, 0.0); }
+            '<' => { add_line(w, h, 0.0, h / 2.0); add_line(0.0, h / 2.0, w, 0.0); }
+            ' ' => {}
             '%' => {
                 // Small circles and diagonal
                 add_line(0.0, h * 0.8, w * 0.2, h * 0.8); add_line(0.0, h * 0.8, 0.0, h); add_line(0.0, h, w * 0.2, h); add_line(w * 0.2, h, w * 0.2, h * 0.8);
@@ -673,5 +801,409 @@ impl UIRenderer {
         }
 
         (verts, inds)
+    }
+
+    /// Render debug overlay with FPS, position, facing direction, etc.
+    pub fn render_debug_overlay(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        texture_bind_group: &wgpu::BindGroup,
+        fps: f32,
+        position: cgmath::Point3<f32>,
+        facing: &str,
+        chunk_count: usize,
+        particle_count: usize,
+    ) {
+        let mut vertices: Vec<UIVertex> = Vec::new();
+        let mut indices: Vec<u16> = Vec::new();
+
+        let text_color = [1.0, 1.0, 1.0, 1.0];
+        let bg_color = [0.0, 0.0, 0.0, 0.6];
+        let char_size = 0.025;
+        let char_spacing = char_size * 0.7;
+        let line_height = char_size * 1.5;
+        let start_x = -0.95;
+        let start_y = 0.92;
+        let padding = 0.01;
+
+        // Build debug lines
+        let lines = vec![
+            format!("FPS: {}", fps as i32),
+            format!("XYZ: {:.1} / {:.1} / {:.1}", position.x, position.y, position.z),
+            format!("FACING: {}", facing),
+            format!("CHUNKS: {}", chunk_count),
+            format!("PARTICLES: {}", particle_count),
+        ];
+
+        // Calculate background size
+        let max_line_len = lines.iter().map(|l| l.len()).max().unwrap_or(0);
+        let bg_width = max_line_len as f32 * char_spacing + padding * 2.0;
+        let bg_height = lines.len() as f32 * line_height + padding * 2.0;
+
+        // Draw background
+        let base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [start_x - padding, start_y + padding], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [start_x + bg_width, start_y + padding], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [start_x + bg_width, start_y - bg_height], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [start_x - padding, start_y - bg_height], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+        // Draw text lines
+        for (line_idx, line) in lines.iter().enumerate() {
+            let mut text_x = start_x;
+            let text_y = start_y - (line_idx as f32 + 1.0) * line_height + char_size * 0.5;
+
+            for ch in line.chars() {
+                if ch.is_ascii_digit() {
+                    let dig = ch.to_digit(10).unwrap() as usize;
+                    let (dig_verts, dig_inds) = Self::get_digit_vertices(dig, text_x, text_y, char_size, text_color);
+                    let base = vertices.len() as u16;
+                    for v in dig_verts { vertices.push(v); }
+                    for i in dig_inds { indices.push(base + i); }
+                } else {
+                    let (letter_verts, letter_inds) = Self::get_letter_vertices(ch.to_ascii_uppercase(), text_x, text_y, char_size, text_color, vertices.len() as u16);
+                    vertices.extend(letter_verts);
+                    indices.extend(letter_inds);
+                }
+                text_x += char_spacing;
+            }
+        }
+
+        // Create buffers and render
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Debug Overlay Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Debug Overlay Index Buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Debug Overlay Encoder"),
+        });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Debug Overlay Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            render_pass.set_pipeline(&self.ui_render_pipeline);
+            render_pass.set_bind_group(0, texture_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+        }
+
+        queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Render pause menu overlay
+    pub fn render_pause_menu(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        texture_bind_group: &wgpu::BindGroup,
+        selected_option: usize,
+    ) {
+        let mut vertices: Vec<UIVertex> = Vec::new();
+        let mut indices: Vec<u16> = Vec::new();
+
+        let overlay_color = [0.0, 0.0, 0.0, 0.7];
+        let title_color = [1.0, 1.0, 1.0, 1.0];
+        let option_color = [0.8, 0.8, 0.8, 1.0];
+        let selected_color = [1.0, 1.0, 0.3, 1.0];
+
+        // Full screen dark overlay
+        let base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [-1.0, -1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [1.0, -1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [1.0, 1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [-1.0, 1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+        // Title "PAUSED"
+        let title = "PAUSED";
+        let title_size = 0.08;
+        let title_spacing = title_size * 0.7;
+        let title_width = title.len() as f32 * title_spacing;
+        let mut title_x = -title_width / 2.0;
+        let title_y = 0.3;
+
+        for ch in title.chars() {
+            let (letter_verts, letter_inds) = Self::get_letter_vertices(ch, title_x, title_y, title_size, title_color, vertices.len() as u16);
+            vertices.extend(letter_verts);
+            indices.extend(letter_inds);
+            title_x += title_spacing;
+        }
+
+        // Menu options
+        let options = ["RESUME", "OPTIONS", "QUIT"];
+        let option_size = 0.04;
+        let option_spacing = option_size * 0.7;
+        let option_line_height = 0.12;
+
+        for (idx, option) in options.iter().enumerate() {
+            let color = if idx == selected_option { selected_color } else { option_color };
+            let option_width = option.len() as f32 * option_spacing;
+            let mut option_x = -option_width / 2.0;
+            let option_y = 0.0 - idx as f32 * option_line_height;
+
+            // Selection indicator
+            if idx == selected_option {
+                let indicator_x = option_x - option_spacing * 1.5;
+                let (arrow_verts, arrow_inds) = Self::get_letter_vertices('>', indicator_x, option_y, option_size, color, vertices.len() as u16);
+                vertices.extend(arrow_verts);
+                indices.extend(arrow_inds);
+            }
+
+            for ch in option.chars() {
+                let (letter_verts, letter_inds) = Self::get_letter_vertices(ch, option_x, option_y, option_size, color, vertices.len() as u16);
+                vertices.extend(letter_verts);
+                indices.extend(letter_inds);
+                option_x += option_spacing;
+            }
+        }
+
+        // Create buffers and render
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Pause Menu Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Pause Menu Index Buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Pause Menu Encoder"),
+        });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Pause Menu Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            render_pass.set_pipeline(&self.ui_render_pipeline);
+            render_pass.set_bind_group(0, texture_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+        }
+
+        queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Render chest UI overlay
+    pub fn render_chest_ui(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        texture_bind_group: &wgpu::BindGroup,
+        chest_ui: &ChestUI,
+        chest_contents: &[(BlockType, u32)],
+        inventory: &Inventory,
+    ) {
+        let mut vertices: Vec<UIVertex> = Vec::new();
+        let mut indices: Vec<u16> = Vec::new();
+
+        let overlay_color = [0.0, 0.0, 0.0, 0.7];
+        let title_color = [1.0, 1.0, 1.0, 1.0];
+        let slot_bg_color = [0.2, 0.2, 0.2, 0.9];
+        let selected_color = [1.0, 1.0, 0.3, 1.0];
+
+        // Full screen dark overlay
+        let base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [-1.0, -1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [1.0, -1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [1.0, 1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [-1.0, 1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+        // Title "CHEST"
+        let title = "CHEST";
+        let title_size = 0.06;
+        let title_spacing = title_size * 0.7;
+        let title_width = title.len() as f32 * title_spacing;
+        let mut title_x = -title_width / 2.0;
+        let title_y = 0.5;
+
+        for ch in title.chars() {
+            let (letter_verts, letter_inds) = Self::get_letter_vertices(ch, title_x, title_y, title_size, title_color, vertices.len() as u16);
+            vertices.extend(letter_verts);
+            indices.extend(letter_inds);
+            title_x += title_spacing;
+        }
+
+        // Chest slots (9 slots in a row)
+        let slot_size = 0.06;
+        let slot_spacing = 0.08;
+        let chest_row_y = 0.3;
+        let chest_slots = 9;
+        let chest_start_x = -(chest_slots as f32 * slot_spacing) / 2.0 + slot_spacing / 2.0;
+
+        for i in 0..chest_slots {
+            let slot_x = chest_start_x + i as f32 * slot_spacing;
+            let is_selected = chest_ui.in_chest_section && chest_ui.selected_slot == i;
+
+            // Slot background
+            let bg_color = if is_selected { selected_color } else { slot_bg_color };
+            let base = vertices.len() as u16;
+            vertices.push(UIVertex { position: [slot_x - slot_size, chest_row_y - slot_size], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
+            vertices.push(UIVertex { position: [slot_x + slot_size, chest_row_y - slot_size], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
+            vertices.push(UIVertex { position: [slot_x + slot_size, chest_row_y + slot_size], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
+            vertices.push(UIVertex { position: [slot_x - slot_size, chest_row_y + slot_size], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+            // Draw item if present
+            if i < chest_contents.len() {
+                let (block_type, _qty) = chest_contents[i];
+                let block_type_val = Self::block_type_to_ui_index(block_type);
+                let icon_size = slot_size * 0.7;
+                let icon_base = vertices.len() as u16;
+                vertices.push(UIVertex { position: [slot_x - icon_size, chest_row_y - icon_size], tex_coords: [0.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
+                vertices.push(UIVertex { position: [slot_x + icon_size, chest_row_y - icon_size], tex_coords: [1.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
+                vertices.push(UIVertex { position: [slot_x + icon_size, chest_row_y + icon_size], tex_coords: [1.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
+                vertices.push(UIVertex { position: [slot_x - icon_size, chest_row_y + icon_size], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
+                indices.extend_from_slice(&[icon_base, icon_base + 1, icon_base + 2, icon_base, icon_base + 2, icon_base + 3]);
+            }
+        }
+
+        // "YOUR INVENTORY" label
+        let inv_label = "INVENTORY";
+        let label_size = 0.03;
+        let label_spacing = label_size * 0.7;
+        let label_width = inv_label.len() as f32 * label_spacing;
+        let mut label_x = -label_width / 2.0;
+        let label_y = 0.05;
+
+        for ch in inv_label.chars() {
+            let (letter_verts, letter_inds) = Self::get_letter_vertices(ch, label_x, label_y, label_size, title_color, vertices.len() as u16);
+            vertices.extend(letter_verts);
+            indices.extend(letter_inds);
+            label_x += label_spacing;
+        }
+
+        // Player inventory slots (6 slots)
+        let inv_row_y = -0.1;
+        let inv_slots = 6;
+        let inv_start_x = -(inv_slots as f32 * slot_spacing) / 2.0 + slot_spacing / 2.0;
+
+        for i in 0..inv_slots {
+            let slot_x = inv_start_x + i as f32 * slot_spacing;
+            let is_selected = !chest_ui.in_chest_section && chest_ui.selected_slot == i;
+
+            // Slot background
+            let bg_color = if is_selected { selected_color } else { slot_bg_color };
+            let base = vertices.len() as u16;
+            vertices.push(UIVertex { position: [slot_x - slot_size, inv_row_y - slot_size], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
+            vertices.push(UIVertex { position: [slot_x + slot_size, inv_row_y - slot_size], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
+            vertices.push(UIVertex { position: [slot_x + slot_size, inv_row_y + slot_size], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
+            vertices.push(UIVertex { position: [slot_x - slot_size, inv_row_y + slot_size], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 });
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+            // Draw item if present
+            if let Some((block_type, _qty)) = inventory.slots[i] {
+                let block_type_val = Self::block_type_to_ui_index(block_type);
+                let icon_size = slot_size * 0.7;
+                let icon_base = vertices.len() as u16;
+                vertices.push(UIVertex { position: [slot_x - icon_size, inv_row_y - icon_size], tex_coords: [0.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
+                vertices.push(UIVertex { position: [slot_x + icon_size, inv_row_y - icon_size], tex_coords: [1.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
+                vertices.push(UIVertex { position: [slot_x + icon_size, inv_row_y + icon_size], tex_coords: [1.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
+                vertices.push(UIVertex { position: [slot_x - icon_size, inv_row_y + icon_size], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
+                indices.extend_from_slice(&[icon_base, icon_base + 1, icon_base + 2, icon_base, icon_base + 2, icon_base + 3]);
+            }
+        }
+
+        // Instructions at bottom
+        let instructions = "ARROWS: NAVIGATE  ENTER: TRANSFER  ESC: CLOSE";
+        let inst_size = 0.02;
+        let inst_spacing = inst_size * 0.7;
+        let inst_width = instructions.len() as f32 * inst_spacing;
+        let mut inst_x = -inst_width / 2.0;
+        let inst_y = -0.4;
+
+        for ch in instructions.chars() {
+            if ch.is_ascii_digit() {
+                let dig = ch.to_digit(10).unwrap() as usize;
+                let (dig_verts, dig_inds) = Self::get_digit_vertices(dig, inst_x, inst_y, inst_size, [0.7, 0.7, 0.7, 1.0]);
+                let base = vertices.len() as u16;
+                for v in dig_verts { vertices.push(v); }
+                for i in dig_inds { indices.push(base + i); }
+            } else {
+                let (letter_verts, letter_inds) = Self::get_letter_vertices(ch.to_ascii_uppercase(), inst_x, inst_y, inst_size, [0.7, 0.7, 0.7, 1.0], vertices.len() as u16);
+                vertices.extend(letter_verts);
+                indices.extend(letter_inds);
+            }
+            inst_x += inst_spacing;
+        }
+
+        // Create buffers and render
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Chest UI Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Chest UI Index Buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Chest UI Encoder"),
+        });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Chest UI Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            render_pass.set_pipeline(&self.ui_render_pipeline);
+            render_pass.set_bind_group(0, texture_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+        }
+
+        queue.submit(std::iter::once(encoder.finish()));
     }
 }

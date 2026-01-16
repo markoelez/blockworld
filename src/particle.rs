@@ -114,6 +114,10 @@ impl ParticleSystem {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.particles.len()
+    }
+
     fn random_vector(&mut self, min: f32, max: f32) -> Vector3<f32> {
         Vector3::new(
             self.rng.gen_range(min..max),
@@ -290,6 +294,46 @@ impl ParticleSystem {
                 }
                 _ => {}
             }
+        }
+    }
+
+    /// Spawn flame particles for torches
+    pub fn spawn_torch_flames(&mut self, torch_positions: &[Point3<f32>]) {
+        for pos in torch_positions {
+            // Only spawn 1 particle per torch per call (throttle externally)
+            if self.particles.len() >= MAX_PARTICLES {
+                break;
+            }
+
+            // Position slightly above torch tip
+            let spawn_pos = Point3::new(
+                pos.x + self.rng.gen_range(-0.05..0.05),
+                pos.y + 0.15,
+                pos.z + self.rng.gen_range(-0.05..0.05),
+            );
+
+            // Upward velocity with slight random drift
+            let velocity = Vector3::new(
+                self.rng.gen_range(-0.3..0.3),
+                self.rng.gen_range(0.5..1.5),  // Rises upward
+                self.rng.gen_range(-0.3..0.3),
+            );
+
+            // Orange/yellow flame color
+            let color = [
+                self.rng.gen_range(0.9..1.0),   // Red
+                self.rng.gen_range(0.5..0.8),   // Green (makes orange/yellow)
+                self.rng.gen_range(0.1..0.3),   // Blue
+                0.9,  // Alpha
+            ];
+
+            self.particles.push(Particle::new(
+                spawn_pos,
+                velocity,
+                color,
+                self.rng.gen_range(0.3..0.8),  // Short lifetime
+                self.rng.gen_range(0.02..0.05),  // Small size
+            ));
         }
     }
 
