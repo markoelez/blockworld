@@ -19,17 +19,27 @@ pub struct Camera {
     fovy: f32,
     znear: f32,
     zfar: f32,
-    
+
     velocity: Vector3<f32>,
     on_ground: bool,
     spawn_locked: bool, // Skip physics until first movement input
-    
+
     moving_forward: bool,
     moving_backward: bool,
     moving_left: bool,
     moving_right: bool,
     jump_pressed: bool,
     bob_time: f32,
+
+    // Footstep tracking
+    distance_walked: f32,
+    last_ground_block: Option<BlockType>,
+    footstep_pending: bool,
+    was_in_water: bool,
+    was_on_ground: bool,
+    just_jumped: bool,
+    just_landed: bool,
+    just_entered_water: bool,
 }
 
 impl Camera {
@@ -43,17 +53,27 @@ impl Camera {
             znear: 0.1,
             zfar: 1000.0,
             view_proj: Matrix4::from_scale(1.0),
-            
+
             velocity: Vector3::new(0.0, 0.0, 0.0),
             on_ground: true,
             spawn_locked: true,
-            
+
             moving_forward: false,
             moving_backward: false,
             moving_left: false,
             moving_right: false,
             jump_pressed: false,
             bob_time: 0.0,
+
+            // Footstep tracking
+            distance_walked: 0.0,
+            last_ground_block: None,
+            footstep_pending: false,
+            was_in_water: false,
+            was_on_ground: false,
+            just_jumped: false,
+            just_landed: false,
+            just_entered_water: false,
         };
         camera.update_view_proj();
         camera
@@ -87,13 +107,47 @@ impl Camera {
         let sensitivity = 0.15;
         self.yaw += delta_x * sensitivity;
         self.pitch -= delta_y * sensitivity;
-        
+
         // Clamp pitch to prevent camera flipping
         self.pitch = self.pitch.max(-89.0).min(89.0);
-        
+
         self.update_view_proj();
     }
-    
+
+    // Sound event methods
+    pub fn get_footstep_event(&mut self) -> Option<BlockType> {
+        if self.footstep_pending {
+            self.footstep_pending = false;
+            self.last_ground_block
+        } else {
+            None
+        }
+    }
+
+    pub fn check_jump_event(&mut self) -> bool {
+        let jumped = self.just_jumped;
+        self.just_jumped = false;
+        jumped
+    }
+
+    pub fn check_land_event(&mut self) -> bool {
+        let landed = self.just_landed;
+        self.just_landed = false;
+        landed
+    }
+
+    pub fn check_water_enter_event(&mut self) -> bool {
+        let entered = self.just_entered_water;
+        self.just_entered_water = false;
+        entered
+    }
+
+    pub fn is_underwater(&self, world: &World) -> bool {
+        let head_y = self.position.y.floor() as i32;
+        world.get_block(self.position.x as i32, head_y, self.position.z as i32)
+            == Some(BlockType::Water)
+    }
+
     fn has_movement_input(&self) -> bool {
         self.moving_forward || self.moving_backward || self.moving_left || self.moving_right || self.jump_pressed
     }
@@ -344,7 +398,50 @@ impl Camera {
                 self.velocity.y = 0.0;
             }
         }
-        
+
+        // Track sound events
+
+        // Water entry detection
+        if is_in_water && !self.was_in_water {
+            self.just_entered_water = true;
+        }
+        self.was_in_water = is_in_water;
+
+        // Jump detection
+        if self.jump_pressed && self.was_on_ground && !is_in_water {
+            self.just_jumped = true;
+        }
+
+        // Landing detection
+        if self.on_ground && !self.was_on_ground && !is_in_water {
+            self.just_landed = true;
+        }
+        self.was_on_ground = self.on_ground;
+
+        // Footstep tracking - only when walking on ground
+        if self.on_ground && !is_in_water {
+            let distance_moved = ((new_position.x - self.position.x).powi(2)
+                + (new_position.z - self.position.z).powi(2)).sqrt();
+
+            if distance_moved > 0.01 {
+                self.distance_walked += distance_moved;
+
+                // Get the block type under feet for footstep sound
+                let feet_block_y = (new_position.y - PLAYER_HEIGHT - 0.1).floor() as i32;
+                self.last_ground_block = world.get_block(
+                    new_position.x.floor() as i32,
+                    feet_block_y,
+                    new_position.z.floor() as i32
+                );
+
+                // Trigger footstep every ~2 blocks of walking
+                if self.distance_walked >= 2.0 {
+                    self.distance_walked = 0.0;
+                    self.footstep_pending = true;
+                }
+            }
+        }
+
         self.position = new_position;
     }
 

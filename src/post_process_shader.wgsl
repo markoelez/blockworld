@@ -23,6 +23,10 @@ struct PostProcessUniform {
     screen_size: vec2<f32>,    // Screen dimensions for SSAO
     ssao_intensity: f32,
     ssao_radius: f32,
+    underwater: f32,           // 1.0 if underwater, 0.0 otherwise
+    _pad1: f32,
+    _pad2: f32,
+    _pad3: f32,
 }
 
 @group(0) @binding(3)
@@ -294,6 +298,25 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Subtle vignette
     color = apply_vignette(color, in.tex_coords, 0.2);
+
+    // Underwater effect
+    if u_post.underwater > 0.5 {
+        // Blue-green tint
+        let underwater_color = vec3<f32>(0.15, 0.35, 0.5);
+        color = mix(color, underwater_color, 0.35);
+
+        // Reduce contrast underwater
+        color = mix(vec3<f32>(0.3), color, 0.85);
+
+        // Add slight waviness/distortion effect
+        let wave_offset = sin(in.tex_coords.y * 50.0 + in.tex_coords.x * 10.0) * 0.002;
+        let distorted_uv = in.tex_coords + vec2<f32>(wave_offset, 0.0);
+        let distorted_sample = textureSample(t_hdr, s_linear, distorted_uv).rgb;
+        color = mix(color, distorted_sample * underwater_color * 2.0, 0.1);
+
+        // Darker vignette underwater
+        color = apply_vignette(color, in.tex_coords, 0.4);
+    }
 
     // Clamp to valid range
     color = clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));

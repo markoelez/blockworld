@@ -9,12 +9,16 @@ mod camera;
 mod renderer;
 mod ui;
 mod entity;
+mod particle;
+mod audio;
 
 use world::World;
 use camera::Camera;
 use renderer::Renderer;
 use ui::Inventory;
 use entity::EntityManager;
+use particle::ParticleSystem;
+use audio::AudioManager;
 
 #[derive(PartialEq, Clone, Copy)]
 enum LoadingStage {
@@ -51,6 +55,8 @@ fn main() {
     let mut camera = Camera::new(&renderer.config);
     let mut inventory = Inventory::new();
     let mut entity_manager = EntityManager::new();
+    let mut particle_system = ParticleSystem::new();
+    let audio_manager = AudioManager::new();
 
     let mut last_frame = std::time::Instant::now();
     let mut mouse_captured = false;
@@ -90,18 +96,36 @@ fn main() {
                                                 let (x, y, z) = placement_pos;
                                                 if world.place_block(x, y, z, block_type) {
                                                     inventory.decrement_selected();
-                                                    println!("Placed {:?} block at ({}, {}, {})", block_type, x, y, z);
+                                                    if let Some(ref audio) = audio_manager {
+                                                        audio.play_block_place(block_type);
+                                                    }
                                                 }
                                             }
                                         }
                                     },
                                     VirtualKeyCode::R => {
                                         if let Some((x, y, z)) = targeted_block {
+                                            // Get block type for particles before damaging
+                                            let block_type = world.get_block(x, y, z);
                                             if let Some(broken_type) = world.damage_block(x, y, z) {
+                                                // Block was fully destroyed - spawn more particles
+                                                particle_system.spawn_block_break(
+                                                    cgmath::Point3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
+                                                    broken_type
+                                                );
                                                 inventory.add_block(broken_type);
-                                                println!("Destroyed block at ({}, {}, {})", x, y, z);
-                                            } else {
-                                                println!("Hit block at ({}, {}, {})", x, y, z);
+                                                if let Some(ref audio) = audio_manager {
+                                                    audio.play_block_break(broken_type);
+                                                }
+                                            } else if let Some(bt) = block_type {
+                                                // Block was just damaged - spawn fewer particles
+                                                particle_system.spawn_block_break(
+                                                    cgmath::Point3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
+                                                    bt
+                                                );
+                                                if let Some(ref audio) = audio_manager {
+                                                    audio.play_block_break(bt);
+                                                }
                                             }
                                             renderer.start_arm_swing();
                                         }
@@ -133,13 +157,32 @@ fn main() {
                     world.update_loaded_chunks(camera.position);
                     camera.update(dt, &world);
                     entity_manager.update(dt, &world, camera.position);
+                    particle_system.update(dt);
                     targeted_block = camera.get_targeted_block(&world, 5.0);
+
+                    // Handle sound events
+                    if let Some(ref audio) = audio_manager {
+                        if let Some(block_type) = camera.get_footstep_event() {
+                            audio.play_footstep(block_type);
+                        }
+                        if camera.check_jump_event() {
+                            audio.play_jump();
+                        }
+                        if camera.check_land_event() {
+                            audio.play_land();
+                        }
+                        if camera.check_water_enter_event() {
+                            audio.play_splash();
+                            particle_system.spawn_water_splash(camera.position);
+                        }
+                    }
                 }
                 window.request_redraw();
             }
             Event::RedrawRequested(_) => {
                 if is_loaded {
-                    renderer.render(&camera, &mut world, &inventory, targeted_block, &entity_manager);
+                    let is_underwater = camera.is_underwater(&world);
+                    renderer.render(&camera, &mut world, &inventory, targeted_block, &entity_manager, &particle_system, is_underwater);
                 } else {
                     // Process loading stages
                     let (progress, message) = match loading_stage {

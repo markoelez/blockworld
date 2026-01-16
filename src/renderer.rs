@@ -12,6 +12,7 @@ use crate::camera::Camera;
 use crate::world::{World, BlockType};
 use crate::ui::{Inventory, UIRenderer};
 use crate::entity::{EntityManager, Villager, VillagerState, VILLAGER_HEIGHT};
+use crate::particle::ParticleSystem;
 
 // Shadow map resolution
 const SHADOW_MAP_SIZE: u32 = 2048;
@@ -40,6 +41,25 @@ struct SkyVertex {
 struct CloudVertex {
     position: [f32; 3],
     normal: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct ParticleVertex {
+    position: [f32; 3],
+    offset: [f32; 2],
+    color: [f32; 4],
+    size: f32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct ParticleUniform {
+    view_proj: [[f32; 4]; 4],
+    camera_right: [f32; 3],
+    _pad1: f32,
+    camera_up: [f32; 3],
+    _pad2: f32,
 }
 
 struct ChunkMesh {
@@ -170,6 +190,10 @@ struct PostProcessUniform {
     screen_size: [f32; 2],    // Screen dimensions for SSAO
     ssao_intensity: f32,
     ssao_radius: f32,
+    underwater: f32,          // 1.0 if underwater, 0.0 otherwise
+    _pad1: f32,
+    _pad2: f32,
+    _pad3: f32,
 }
 
 #[repr(C)]
@@ -243,6 +267,12 @@ pub struct Renderer {
     villager_vertex_buffer: wgpu::Buffer,
     villager_index_buffer: wgpu::Buffer,
     villager_index_count: u32,
+    // Particle rendering
+    particle_pipeline: wgpu::RenderPipeline,
+    particle_vertex_buffer: wgpu::Buffer,
+    particle_uniform_buffer: wgpu::Buffer,
+    particle_bind_group: wgpu::BindGroup,
+    particle_vertex_count: u32,
 }
 
 impl Renderer {
@@ -420,6 +450,11 @@ impl Renderer {
         let bloom_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Bloom Shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("bloom_shader.wgsl").into()),
+        });
+
+        let particle_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Particle Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("particle_shader.wgsl").into()),
         });
 
         let uniform_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1485,6 +1520,10 @@ impl Renderer {
                 screen_size: [config.width as f32, config.height as f32],
                 ssao_intensity: 0.0,  // Disabled - was causing visual artifacts
                 ssao_radius: 0.5,
+                underwater: 0.0,
+                _pad1: 0.0,
+                _pad2: 0.0,
+                _pad3: 0.0,
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -1644,6 +1683,133 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // Particle system setup
+        let particle_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+            label: Some("particle_bind_group_layout"),
+        });
+
+        let particle_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Particle Uniform Buffer"),
+            size: std::mem::size_of::<ParticleUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let particle_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &particle_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: particle_uniform_buffer.as_entire_binding(),
+                },
+            ],
+            label: Some("particle_bind_group"),
+        });
+
+        // Particle vertex buffer (500 particles * 4 vertices each)
+        let max_particle_vertices = 500 * 4;
+        let particle_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Particle Vertex Buffer"),
+            size: (max_particle_vertices * std::mem::size_of::<ParticleVertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let particle_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Particle Pipeline Layout"),
+            bind_group_layouts: &[&particle_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let particle_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Particle Pipeline"),
+            layout: Some(&particle_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &particle_shader,
+                entry_point: "vs_main",
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<ParticleVertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            offset: 0,
+                            shader_location: 0,
+                            format: wgpu::VertexFormat::Float32x3,
+                        },
+                        wgpu::VertexAttribute {
+                            offset: 12,
+                            shader_location: 1,
+                            format: wgpu::VertexFormat::Float32x2,
+                        },
+                        wgpu::VertexAttribute {
+                            offset: 20,
+                            shader_location: 2,
+                            format: wgpu::VertexFormat::Float32x4,
+                        },
+                        wgpu::VertexAttribute {
+                            offset: 36,
+                            shader_location: 3,
+                            format: wgpu::VertexFormat::Float32,
+                        },
+                    ],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &particle_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None, // No culling for particles
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false, // Particles don't write to depth
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+        });
+
         Self {
             surface,
             device,
@@ -1705,9 +1871,15 @@ impl Renderer {
             villager_vertex_buffer,
             villager_index_buffer,
             villager_index_count: 0,
+            // Particle rendering
+            particle_pipeline,
+            particle_vertex_buffer,
+            particle_uniform_buffer,
+            particle_bind_group,
+            particle_vertex_count: 0,
         }
     }
-    
+
     fn generate_sky_quad() -> (Vec<SkyVertex>, Vec<u16>) {
         // Create a simple full-screen quad that renders at maximum depth
         let vertices = vec![
@@ -1852,7 +2024,7 @@ impl Renderer {
         }
     }
     
-    pub fn render(&mut self, camera: &Camera, world: &mut World, inventory: &Inventory, targeted_block: Option<(i32, i32, i32)>, entity_manager: &EntityManager) {
+    pub fn render(&mut self, camera: &Camera, world: &mut World, inventory: &Inventory, targeted_block: Option<(i32, i32, i32)>, entity_manager: &EntityManager, particle_system: &ParticleSystem, underwater: bool) {
         let now = Instant::now();
         let dt = (now - self.last_render).as_secs_f32();
         self.last_render = now;
@@ -1891,6 +2063,9 @@ impl Renderer {
 
         // Update villager mesh
         self.update_villager_mesh(entity_manager.get_villagers());
+
+        // Update particle mesh
+        self.update_particle_mesh(camera, particle_system);
 
         let output = self.surface.get_current_texture().unwrap();
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -1936,7 +2111,7 @@ impl Renderer {
             [-10.0, -10.0] // Sun behind camera
         };
 
-        // Update post-process uniform with sun position
+        // Update post-process uniform with sun position and underwater effect
         let post_uniform = PostProcessUniform {
             exposure: 1.3,
             bloom_intensity: 0.35,
@@ -1948,6 +2123,10 @@ impl Renderer {
             screen_size: [self.config.width as f32, self.config.height as f32],
             ssao_intensity: 0.0,  // Disabled - was causing visual artifacts
             ssao_radius: 0.5,
+            underwater: if underwater { 1.0 } else { 0.0 },
+            _pad1: 0.0,
+            _pad2: 0.0,
+            _pad3: 0.0,
         };
         self.queue.write_buffer(&self.post_process_uniform_buffer, 0, bytemuck::cast_slice(&[post_uniform]));
         
@@ -2099,6 +2278,14 @@ impl Renderer {
                     render_pass.set_index_buffer(chunk_mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                     render_pass.draw_indexed(0..chunk_mesh.index_count, 0, 0..1);
                 }
+            }
+
+            // Render particles
+            if self.particle_vertex_count > 0 {
+                render_pass.set_pipeline(&self.particle_pipeline);
+                render_pass.set_bind_group(0, &self.particle_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.particle_vertex_buffer.slice(..));
+                render_pass.draw(0..self.particle_vertex_count, 0..1);
             }
 
             // Render 3D clouds
@@ -3510,6 +3697,67 @@ impl Renderer {
         if !vertices.is_empty() {
             self.queue.write_buffer(&self.villager_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
             self.queue.write_buffer(&self.villager_index_buffer, 0, bytemuck::cast_slice(&indices));
+        }
+    }
+
+    fn update_particle_mesh(&mut self, camera: &Camera, particle_system: &ParticleSystem) {
+        let particles = particle_system.get_particles();
+        if particles.is_empty() {
+            self.particle_vertex_count = 0;
+            return;
+        }
+
+        // Calculate camera right and up vectors for billboarding
+        let yaw_rad = camera.yaw.to_radians();
+        let pitch_rad = camera.pitch.to_radians();
+
+        let forward = Vector3::new(
+            yaw_rad.sin() * pitch_rad.cos(),
+            -pitch_rad.sin(),
+            -yaw_rad.cos() * pitch_rad.cos(),
+        ).normalize();
+
+        let world_up = Vector3::new(0.0, 1.0, 0.0);
+        let camera_right = forward.cross(world_up).normalize();
+        let camera_up = camera_right.cross(forward).normalize();
+
+        // Update particle uniform
+        let particle_uniform = ParticleUniform {
+            view_proj: camera.view_proj.into(),
+            camera_right: [camera_right.x, camera_right.y, camera_right.z],
+            _pad1: 0.0,
+            camera_up: [camera_up.x, camera_up.y, camera_up.z],
+            _pad2: 0.0,
+        };
+        self.queue.write_buffer(&self.particle_uniform_buffer, 0, bytemuck::cast_slice(&[particle_uniform]));
+
+        // Generate particle vertices (4 vertices per particle for a quad)
+        let mut vertices: Vec<ParticleVertex> = Vec::with_capacity(particles.len() * 6);
+
+        // Quad offsets for two triangles
+        let offsets = [
+            [-1.0, -1.0], [1.0, -1.0], [1.0, 1.0],  // First triangle
+            [-1.0, -1.0], [1.0, 1.0], [-1.0, 1.0],  // Second triangle
+        ];
+
+        for particle in particles {
+            let alpha = particle.alpha();
+            let color = [particle.color[0], particle.color[1], particle.color[2], alpha];
+
+            for offset in &offsets {
+                vertices.push(ParticleVertex {
+                    position: [particle.position.x, particle.position.y, particle.position.z],
+                    offset: *offset,
+                    color,
+                    size: particle.size,
+                });
+            }
+        }
+
+        self.particle_vertex_count = vertices.len() as u32;
+
+        if !vertices.is_empty() {
+            self.queue.write_buffer(&self.particle_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
         }
     }
 }
