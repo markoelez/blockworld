@@ -11,6 +11,15 @@ cargo run --release      # Build and run the game
 
 No tests are currently configured for this project.
 
+## Before Completing Work
+
+**Always verify before stopping:**
+1. Run `cargo build --release` and ensure it compiles without errors
+2. Check that any new dependencies work cross-platform (CI runs on Ubuntu)
+3. Avoid adding platform-specific dependencies directly (e.g., `coreaudio-sys` is macOS-only)
+4. If modifying `BlockType` enum, update all match statements (check `ui.rs`, `world.rs`)
+5. If adding new entity types, ensure renderer buffers are sized appropriately
+
 ## Architecture Overview
 
 BlockWorld is a Minecraft-inspired voxel game built with Rust and wgpu. The rendering uses an HDR pipeline with post-processing effects.
