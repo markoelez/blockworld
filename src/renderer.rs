@@ -321,6 +321,10 @@ pub struct Renderer {
     animal_vertex_buffer: wgpu::Buffer,
     animal_index_buffer: wgpu::Buffer,
     animal_index_count: u32,
+    // Hostile mob rendering
+    hostile_mob_vertex_buffer: wgpu::Buffer,
+    hostile_mob_index_buffer: wgpu::Buffer,
+    hostile_mob_index_count: u32,
 }
 
 impl Renderer {
@@ -2258,6 +2262,21 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // Hostile mob buffers (30 mobs max, each with ~8 body parts * 24 vertices)
+        let hostile_mob_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Hostile Mob Vertex Buffer"),
+            size: (30 * 8 * 24 * std::mem::size_of::<Vertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let hostile_mob_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Hostile Mob Index Buffer"),
+            size: (30 * 8 * 36 * std::mem::size_of::<u16>()) as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let particle_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Particle Pipeline"),
             layout: Some(&particle_pipeline_layout),
@@ -2419,6 +2438,10 @@ impl Renderer {
             animal_vertex_buffer,
             animal_index_buffer,
             animal_index_count: 0,
+            // Hostile mobs
+            hostile_mob_vertex_buffer,
+            hostile_mob_index_buffer,
+            hostile_mob_index_count: 0,
         }
     }
 
@@ -2676,6 +2699,9 @@ impl Renderer {
         // Update animal mesh
         self.update_animal_mesh(entity_manager.get_animals());
 
+        // Update hostile mob mesh
+        self.update_hostile_mob_mesh(entity_manager.get_hostile_mobs());
+
         // Update dropped item mesh
         self.update_dropped_items(entity_manager.get_dropped_items());
 
@@ -2798,6 +2824,13 @@ impl Renderer {
                 shadow_pass.set_index_buffer(self.animal_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                 shadow_pass.draw_indexed(0..self.animal_index_count, 0, 0..1);
             }
+
+            // Render hostile mobs to shadow map
+            if self.hostile_mob_index_count > 0 {
+                shadow_pass.set_vertex_buffer(0, self.hostile_mob_vertex_buffer.slice(..));
+                shadow_pass.set_index_buffer(self.hostile_mob_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                shadow_pass.draw_indexed(0..self.hostile_mob_index_count, 0, 0..1);
+            }
         }
 
         // === MAIN HDR RENDER PASS ===
@@ -2884,6 +2917,13 @@ impl Renderer {
                 render_pass.set_vertex_buffer(0, self.animal_vertex_buffer.slice(..));
                 render_pass.set_index_buffer(self.animal_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                 render_pass.draw_indexed(0..self.animal_index_count, 0, 0..1);
+            }
+
+            // Render hostile mobs
+            if self.hostile_mob_index_count > 0 {
+                render_pass.set_vertex_buffer(0, self.hostile_mob_vertex_buffer.slice(..));
+                render_pass.set_index_buffer(self.hostile_mob_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed(0..self.hostile_mob_index_count, 0, 0..1);
             }
 
             // Render dropped items
@@ -3137,6 +3177,32 @@ impl Renderer {
                     inventory,
                 );
             }
+        }
+
+        // Render survival UI (health, hunger, air)
+        if !pause_menu.visible && !chest_ui.open {
+            self.ui_renderer.render_survival_ui(
+                &self.device,
+                &self.queue,
+                &view,
+                &self.texture_bind_group,
+                camera.health,
+                camera.max_health,
+                camera.hunger,
+                camera.air_supply,
+                underwater,
+                camera.damage_flash > 0.0,
+            );
+        }
+
+        // Render death screen
+        if camera.is_dead {
+            self.ui_renderer.render_death_screen(
+                &self.device,
+                &self.queue,
+                &view,
+                &self.texture_bind_group,
+            );
         }
 
         output.present();
@@ -4892,6 +4958,132 @@ impl Renderer {
         if !vertices.is_empty() {
             self.queue.write_buffer(&self.animal_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
             self.queue.write_buffer(&self.animal_index_buffer, 0, bytemuck::cast_slice(&indices));
+        }
+    }
+
+    /// Update the hostile mob mesh (zombies, etc.)
+    pub fn update_hostile_mob_mesh(&mut self, hostile_mobs: &[crate::entity::HostileMob]) {
+        use crate::entity::HostileMobState;
+
+        let mut vertices: Vec<Vertex> = Vec::with_capacity(hostile_mobs.len() * 8 * 24);
+        let mut indices: Vec<u16> = Vec::with_capacity(hostile_mobs.len() * 8 * 36);
+
+        for mob in hostile_mobs {
+            let x = mob.position.x;
+            let y = mob.position.y;
+            let z = mob.position.z;
+            let yaw = mob.yaw.to_radians();
+
+            // Green-gray color for zombies (using a custom block type index)
+            // We use 48.0 for zombie color - will need to add this to the texture atlas
+            let color = if mob.damage_flash > 0.0 { 99.0 } else { 48.0 }; // Flash red when hit
+
+            let (width, height) = mob.mob_type.dimensions();
+            let pivot = [x, y, z];
+
+            // Animation swing for walking/attacking
+            let swing = if mob.state == HostileMobState::Chasing || mob.state == HostileMobState::Wandering {
+                (mob.animation_time * 4.0).sin() * 0.3
+            } else if mob.state == HostileMobState::Attacking {
+                (mob.animation_time * 8.0).sin() * 0.5 // Faster attack animation
+            } else {
+                0.0
+            };
+
+            // Body (torso)
+            let body_y = y - height * 0.4;
+            Self::generate_villager_cube(
+                &mut vertices,
+                &mut indices,
+                [x, body_y, z],
+                [width * 0.6, height * 0.4, width * 0.4],
+                color,
+                yaw,
+                pivot,
+            );
+
+            // Head
+            let head_forward = 0.0;
+            let head_x = x - yaw.sin() * head_forward;
+            let head_z = z - yaw.cos() * head_forward;
+            let head_y = y - height * 0.15;
+            Self::generate_villager_cube(
+                &mut vertices,
+                &mut indices,
+                [head_x, head_y, head_z],
+                [width * 0.4, width * 0.4, width * 0.4],
+                color,
+                yaw,
+                pivot,
+            );
+
+            // Arms (extended forward like zombie)
+            let arm_length = 0.5;
+            let arm_swing = swing * 0.5;
+
+            // Left arm
+            let left_arm_dx = width * 0.4;
+            let arm_forward = 0.4 + arm_swing;
+            let left_rot_dx = left_arm_dx * yaw.cos() - arm_forward * yaw.sin();
+            let left_rot_dz = left_arm_dx * yaw.sin() + arm_forward * yaw.cos();
+            Self::generate_villager_cube(
+                &mut vertices,
+                &mut indices,
+                [x + left_rot_dx, body_y + 0.1, z + left_rot_dz],
+                [0.12, arm_length, 0.12],
+                color,
+                yaw,
+                pivot,
+            );
+
+            // Right arm
+            let right_arm_dx = -width * 0.4;
+            let right_rot_dx = right_arm_dx * yaw.cos() - arm_forward * yaw.sin();
+            let right_rot_dz = right_arm_dx * yaw.sin() + arm_forward * yaw.cos();
+            Self::generate_villager_cube(
+                &mut vertices,
+                &mut indices,
+                [x + right_rot_dx, body_y + 0.1, z + right_rot_dz],
+                [0.12, arm_length, 0.12],
+                color,
+                yaw,
+                pivot,
+            );
+
+            // Legs (walking animation)
+            let leg_height = height * 0.4;
+            let leg_y = y - height + leg_height * 0.5;
+            let leg_offsets = [
+                (width * 0.15, width * 0.05, 1.0),   // Left leg
+                (-width * 0.15, -width * 0.05, -1.0), // Right leg
+            ];
+
+            for (dx, dz, phase) in leg_offsets {
+                let rot_dx = dx * yaw.cos() - dz * yaw.sin();
+                let rot_dz = dx * yaw.sin() + dz * yaw.cos();
+                let leg_swing = swing * phase;
+                let swing_x = -yaw.sin() * leg_swing * 0.3;
+                let swing_z = -yaw.cos() * leg_swing * 0.3;
+
+                Self::generate_villager_cube(
+                    &mut vertices,
+                    &mut indices,
+                    [x + rot_dx + swing_x, leg_y, z + rot_dz + swing_z],
+                    [0.14, leg_height, 0.14],
+                    color,
+                    yaw,
+                    pivot,
+                );
+            }
+        }
+
+        // Hostile mobs use the same buffer as villagers for now
+        // We'll append to the villager draw call
+        self.hostile_mob_index_count = indices.len() as u32;
+
+        if !vertices.is_empty() {
+            self.queue.write_buffer(&self.hostile_mob_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+            self.queue.write_buffer(&self.hostile_mob_index_buffer, 0, bytemuck::cast_slice(&indices));
         }
     }
 

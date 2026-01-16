@@ -13,7 +13,7 @@ mod particle;
 mod audio;
 
 use world::World;
-use camera::Camera;
+use camera::{Camera, HungerAction};
 use renderer::Renderer;
 use ui::{Inventory, DebugInfo, PauseMenu, ChestUI};
 use entity::EntityManager;
@@ -202,16 +202,21 @@ fn main() {
                                     VirtualKeyCode::Key5 => inventory.select_slot(4),
                                     VirtualKeyCode::Key6 => inventory.select_slot(5),
                                     VirtualKeyCode::E => {
-                                        // First check if we're targeting a chest to open it
-                                        if let Some((x, y, z)) = targeted_block {
-                                            if world.get_block(x, y, z) == Some(world::BlockType::Chest) {
-                                                // Open chest UI
-                                                chest_ui.open_chest((x, y, z));
-                                                mouse_captured = false;
-                                                set_cursor_captured(&window, false);
-                                            } else if let Some(block_type) = inventory.get_selected_block() {
-                                                // Place block
-                                                if block_type == world::BlockType::Torch {
+                                        // First check if holding food - eat it
+                                        if let Some(block_type) = inventory.get_selected_block() {
+                                            if let Some((hunger_restore, saturation_restore)) = block_type.food_properties() {
+                                                if camera.eat_food(hunger_restore, saturation_restore) {
+                                                    inventory.decrement_selected();
+                                                }
+                                                // Don't process further if we tried to eat
+                                            } else if let Some((x, y, z)) = targeted_block {
+                                                // Check for chest first
+                                                if world.get_block(x, y, z) == Some(world::BlockType::Chest) {
+                                                    // Open chest UI
+                                                    chest_ui.open_chest((x, y, z));
+                                                    mouse_captured = false;
+                                                    set_cursor_captured(&window, false);
+                                                } else if block_type == world::BlockType::Torch {
                                                     // Torches need special placement with face orientation
                                                     if let Some((pos, face)) = camera.get_block_placement_with_face(&world, 5.0) {
                                                         let (x, y, z) = pos;
@@ -234,29 +239,36 @@ fn main() {
                                                         }
                                                     }
                                                 }
-                                            }
-                                        } else if let Some(block_type) = inventory.get_selected_block() {
-                                            // No targeted block, just try to place
-                                            if block_type == world::BlockType::Torch {
-                                                if let Some((pos, face)) = camera.get_block_placement_with_face(&world, 5.0) {
-                                                    let (x, y, z) = pos;
-                                                    if world.place_torch(x, y, z, face) {
-                                                        inventory.decrement_selected();
-                                                        if let Some(ref audio) = audio_manager {
-                                                            audio.play_block_place(block_type);
-                                                        }
-                                                    }
-                                                }
                                             } else {
-                                                if let Some(placement_pos) = camera.get_block_placement_position(&world, 5.0) {
-                                                    let (x, y, z) = placement_pos;
-                                                    if world.place_block(x, y, z, block_type) {
-                                                        inventory.decrement_selected();
-                                                        if let Some(ref audio) = audio_manager {
-                                                            audio.play_block_place(block_type);
+                                                // No targeted block, just try to place
+                                                if block_type == world::BlockType::Torch {
+                                                    if let Some((pos, face)) = camera.get_block_placement_with_face(&world, 5.0) {
+                                                        let (x, y, z) = pos;
+                                                        if world.place_torch(x, y, z, face) {
+                                                            inventory.decrement_selected();
+                                                            if let Some(ref audio) = audio_manager {
+                                                                audio.play_block_place(block_type);
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    if let Some(placement_pos) = camera.get_block_placement_position(&world, 5.0) {
+                                                        let (x, y, z) = placement_pos;
+                                                        if world.place_block(x, y, z, block_type) {
+                                                            inventory.decrement_selected();
+                                                            if let Some(ref audio) = audio_manager {
+                                                                audio.play_block_place(block_type);
+                                                            }
                                                         }
                                                     }
                                                 }
+                                            }
+                                        } else if let Some((x, y, z)) = targeted_block {
+                                            // No item selected but targeting a chest - open it
+                                            if world.get_block(x, y, z) == Some(world::BlockType::Chest) {
+                                                chest_ui.open_chest((x, y, z));
+                                                mouse_captured = false;
+                                                set_cursor_captured(&window, false);
                                             }
                                         }
                                     },
@@ -269,29 +281,89 @@ fn main() {
                                         inventory.add_block(world::BlockType::Chest);
                                     },
                                     VirtualKeyCode::R => {
-                                        if let Some((x, y, z)) = targeted_block {
-                                            // Get block type for particles before damaging
-                                            let block_type = world.get_block(x, y, z);
-                                            if let Some(broken_type) = world.damage_block(x, y, z) {
-                                                // Block was fully destroyed - spawn more particles
-                                                let block_center = cgmath::Point3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
-                                                particle_system.spawn_block_break(block_center, broken_type);
-                                                // Spawn dropped item instead of directly adding to inventory
-                                                entity_manager.spawn_dropped_item(block_center, broken_type);
-                                                if let Some(ref audio) = audio_manager {
-                                                    audio.play_block_break(broken_type);
-                                                }
-                                            } else if let Some(bt) = block_type {
-                                                // Block was just damaged - spawn fewer particles
-                                                particle_system.spawn_block_break(
-                                                    cgmath::Point3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
-                                                    bt
-                                                );
-                                                if let Some(ref audio) = audio_manager {
-                                                    audio.play_block_break(bt);
+                                        // Respawn if dead
+                                        if camera.is_dead {
+                                            // Drop inventory at death location before respawn
+                                            let death_pos = camera.position;
+                                            for slot in inventory.slots.iter_mut() {
+                                                if let Some((block_type, qty)) = slot.take() {
+                                                    for _ in 0..qty {
+                                                        entity_manager.spawn_dropped_item(death_pos, block_type);
+                                                    }
                                                 }
                                             }
-                                            renderer.start_arm_swing();
+                                            camera.respawn();
+                                        } else {
+                                            // Try to attack a hostile mob first (within 4 blocks)
+                                            let mut attacked_something = false;
+                                            if let Some((mob_id, _dist)) = entity_manager.get_closest_hostile_mob(camera.position, 4.0) {
+                                                let damage = 1.0; // Fist damage
+                                                // Calculate knockback direction from player to mob
+                                                if let Some(mob) = entity_manager.get_hostile_mobs().iter().find(|m| m.id == mob_id) {
+                                                    let kb_dir = cgmath::Vector3::new(
+                                                        (mob.position.x - camera.position.x).signum() * 6.0,
+                                                        3.0,
+                                                        (mob.position.z - camera.position.z).signum() * 6.0,
+                                                    );
+                                                    entity_manager.damage_hostile_mob(mob_id, damage, Some(kb_dir));
+                                                }
+                                                renderer.start_arm_swing();
+                                                camera.deplete_hunger(HungerAction::Attack);
+                                                attacked_something = true;
+                                            }
+
+                                            // Try to attack animals if no hostile mob nearby
+                                            if !attacked_something {
+                                                if let Some((animal_id, _dist)) = entity_manager.get_closest_animal(camera.position, 4.0) {
+                                                    let damage = 1.0; // Fist damage
+                                                    // Calculate knockback direction from player to animal
+                                                    if let Some(animal) = entity_manager.get_animals().iter().find(|a| a.id == animal_id) {
+                                                        let kb_dir = cgmath::Vector3::new(
+                                                            (animal.position.x - camera.position.x).signum() * 6.0,
+                                                            3.0,
+                                                            (animal.position.z - camera.position.z).signum() * 6.0,
+                                                        );
+                                                        // Damage animal and get meat drops if it died
+                                                        if let Some((death_pos, meat_type, qty)) = entity_manager.damage_animal(animal_id, damage, Some(kb_dir)) {
+                                                            // Spawn meat drops
+                                                            for _ in 0..qty {
+                                                                entity_manager.spawn_dropped_item(death_pos, meat_type);
+                                                            }
+                                                        }
+                                                    }
+                                                    renderer.start_arm_swing();
+                                                    camera.deplete_hunger(HungerAction::Attack);
+                                                    attacked_something = true;
+                                                }
+                                            }
+
+                                            // If nothing attacked, try breaking a block
+                                            if !attacked_something {
+                                                if let Some((x, y, z)) = targeted_block {
+                                                    // Get block type for particles before damaging
+                                                    let block_type = world.get_block(x, y, z);
+                                                    if let Some(broken_type) = world.damage_block(x, y, z) {
+                                                        // Block was fully destroyed - spawn more particles
+                                                        let block_center = cgmath::Point3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
+                                                        particle_system.spawn_block_break(block_center, broken_type);
+                                                        // Spawn dropped item instead of directly adding to inventory
+                                                        entity_manager.spawn_dropped_item(block_center, broken_type);
+                                                        if let Some(ref audio) = audio_manager {
+                                                            audio.play_block_break(broken_type);
+                                                        }
+                                                    } else if let Some(bt) = block_type {
+                                                        // Block was just damaged - spawn fewer particles
+                                                        particle_system.spawn_block_break(
+                                                            cgmath::Point3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
+                                                            bt
+                                                        );
+                                                        if let Some(ref audio) = audio_manager {
+                                                            audio.play_block_break(bt);
+                                                        }
+                                                    }
+                                                    renderer.start_arm_swing();
+                                                }
+                                            }
                                         }
                                     },
                                     _ => {}
@@ -322,7 +394,15 @@ fn main() {
                     // Process water flow updates (limit per frame for performance)
                     world.process_water_updates(50);
                     camera.update(dt, &world);
+                    camera.update_survival(dt, &world);
                     entity_manager.update(dt, &world, camera.position);
+
+                    // Check for hostile mob attacks on player
+                    if !camera.is_dead {
+                        for (damage, knockback) in entity_manager.check_hostile_attacks(camera.position) {
+                            camera.take_damage(damage, Some(knockback));
+                        }
+                    }
 
                     // Collect nearby dropped items
                     for block_type in entity_manager.collect_nearby_items(camera.position) {

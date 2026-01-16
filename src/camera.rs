@@ -10,6 +10,14 @@ const JUMP_VELOCITY: f32 = 10.0;
 const TERMINAL_VELOCITY: f32 = 50.0;  // Max fall speed
 const MAX_PHYSICS_DT: f32 = 0.016;    // Cap physics step to ~60fps equivalent
 
+#[derive(Clone, Copy)]
+pub enum HungerAction {
+    Walk,
+    Jump,
+    Sprint,
+    Attack,
+}
+
 pub struct Camera {
     pub position: Point3<f32>,
     pub yaw: f32,
@@ -40,6 +48,21 @@ pub struct Camera {
     just_jumped: bool,
     just_landed: bool,
     just_entered_water: bool,
+
+    // Survival stats
+    pub health: f32,           // 0.0-20.0 (10 hearts)
+    pub max_health: f32,       // 20.0
+    pub hunger: f32,           // 0.0-20.0 (10 drumsticks)
+    pub saturation: f32,       // Hidden hunger buffer
+    pub damage_cooldown: f32,  // Invincibility frames after damage
+    pub is_dead: bool,         // Death state
+    pub air_supply: f32,       // 0.0-10.0 (10 bubbles, 15 seconds)
+    pub fall_distance: f32,    // Track fall for damage calculation
+    starvation_timer: f32,     // Timer for starvation damage
+    regen_timer: f32,          // Timer for health regeneration
+    pub spawn_point: Point3<f32>, // Respawn location
+    pub damage_flash: f32,     // Visual feedback timer for damage
+    pub pending_knockback: Option<Vector3<f32>>, // Knockback to apply
 }
 
 impl Camera {
@@ -74,6 +97,21 @@ impl Camera {
             just_jumped: false,
             just_landed: false,
             just_entered_water: false,
+
+            // Survival stats
+            health: 20.0,
+            max_health: 20.0,
+            hunger: 20.0,
+            saturation: 5.0,
+            damage_cooldown: 0.0,
+            is_dead: false,
+            air_supply: 10.0,
+            fall_distance: 0.0,
+            starvation_timer: 0.0,
+            regen_timer: 0.0,
+            spawn_point: Point3::new(0.5, 50.0, 0.5),
+            damage_flash: 0.0,
+            pending_knockback: None,
         };
         camera.update_view_proj();
         camera
@@ -81,6 +119,7 @@ impl Camera {
     
     pub fn set_spawn_position(&mut self, position: Point3<f32>) {
         self.position = position;
+        self.spawn_point = position;
         self.velocity = Vector3::new(0.0, 0.0, 0.0);
         self.on_ground = true;
         self.spawn_locked = true;
@@ -134,6 +173,197 @@ impl Camera {
 
     pub fn check_water_enter_event(&mut self) -> bool {
         std::mem::take(&mut self.just_entered_water)
+    }
+
+    // Survival methods
+    pub fn take_damage(&mut self, amount: f32, knockback: Option<Vector3<f32>>) -> bool {
+        if self.is_dead || self.damage_cooldown > 0.0 {
+            return false;
+        }
+
+        self.health = (self.health - amount).max(0.0);
+        self.damage_cooldown = 0.5; // 0.5 seconds invincibility
+        self.damage_flash = 0.3;    // Visual feedback duration
+
+        // Apply knockback
+        if let Some(kb) = knockback {
+            self.pending_knockback = Some(kb);
+        }
+
+        // Hunger cost for taking damage
+        self.hunger = (self.hunger - amount * 0.1).max(0.0);
+
+        if self.health <= 0.0 {
+            self.is_dead = true;
+        }
+
+        true
+    }
+
+    pub fn heal(&mut self, amount: f32) {
+        if self.is_dead {
+            return;
+        }
+        self.health = (self.health + amount).min(self.max_health);
+    }
+
+    pub fn eat_food(&mut self, hunger_restore: f32, saturation_restore: f32) -> bool {
+        if self.is_dead || self.hunger >= 20.0 {
+            return false;
+        }
+
+        self.hunger = (self.hunger + hunger_restore).min(20.0);
+        self.saturation = (self.saturation + saturation_restore).min(self.hunger);
+        true
+    }
+
+    pub fn is_invulnerable(&self) -> bool {
+        self.damage_cooldown > 0.0 || self.is_dead
+    }
+
+    pub fn respawn(&mut self) {
+        self.position = self.spawn_point;
+        self.velocity = Vector3::new(0.0, 0.0, 0.0);
+        self.health = self.max_health;
+        self.hunger = 20.0;
+        self.saturation = 5.0;
+        self.air_supply = 10.0;
+        self.is_dead = false;
+        self.damage_cooldown = 0.0;
+        self.damage_flash = 0.0;
+        self.fall_distance = 0.0;
+        self.starvation_timer = 0.0;
+        self.regen_timer = 0.0;
+        self.on_ground = true;
+        self.pending_knockback = None;
+        self.update_view_proj();
+    }
+
+    pub fn check_damage_flash(&mut self) -> bool {
+        self.damage_flash > 0.0
+    }
+
+    pub fn is_in_lava(&self, world: &World) -> bool {
+        let check_ys = [
+            self.position.y - PLAYER_HEIGHT,
+            self.position.y - PLAYER_HEIGHT / 2.0,
+            self.position.y,
+        ];
+        let check_offsets = [-0.3, 0.0, 0.3];
+
+        for &check_y in &check_ys {
+            let block_y = check_y.floor() as i32;
+            for &dx in &check_offsets {
+                for &dz in &check_offsets {
+                    let check_x = (self.position.x + dx).floor() as i32;
+                    let check_z = (self.position.z + dz).floor() as i32;
+                    if let Some(block) = world.get_block(check_x, block_y, check_z) {
+                        if block == BlockType::Lava {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    pub fn update_survival(&mut self, dt: f32, world: &World) {
+        if self.is_dead {
+            return;
+        }
+
+        // Update damage cooldown
+        if self.damage_cooldown > 0.0 {
+            self.damage_cooldown = (self.damage_cooldown - dt).max(0.0);
+        }
+
+        // Update damage flash
+        if self.damage_flash > 0.0 {
+            self.damage_flash = (self.damage_flash - dt).max(0.0);
+        }
+
+        // Apply pending knockback
+        if let Some(kb) = self.pending_knockback.take() {
+            self.velocity.x += kb.x;
+            self.velocity.y += kb.y.max(4.0); // Minimum upward knockback
+            self.velocity.z += kb.z;
+        }
+
+        // Lava damage (4 damage per second)
+        if self.is_in_lava(world) {
+            self.take_damage(4.0 * dt, None);
+        }
+
+        // Drowning - update air supply
+        if self.is_underwater(world) {
+            self.air_supply -= dt / 1.5; // Lose 1 bubble per 1.5 seconds
+            if self.air_supply <= 0.0 {
+                self.air_supply = 0.0;
+                self.take_damage(2.0 * dt, None); // Drowning damage
+            }
+        } else {
+            self.air_supply = 10.0; // Refill instantly when above water
+        }
+
+        // Hunger system
+        self.update_hunger(dt);
+    }
+
+    fn update_hunger(&mut self, dt: f32) {
+        // Natural depletion (very slow - about 1 hunger per 5 minutes)
+        if self.saturation > 0.0 {
+            self.saturation = (self.saturation - 0.001 * dt).max(0.0);
+        } else {
+            self.hunger = (self.hunger - 0.001 * dt).max(0.0);
+        }
+
+        // Starvation damage when hunger is 0
+        if self.hunger <= 0.0 {
+            self.starvation_timer += dt;
+            if self.starvation_timer >= 4.0 {
+                self.take_damage(1.0, None);
+                self.starvation_timer = 0.0;
+            }
+        } else {
+            self.starvation_timer = 0.0;
+        }
+
+        // Health regeneration when well-fed (hunger >= 18)
+        if self.hunger >= 18.0 && self.health < self.max_health {
+            self.regen_timer += dt;
+            if self.regen_timer >= 0.5 {
+                self.heal(1.0);
+                // Costs hunger to regenerate
+                if self.saturation > 0.0 {
+                    self.saturation = (self.saturation - 1.5).max(0.0);
+                } else {
+                    self.hunger = (self.hunger - 1.5).max(0.0);
+                }
+                self.regen_timer = 0.0;
+            }
+        } else {
+            self.regen_timer = 0.0;
+        }
+    }
+
+    pub fn can_sprint(&self) -> bool {
+        self.hunger >= 6.0 // Need at least 3 drumsticks to sprint
+    }
+
+    pub fn deplete_hunger(&mut self, action: HungerAction) {
+        let cost = match action {
+            HungerAction::Walk => 0.01,
+            HungerAction::Jump => 0.05,
+            HungerAction::Sprint => 0.03,
+            HungerAction::Attack => 0.1,
+        };
+
+        if self.saturation > 0.0 {
+            self.saturation = (self.saturation - cost).max(0.0);
+        } else {
+            self.hunger = (self.hunger - cost).max(0.0);
+        }
     }
 
     pub fn is_underwater(&self, world: &World) -> bool {
@@ -395,9 +625,16 @@ impl Camera {
 
         // Track sound events
 
+        // Fall damage tracking
+        if !self.on_ground && !is_in_water && self.velocity.y < 0.0 {
+            // Track fall distance while falling
+            self.fall_distance += (-self.velocity.y * dt);
+        }
+
         // Water entry detection
         if is_in_water && !self.was_in_water {
             self.just_entered_water = true;
+            self.fall_distance = 0.0; // Water cancels fall damage
         }
         self.was_in_water = is_in_water;
 
@@ -406,9 +643,16 @@ impl Camera {
             self.just_jumped = true;
         }
 
-        // Landing detection
+        // Landing detection and fall damage
         if self.on_ground && !self.was_on_ground && !is_in_water {
             self.just_landed = true;
+
+            // Apply fall damage if fell more than 3 blocks
+            if self.fall_distance > 3.0 {
+                let damage = (self.fall_distance - 3.0).floor();
+                self.take_damage(damage, None);
+            }
+            self.fall_distance = 0.0;
         }
         self.was_on_ground = self.on_ground;
 

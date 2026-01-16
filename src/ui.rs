@@ -414,6 +414,11 @@ impl UIRenderer {
             BlockType::Fence => 45.0,
             BlockType::Brick => 46.0,
             BlockType::MossyCobblestone => 47.0,
+            // Food items
+            BlockType::RawPork => 49.0,
+            BlockType::RawBeef => 50.0,
+            BlockType::RawChicken => 51.0,
+            BlockType::RawMutton => 52.0,
             BlockType::Air | BlockType::Barrier => 0.0,
         }
     }
@@ -1422,6 +1427,320 @@ impl UIRenderer {
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Chest UI Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            render_pass.set_pipeline(&self.ui_render_pipeline);
+            render_pass.set_bind_group(0, texture_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+        }
+
+        queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Render survival UI (health hearts, hunger drumsticks, air bubbles)
+    pub fn render_survival_ui(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        texture_bind_group: &wgpu::BindGroup,
+        health: f32,
+        max_health: f32,
+        hunger: f32,
+        air_supply: f32,
+        is_underwater: bool,
+        damage_flash: bool,
+    ) {
+        let mut vertices: Vec<UIVertex> = Vec::new();
+        let mut indices: Vec<u16> = Vec::new();
+
+        // Layout constants - position above hotbar
+        let bar_y = -0.82;
+        let icon_size = 0.018;
+        let icon_spacing = 0.038;
+        let num_icons = 10;
+
+        // Calculate positions relative to center
+        let health_start_x = -0.36;  // Left side
+        let hunger_start_x = 0.02;   // Right side
+
+        // Health bar (10 hearts, 2 HP each)
+        let full_hearts = (health / 2.0).floor() as i32;
+        let half_heart = (health % 2.0) >= 1.0;
+        let health_ratio = health / max_health;
+
+        // Flash effect when low health or taking damage
+        let flash = damage_flash || (health <= 4.0 && ((std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() / 250) % 2 == 0));
+
+        for i in 0..num_icons {
+            let x = health_start_x + i as f32 * icon_spacing;
+
+            // Heart outline (dark red background)
+            let outline_color = if flash && health <= 4.0 {
+                [0.4, 0.1, 0.1, 1.0]
+            } else {
+                [0.3, 0.1, 0.1, 1.0]
+            };
+            let base = vertices.len() as u16;
+            vertices.extend_from_slice(&[
+                UIVertex { position: [x - icon_size, bar_y - icon_size], tex_coords: [0.0, 0.0], color: outline_color, use_texture: 0.0 },
+                UIVertex { position: [x + icon_size, bar_y - icon_size], tex_coords: [0.0, 0.0], color: outline_color, use_texture: 0.0 },
+                UIVertex { position: [x + icon_size, bar_y + icon_size], tex_coords: [0.0, 0.0], color: outline_color, use_texture: 0.0 },
+                UIVertex { position: [x - icon_size, bar_y + icon_size], tex_coords: [0.0, 0.0], color: outline_color, use_texture: 0.0 },
+            ]);
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+            // Filled heart
+            if i < full_hearts {
+                let fill_color = if flash { [1.0, 0.3, 0.3, 1.0] } else { [0.9, 0.15, 0.15, 1.0] };
+                let inner_size = icon_size * 0.75;
+                let base = vertices.len() as u16;
+                vertices.extend_from_slice(&[
+                    UIVertex { position: [x - inner_size, bar_y - inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                    UIVertex { position: [x + inner_size, bar_y - inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                    UIVertex { position: [x + inner_size, bar_y + inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                    UIVertex { position: [x - inner_size, bar_y + inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                ]);
+                indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            } else if i == full_hearts && half_heart {
+                // Half heart (left half filled)
+                let fill_color = if flash { [1.0, 0.3, 0.3, 1.0] } else { [0.9, 0.15, 0.15, 1.0] };
+                let inner_size = icon_size * 0.75;
+                let base = vertices.len() as u16;
+                vertices.extend_from_slice(&[
+                    UIVertex { position: [x - inner_size, bar_y - inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                    UIVertex { position: [x, bar_y - inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                    UIVertex { position: [x, bar_y + inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                    UIVertex { position: [x - inner_size, bar_y + inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                ]);
+                indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            }
+        }
+
+        // Hunger bar (10 drumsticks, 2 hunger each)
+        let full_drumsticks = (hunger / 2.0).floor() as i32;
+        let half_drumstick = (hunger % 2.0) >= 1.0;
+        let hunger_low = hunger <= 6.0;
+
+        for i in 0..num_icons {
+            let x = hunger_start_x + i as f32 * icon_spacing;
+
+            // Drumstick outline (dark brown background)
+            let outline_color = if hunger_low {
+                [0.25, 0.15, 0.08, 1.0]
+            } else {
+                [0.2, 0.12, 0.05, 1.0]
+            };
+            let base = vertices.len() as u16;
+            vertices.extend_from_slice(&[
+                UIVertex { position: [x - icon_size, bar_y - icon_size], tex_coords: [0.0, 0.0], color: outline_color, use_texture: 0.0 },
+                UIVertex { position: [x + icon_size, bar_y - icon_size], tex_coords: [0.0, 0.0], color: outline_color, use_texture: 0.0 },
+                UIVertex { position: [x + icon_size, bar_y + icon_size], tex_coords: [0.0, 0.0], color: outline_color, use_texture: 0.0 },
+                UIVertex { position: [x - icon_size, bar_y + icon_size], tex_coords: [0.0, 0.0], color: outline_color, use_texture: 0.0 },
+            ]);
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+            // Filled drumstick (brown/orange)
+            if i < full_drumsticks {
+                let fill_color = [0.75, 0.5, 0.2, 1.0];
+                let inner_size = icon_size * 0.75;
+                let base = vertices.len() as u16;
+                vertices.extend_from_slice(&[
+                    UIVertex { position: [x - inner_size, bar_y - inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                    UIVertex { position: [x + inner_size, bar_y - inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                    UIVertex { position: [x + inner_size, bar_y + inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                    UIVertex { position: [x - inner_size, bar_y + inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                ]);
+                indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            } else if i == full_drumsticks && half_drumstick {
+                // Half drumstick
+                let fill_color = [0.75, 0.5, 0.2, 1.0];
+                let inner_size = icon_size * 0.75;
+                let base = vertices.len() as u16;
+                vertices.extend_from_slice(&[
+                    UIVertex { position: [x - inner_size, bar_y - inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                    UIVertex { position: [x, bar_y - inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                    UIVertex { position: [x, bar_y + inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                    UIVertex { position: [x - inner_size, bar_y + inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                ]);
+                indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            }
+        }
+
+        // Air bubbles (only when underwater)
+        if is_underwater {
+            let bubble_y = bar_y + 0.05; // Above hunger bar
+            let full_bubbles = air_supply.floor() as i32;
+            let partial_bubble = air_supply - air_supply.floor();
+
+            for i in 0..num_icons {
+                let x = hunger_start_x + i as f32 * icon_spacing;
+
+                // Bubble outline
+                let outline_color = [0.2, 0.3, 0.5, 0.8];
+                let base = vertices.len() as u16;
+                vertices.extend_from_slice(&[
+                    UIVertex { position: [x - icon_size, bubble_y - icon_size], tex_coords: [0.0, 0.0], color: outline_color, use_texture: 0.0 },
+                    UIVertex { position: [x + icon_size, bubble_y - icon_size], tex_coords: [0.0, 0.0], color: outline_color, use_texture: 0.0 },
+                    UIVertex { position: [x + icon_size, bubble_y + icon_size], tex_coords: [0.0, 0.0], color: outline_color, use_texture: 0.0 },
+                    UIVertex { position: [x - icon_size, bubble_y + icon_size], tex_coords: [0.0, 0.0], color: outline_color, use_texture: 0.0 },
+                ]);
+                indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+                // Filled bubble (blue)
+                if i < full_bubbles {
+                    let fill_color = [0.4, 0.7, 1.0, 0.9];
+                    let inner_size = icon_size * 0.7;
+                    let base = vertices.len() as u16;
+                    vertices.extend_from_slice(&[
+                        UIVertex { position: [x - inner_size, bubble_y - inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                        UIVertex { position: [x + inner_size, bubble_y - inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                        UIVertex { position: [x + inner_size, bubble_y + inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                        UIVertex { position: [x - inner_size, bubble_y + inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                    ]);
+                    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                } else if i == full_bubbles && partial_bubble > 0.0 {
+                    // Partial bubble (fading)
+                    let fill_color = [0.4, 0.7, 1.0, partial_bubble * 0.9];
+                    let inner_size = icon_size * 0.7;
+                    let base = vertices.len() as u16;
+                    vertices.extend_from_slice(&[
+                        UIVertex { position: [x - inner_size, bubble_y - inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                        UIVertex { position: [x + inner_size, bubble_y - inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                        UIVertex { position: [x + inner_size, bubble_y + inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                        UIVertex { position: [x - inner_size, bubble_y + inner_size], tex_coords: [0.0, 0.0], color: fill_color, use_texture: 0.0 },
+                    ]);
+                    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                }
+            }
+        }
+
+        // Damage flash overlay (red tint)
+        if damage_flash {
+            let flash_color = [1.0, 0.0, 0.0, 0.3];
+            let base = vertices.len() as u16;
+            vertices.extend_from_slice(&[
+                UIVertex { position: [-1.0, -1.0], tex_coords: [0.0, 0.0], color: flash_color, use_texture: 0.0 },
+                UIVertex { position: [1.0, -1.0], tex_coords: [0.0, 0.0], color: flash_color, use_texture: 0.0 },
+                UIVertex { position: [1.0, 1.0], tex_coords: [0.0, 0.0], color: flash_color, use_texture: 0.0 },
+                UIVertex { position: [-1.0, 1.0], tex_coords: [0.0, 0.0], color: flash_color, use_texture: 0.0 },
+            ]);
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+
+        if vertices.is_empty() {
+            return;
+        }
+
+        // Create buffers and render
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Survival UI Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Survival UI Index Buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Survival UI Encoder"),
+        });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Survival UI Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            render_pass.set_pipeline(&self.ui_render_pipeline);
+            render_pass.set_bind_group(0, texture_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+        }
+
+        queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Render death screen overlay
+    pub fn render_death_screen(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        texture_bind_group: &wgpu::BindGroup,
+    ) {
+        let mut vertices: Vec<UIVertex> = Vec::new();
+        let mut indices: Vec<u16> = Vec::new();
+
+        // Full screen dark red overlay
+        let overlay_color = [0.4, 0.0, 0.0, 0.7];
+        let base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [-1.0, -1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [1.0, -1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [1.0, 1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [-1.0, 1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+        // "You Died!" text
+        let (title_verts, title_inds) = Self::generate_centered_text(
+            "You Died!", 0.0, 0.15, 0.1, [1.0, 0.3, 0.3, 1.0], vertices.len() as u16
+        );
+        vertices.extend(title_verts);
+        indices.extend(title_inds);
+
+        // "Press R to Respawn" instruction
+        let (inst_verts, inst_inds) = Self::generate_centered_text(
+            "Press R to Respawn", 0.0, -0.05, 0.04, [1.0, 1.0, 1.0, 1.0], vertices.len() as u16
+        );
+        vertices.extend(inst_verts);
+        indices.extend(inst_inds);
+
+        // Create buffers and render
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Death Screen Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Death Screen Index Buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Death Screen Encoder"),
+        });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Death Screen Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,
                     resolve_target: None,

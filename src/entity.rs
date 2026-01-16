@@ -457,6 +457,37 @@ impl AnimalType {
             AnimalType::Dolphin => 4,
         }
     }
+
+    /// Base health for this animal type
+    pub fn base_health(&self) -> f32 {
+        match self {
+            AnimalType::Pig => 10.0,
+            AnimalType::Cow => 10.0,
+            AnimalType::Sheep => 8.0,
+            AnimalType::Chicken => 4.0,
+            AnimalType::Rabbit => 3.0,
+            AnimalType::Horse => 15.0,
+            AnimalType::Wolf => 8.0,
+            AnimalType::Fox => 8.0,
+            AnimalType::Fish => 3.0,
+            AnimalType::Squid => 10.0,
+            AnimalType::Dolphin => 10.0,
+            AnimalType::Bee => 1.0,
+            AnimalType::Parrot => 4.0,
+            AnimalType::Bat => 3.0,
+        }
+    }
+
+    /// Returns the meat drop type and quantity range for this animal
+    pub fn meat_drop(&self) -> Option<(BlockType, u32, u32)> {
+        match self {
+            AnimalType::Pig => Some((BlockType::RawPork, 1, 3)),
+            AnimalType::Cow => Some((BlockType::RawBeef, 1, 3)),
+            AnimalType::Sheep => Some((BlockType::RawMutton, 1, 2)),
+            AnimalType::Chicken => Some((BlockType::RawChicken, 1, 1)),
+            _ => None, // Other animals don't drop meat
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -480,6 +511,9 @@ pub struct Animal {
     pub state_timer: f32,
     pub animation_time: f32,
     pub on_ground: bool,
+    pub health: f32,
+    pub max_health: f32,
+    pub damage_flash: f32,
 }
 
 impl Animal {
@@ -491,6 +525,7 @@ impl Animal {
             MovementType::Aquatic => (AnimalState::Swimming, Vector3::new(0.0, 0.0, 0.0)),
             MovementType::Flying => (AnimalState::Hovering, Vector3::new(0.0, 0.0, 0.0)),
         };
+        let health = animal_type.base_health();
         Self {
             id,
             animal_type,
@@ -501,12 +536,42 @@ impl Animal {
             state_timer: rng.gen_range(1.0..3.0),
             animation_time: 0.0,
             on_ground: false,
+            health,
+            max_health: health,
+            damage_flash: 0.0,
         }
     }
 
     pub fn update(&mut self, dt: f32, world: &World) {
         self.animation_time += dt;
+        if self.damage_flash > 0.0 {
+            self.damage_flash = (self.damage_flash - dt).max(0.0);
+        }
         self.update_physics(dt, world);
+    }
+
+    /// Take damage and return true if still alive
+    pub fn take_damage(&mut self, amount: f32, knockback: Option<Vector3<f32>>) -> bool {
+        self.health = (self.health - amount).max(0.0);
+        self.damage_flash = 0.2;
+
+        if let Some(kb) = knockback {
+            self.velocity.x += kb.x;
+            self.velocity.y += kb.y.max(4.0);
+            self.velocity.z += kb.z;
+        }
+
+        // Start fleeing when damaged
+        if self.health > 0.0 && self.animal_type.movement_type() == MovementType::Ground {
+            self.state = AnimalState::Running;
+            self.state_timer = 3.0;
+        }
+
+        self.health > 0.0
+    }
+
+    pub fn is_dead(&self) -> bool {
+        self.health <= 0.0
     }
 
     fn update_physics(&mut self, dt: f32, world: &World) {
@@ -965,6 +1030,361 @@ impl Animal {
     }
 }
 
+// Hostile mob constants
+pub const ZOMBIE_HEIGHT: f32 = 1.9;
+pub const ZOMBIE_WIDTH: f32 = 0.6;
+pub const ZOMBIE_SPEED: f32 = 2.3;
+pub const ZOMBIE_DETECTION_RANGE: f32 = 40.0;
+pub const ZOMBIE_ATTACK_RANGE: f32 = 2.0;
+pub const ZOMBIE_DAMAGE: f32 = 3.0;
+pub const ZOMBIE_HEALTH: f32 = 20.0;
+pub const MAX_HOSTILE_MOBS: usize = 30;
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum HostileMobType {
+    Zombie,
+}
+
+impl HostileMobType {
+    pub fn health(&self) -> f32 {
+        match self {
+            HostileMobType::Zombie => ZOMBIE_HEALTH,
+        }
+    }
+
+    pub fn damage(&self) -> f32 {
+        match self {
+            HostileMobType::Zombie => ZOMBIE_DAMAGE,
+        }
+    }
+
+    pub fn speed(&self) -> f32 {
+        match self {
+            HostileMobType::Zombie => ZOMBIE_SPEED,
+        }
+    }
+
+    pub fn detection_range(&self) -> f32 {
+        match self {
+            HostileMobType::Zombie => ZOMBIE_DETECTION_RANGE,
+        }
+    }
+
+    pub fn attack_range(&self) -> f32 {
+        match self {
+            HostileMobType::Zombie => ZOMBIE_ATTACK_RANGE,
+        }
+    }
+
+    pub fn dimensions(&self) -> (f32, f32) {
+        match self {
+            HostileMobType::Zombie => (ZOMBIE_WIDTH, ZOMBIE_HEIGHT),
+        }
+    }
+
+    /// Color index for rendering
+    pub fn color_index(&self) -> f32 {
+        match self {
+            HostileMobType::Zombie => 48.0, // New texture index for zombies
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum HostileMobState {
+    Idle,
+    Wandering,
+    Chasing,
+    Attacking,
+}
+
+pub struct HostileMob {
+    pub id: u32,
+    pub mob_type: HostileMobType,
+    pub position: Point3<f32>,
+    pub velocity: Vector3<f32>,
+    pub yaw: f32,
+    pub state: HostileMobState,
+    pub health: f32,
+    pub max_health: f32,
+    pub attack_cooldown: f32,
+    pub damage_flash: f32,
+    pub animation_time: f32,
+    pub on_ground: bool,
+    state_timer: f32,
+}
+
+impl HostileMob {
+    pub fn new(id: u32, mob_type: HostileMobType, position: Point3<f32>) -> Self {
+        let mut rng = rand::thread_rng();
+        Self {
+            id,
+            mob_type,
+            position,
+            velocity: Vector3::new(0.0, 0.0, 0.0),
+            yaw: rng.gen_range(0.0..360.0),
+            state: HostileMobState::Idle,
+            health: mob_type.health(),
+            max_health: mob_type.health(),
+            attack_cooldown: 0.0,
+            damage_flash: 0.0,
+            animation_time: 0.0,
+            on_ground: false,
+            state_timer: rng.gen_range(1.0..3.0),
+        }
+    }
+
+    pub fn update(&mut self, dt: f32, world: &World) {
+        self.animation_time += dt;
+
+        // Update cooldowns
+        if self.attack_cooldown > 0.0 {
+            self.attack_cooldown = (self.attack_cooldown - dt).max(0.0);
+        }
+        if self.damage_flash > 0.0 {
+            self.damage_flash = (self.damage_flash - dt).max(0.0);
+        }
+
+        self.update_physics(dt, world);
+    }
+
+    fn update_physics(&mut self, dt: f32, world: &World) {
+        let (width, height) = self.mob_type.dimensions();
+        let half_width = width / 2.0;
+
+        // Apply gravity
+        self.velocity.y -= GRAVITY * dt;
+        self.velocity.y = self.velocity.y.max(-TERMINAL_VELOCITY).min(TERMINAL_VELOCITY);
+
+        // Apply horizontal movement based on state
+        if self.state == HostileMobState::Wandering || self.state == HostileMobState::Chasing {
+            let speed = if self.state == HostileMobState::Chasing {
+                self.mob_type.speed()
+            } else {
+                self.mob_type.speed() * 0.4 // Slower when wandering
+            };
+            let yaw_rad = self.yaw.to_radians();
+            self.velocity.x = -yaw_rad.sin() * speed;
+            self.velocity.z = -yaw_rad.cos() * speed;
+        } else {
+            self.velocity.x *= 0.8;
+            self.velocity.z *= 0.8;
+        }
+
+        // X-axis collision
+        let new_x = self.position.x + self.velocity.x * dt;
+        let mut can_move_x = true;
+        for dy in 0..2 {
+            let check_y = (self.position.y - height + 0.1 + dy as f32).floor() as i32;
+            for dz in [-1.0, 0.0, 1.0] {
+                let check_z = (self.position.z + dz * half_width).floor() as i32;
+                let check_x = if self.velocity.x > 0.0 {
+                    (new_x + half_width).floor() as i32
+                } else {
+                    (new_x - half_width).floor() as i32
+                };
+                if let Some(block) = world.get_block(check_x, check_y, check_z) {
+                    if block != BlockType::Air && block != BlockType::Water {
+                        can_move_x = false;
+                        break;
+                    }
+                }
+            }
+            if !can_move_x { break; }
+        }
+        if can_move_x {
+            self.position.x = new_x;
+        } else {
+            self.velocity.x = 0.0;
+        }
+
+        // Z-axis collision
+        let new_z = self.position.z + self.velocity.z * dt;
+        let mut can_move_z = true;
+        for dy in 0..2 {
+            let check_y = (self.position.y - height + 0.1 + dy as f32).floor() as i32;
+            for dx in [-1.0, 0.0, 1.0] {
+                let check_x = (self.position.x + dx * half_width).floor() as i32;
+                let check_z = if self.velocity.z > 0.0 {
+                    (new_z + half_width).floor() as i32
+                } else {
+                    (new_z - half_width).floor() as i32
+                };
+                if let Some(block) = world.get_block(check_x, check_y, check_z) {
+                    if block != BlockType::Air && block != BlockType::Water {
+                        can_move_z = false;
+                        break;
+                    }
+                }
+            }
+            if !can_move_z { break; }
+        }
+        if can_move_z {
+            self.position.z = new_z;
+        } else {
+            self.velocity.z = 0.0;
+        }
+
+        // Y-axis (gravity/ground)
+        let new_y = self.position.y + self.velocity.y * dt;
+        self.on_ground = false;
+
+        if self.velocity.y <= 0.0 {
+            let feet_y = (new_y - height).floor() as i32;
+            for dx in [-1.0, 0.0, 1.0] {
+                for dz in [-1.0, 0.0, 1.0] {
+                    let check_x = (self.position.x + dx * half_width * 0.8).floor() as i32;
+                    let check_z = (self.position.z + dz * half_width * 0.8).floor() as i32;
+                    if let Some(block) = world.get_block(check_x, feet_y, check_z) {
+                        if block != BlockType::Air && block != BlockType::Water {
+                            self.position.y = (feet_y + 1) as f32 + height;
+                            self.velocity.y = 0.0;
+                            self.on_ground = true;
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        self.position.y = new_y;
+    }
+
+    pub fn update_ai(&mut self, dt: f32, world: &World, player_pos: Point3<f32>, rng: &mut impl Rng) {
+        self.state_timer -= dt;
+
+        let distance_to_player = ((self.position.x - player_pos.x).powi(2)
+            + (self.position.y - player_pos.y).powi(2)
+            + (self.position.z - player_pos.z).powi(2)).sqrt();
+
+        let detection_range = self.mob_type.detection_range();
+        let attack_range = self.mob_type.attack_range();
+
+        match self.state {
+            HostileMobState::Idle | HostileMobState::Wandering => {
+                // Check if player is in detection range
+                if distance_to_player < detection_range {
+                    self.state = HostileMobState::Chasing;
+                    self.face_player(player_pos);
+                } else if self.state == HostileMobState::Idle && self.state_timer <= 0.0 {
+                    // Start wandering
+                    if rng.gen::<f32>() < 0.5 {
+                        self.state = HostileMobState::Wandering;
+                        self.yaw = rng.gen_range(0.0..360.0);
+                        self.state_timer = rng.gen_range(3.0..6.0);
+                    } else {
+                        self.state_timer = rng.gen_range(2.0..5.0);
+                    }
+                } else if self.state == HostileMobState::Wandering {
+                    // Check for obstacles
+                    if self.is_blocked(world) || self.is_cliff_ahead(world) {
+                        self.yaw += 90.0 + rng.gen::<f32>() * 90.0;
+                        if self.yaw >= 360.0 { self.yaw -= 360.0; }
+                    }
+                    if self.state_timer <= 0.0 {
+                        self.state = HostileMobState::Idle;
+                        self.state_timer = rng.gen_range(1.0..3.0);
+                    }
+                }
+            }
+            HostileMobState::Chasing => {
+                // Update facing direction towards player
+                self.face_player(player_pos);
+
+                // Jump if blocked
+                if self.is_blocked(world) && self.on_ground {
+                    self.velocity.y = 8.0; // Jump
+                }
+
+                // Check if close enough to attack
+                if distance_to_player < attack_range {
+                    self.state = HostileMobState::Attacking;
+                } else if distance_to_player > detection_range * 1.5 {
+                    // Lost player, go back to idle
+                    self.state = HostileMobState::Idle;
+                    self.state_timer = rng.gen_range(2.0..4.0);
+                }
+            }
+            HostileMobState::Attacking => {
+                self.face_player(player_pos);
+
+                // Move back to chasing if player moved away
+                if distance_to_player > attack_range * 1.5 {
+                    self.state = HostileMobState::Chasing;
+                }
+            }
+        }
+    }
+
+    fn face_player(&mut self, player_pos: Point3<f32>) {
+        let dx = player_pos.x - self.position.x;
+        let dz = player_pos.z - self.position.z;
+        self.yaw = (-dx).atan2(-dz).to_degrees();
+    }
+
+    fn is_blocked(&self, world: &World) -> bool {
+        let (_, height) = self.mob_type.dimensions();
+        let yaw_rad = self.yaw.to_radians();
+        let check_x = (self.position.x - yaw_rad.sin() * 1.2).floor() as i32;
+        let check_y = (self.position.y - height + 0.5).floor() as i32;
+        let check_z = (self.position.z - yaw_rad.cos() * 1.2).floor() as i32;
+
+        if let Some(block) = world.get_block(check_x, check_y, check_z) {
+            if block != BlockType::Air && block != BlockType::Water {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn is_cliff_ahead(&self, world: &World) -> bool {
+        let (_, height) = self.mob_type.dimensions();
+        let yaw_rad = self.yaw.to_radians();
+        let check_x = (self.position.x - yaw_rad.sin() * 1.5).floor() as i32;
+        let check_y = (self.position.y - height - 1.0).floor() as i32;
+        let check_z = (self.position.z - yaw_rad.cos() * 1.5).floor() as i32;
+
+        if let Some(block) = world.get_block(check_x, check_y, check_z) {
+            if block == BlockType::Air {
+                if let Some(below) = world.get_block(check_x, check_y - 1, check_z) {
+                    if below == BlockType::Air {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Take damage and return true if still alive
+    pub fn take_damage(&mut self, amount: f32, knockback: Option<Vector3<f32>>) -> bool {
+        self.health = (self.health - amount).max(0.0);
+        self.damage_flash = 0.2;
+
+        if let Some(kb) = knockback {
+            self.velocity.x += kb.x;
+            self.velocity.y += kb.y.max(4.0);
+            self.velocity.z += kb.z;
+        }
+
+        self.health > 0.0
+    }
+
+    /// Check if mob can attack (attack cooldown is 0)
+    pub fn can_attack(&self) -> bool {
+        self.attack_cooldown <= 0.0 && self.state == HostileMobState::Attacking
+    }
+
+    /// Perform attack and reset cooldown
+    pub fn perform_attack(&mut self) -> f32 {
+        self.attack_cooldown = 1.0; // 1 second cooldown
+        self.mob_type.damage()
+    }
+
+    pub fn is_dead(&self) -> bool {
+        self.health <= 0.0
+    }
+}
+
 // Dropped item that can be picked up
 pub struct DroppedItem {
     pub position: Point3<f32>,
@@ -1050,11 +1470,13 @@ pub struct EntityManager {
     pub villagers: Vec<Villager>,
     pub dropped_items: Vec<DroppedItem>,
     pub animals: Vec<Animal>,
+    pub hostile_mobs: Vec<HostileMob>,
     next_id: u32,
     rng: rand::rngs::ThreadRng,
     ai_update_timer: f32,
     spawn_check_timer: f32,
     animal_spawn_timer: f32,
+    hostile_spawn_timer: f32,
 }
 
 impl EntityManager {
@@ -1063,11 +1485,13 @@ impl EntityManager {
             villagers: Vec::new(),
             dropped_items: Vec::new(),
             animals: Vec::new(),
+            hostile_mobs: Vec::new(),
             next_id: 0,
             rng: rand::thread_rng(),
             ai_update_timer: 0.0,
             spawn_check_timer: 0.0,
             animal_spawn_timer: 0.0,
+            hostile_spawn_timer: 0.0,
         }
     }
 
@@ -1169,6 +1593,30 @@ impl EntityManager {
             self.animal_spawn_timer = 3.0; // Check every 3 seconds
             self.try_spawn_animals(world, player_pos);
             self.cleanup_distant_animals(player_pos);
+        }
+
+        // Update hostile mobs
+        for mob in &mut self.hostile_mobs {
+            mob.update(dt, world);
+
+            if update_ai {
+                let dist_sq = (mob.position.x - player_pos.x).powi(2)
+                    + (mob.position.z - player_pos.z).powi(2);
+                if dist_sq < 100.0 * 100.0 {
+                    mob.update_ai(ai_dt, world, player_pos, &mut self.rng);
+                }
+            }
+        }
+
+        // Remove dead hostile mobs
+        self.hostile_mobs.retain(|mob| !mob.is_dead());
+
+        // Hostile mob spawning
+        self.hostile_spawn_timer -= dt;
+        if self.hostile_spawn_timer <= 0.0 {
+            self.hostile_spawn_timer = 5.0; // Check every 5 seconds
+            self.try_spawn_hostile_mobs(world, player_pos);
+            self.cleanup_distant_hostile_mobs(player_pos);
         }
     }
 
@@ -1577,5 +2025,218 @@ impl EntityManager {
                 + (a.position.z - player_pos.z).powi(2);
             dist_sq < 80.0 * 80.0 // Keep within 80 blocks
         });
+    }
+
+    fn try_spawn_hostile_mobs(&mut self, world: &World, player_pos: Point3<f32>) {
+        if self.hostile_mobs.len() >= MAX_HOSTILE_MOBS {
+            return;
+        }
+
+        // Only spawn when it's dark (night time) - check light level by time of day
+        // For now, use spawn distance from player as primary constraint
+
+        let player_chunk_x = (player_pos.x / 16.0).floor() as i32;
+        let player_chunk_z = (player_pos.z / 16.0).floor() as i32;
+
+        // Check chunks at medium distance (2-6 chunks from player)
+        for dx in -6..=6 {
+            for dz in -6..=6 {
+                // Skip too close to player (within 24 blocks ~ 1.5 chunks)
+                let dist = ((dx * dx + dz * dz) as f32).sqrt();
+                if dist < 1.5 || dist > 6.0 {
+                    continue;
+                }
+
+                let chunk_x = player_chunk_x + dx;
+                let chunk_z = player_chunk_z + dz;
+                let chunk_key = (chunk_x, chunk_z);
+
+                // Skip if chunk not loaded
+                if !world.chunks.contains_key(&chunk_key) {
+                    continue;
+                }
+
+                // Low spawn chance per chunk (2%)
+                if self.rng.gen::<f32>() > 0.02 {
+                    continue;
+                }
+
+                // Check if this area already has hostile mobs
+                let chunk_center = Point3::new(
+                    (chunk_x * 16 + 8) as f32,
+                    player_pos.y,
+                    (chunk_z * 16 + 8) as f32,
+                );
+                let mobs_in_area = self.hostile_mobs.iter().filter(|m| {
+                    let dist_sq = (m.position.x - chunk_center.x).powi(2)
+                        + (m.position.z - chunk_center.z).powi(2);
+                    dist_sq < 30.0 * 30.0
+                }).count();
+
+                if mobs_in_area >= 3 {
+                    continue;
+                }
+
+                // Try to find spawn position
+                let offset_x = self.rng.gen_range(-8..8);
+                let offset_z = self.rng.gen_range(-8..8);
+                let try_x = chunk_x * 16 + 8 + offset_x;
+                let try_z = chunk_z * 16 + 8 + offset_z;
+
+                if let Some(spawn_pos) = self.find_hostile_spawn_position(world, try_x, try_z) {
+                    // Check distance from player (must be at least 24 blocks)
+                    let player_dist_sq = (spawn_pos.x - player_pos.x).powi(2)
+                        + (spawn_pos.z - player_pos.z).powi(2);
+                    if player_dist_sq < 24.0 * 24.0 {
+                        continue;
+                    }
+
+                    let mob = HostileMob::new(self.next_id, HostileMobType::Zombie, spawn_pos);
+                    self.next_id += 1;
+                    self.hostile_mobs.push(mob);
+
+                    if self.hostile_mobs.len() >= MAX_HOSTILE_MOBS {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    fn find_hostile_spawn_position(&self, world: &World, world_x: i32, world_z: i32) -> Option<Point3<f32>> {
+        // Search for valid ground position
+        for y in (30..90).rev() {
+            if let Some(block) = world.get_block(world_x, y, world_z) {
+                // Can spawn on any solid block
+                if block != BlockType::Air && block != BlockType::Water && block != BlockType::Lava {
+                    let above1 = world.get_block(world_x, y + 1, world_z);
+                    let above2 = world.get_block(world_x, y + 2, world_z);
+                    let above3 = world.get_block(world_x, y + 3, world_z);
+
+                    if above1 == Some(BlockType::Air)
+                        && above2 == Some(BlockType::Air)
+                        && above3 == Some(BlockType::Air) {
+                        return Some(Point3::new(
+                            world_x as f32 + 0.5,
+                            (y + 1) as f32 + ZOMBIE_HEIGHT,
+                            world_z as f32 + 0.5,
+                        ));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn cleanup_distant_hostile_mobs(&mut self, player_pos: Point3<f32>) {
+        self.hostile_mobs.retain(|m| {
+            let dist_sq = (m.position.x - player_pos.x).powi(2)
+                + (m.position.z - player_pos.z).powi(2);
+            dist_sq < 128.0 * 128.0 // Despawn if > 128 blocks away
+        });
+    }
+
+    /// Check for hostile mob attacks on player, returns list of (damage, knockback direction)
+    pub fn check_hostile_attacks(&mut self, player_pos: Point3<f32>) -> Vec<(f32, Vector3<f32>)> {
+        let mut attacks = Vec::new();
+
+        for mob in &mut self.hostile_mobs {
+            if mob.can_attack() {
+                let distance = ((mob.position.x - player_pos.x).powi(2)
+                    + (mob.position.y - player_pos.y).powi(2)
+                    + (mob.position.z - player_pos.z).powi(2)).sqrt();
+
+                if distance < mob.mob_type.attack_range() {
+                    let damage = mob.perform_attack();
+                    let knockback_dir = Vector3::new(
+                        (player_pos.x - mob.position.x).signum() * 8.0,
+                        2.0,
+                        (player_pos.z - mob.position.z).signum() * 8.0,
+                    );
+                    attacks.push((damage, knockback_dir));
+                }
+            }
+        }
+
+        attacks
+    }
+
+    /// Damage a hostile mob by ID, returns true if mob died
+    pub fn damage_hostile_mob(&mut self, mob_id: u32, damage: f32, knockback: Option<Vector3<f32>>) -> bool {
+        if let Some(mob) = self.hostile_mobs.iter_mut().find(|m| m.id == mob_id) {
+            let survived = mob.take_damage(damage, knockback);
+            !survived // Return true if mob died
+        } else {
+            false
+        }
+    }
+
+    /// Get the closest hostile mob to a position within range, returns (mob_id, distance)
+    pub fn get_closest_hostile_mob(&self, pos: Point3<f32>, max_range: f32) -> Option<(u32, f32)> {
+        let mut closest: Option<(u32, f32)> = None;
+
+        for mob in &self.hostile_mobs {
+            let dist = ((mob.position.x - pos.x).powi(2)
+                + (mob.position.y - pos.y).powi(2)
+                + (mob.position.z - pos.z).powi(2)).sqrt();
+
+            if dist < max_range {
+                if closest.is_none() || dist < closest.unwrap().1 {
+                    closest = Some((mob.id, dist));
+                }
+            }
+        }
+
+        closest
+    }
+
+    pub fn get_hostile_mobs(&self) -> &[HostileMob] {
+        &self.hostile_mobs
+    }
+
+    /// Get the closest animal to a position within range, returns (animal_id, distance)
+    pub fn get_closest_animal(&self, pos: Point3<f32>, max_range: f32) -> Option<(u32, f32)> {
+        let mut closest: Option<(u32, f32)> = None;
+
+        for animal in &self.animals {
+            let dist = ((animal.position.x - pos.x).powi(2)
+                + (animal.position.y - pos.y).powi(2)
+                + (animal.position.z - pos.z).powi(2)).sqrt();
+
+            if dist < max_range {
+                if closest.is_none() || dist < closest.unwrap().1 {
+                    closest = Some((animal.id, dist));
+                }
+            }
+        }
+
+        closest
+    }
+
+    /// Damage an animal by ID, returns meat drops if animal died
+    pub fn damage_animal(&mut self, animal_id: u32, damage: f32, knockback: Option<Vector3<f32>>) -> Option<(Point3<f32>, BlockType, u32)> {
+        if let Some(index) = self.animals.iter().position(|a| a.id == animal_id) {
+            let survived = self.animals[index].take_damage(damage, knockback);
+            if !survived {
+                // Animal died - get meat drop before removing
+                let animal = &self.animals[index];
+                let death_pos = animal.position;
+                let meat_drop = animal.animal_type.meat_drop();
+
+                // Remove the dead animal
+                self.animals.remove(index);
+
+                // Return meat drop info
+                if let Some((meat_type, min_qty, max_qty)) = meat_drop {
+                    let qty = self.rng.gen_range(min_qty..=max_qty);
+                    return Some((death_pos, meat_type, qty));
+                }
+            }
+        }
+        None
+    }
+
+    pub fn get_animals_mut(&mut self) -> &mut [Animal] {
+        &mut self.animals
     }
 }

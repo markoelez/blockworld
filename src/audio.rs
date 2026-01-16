@@ -31,7 +31,7 @@ impl MusicManager {
                     handle,
                     music_sink: None,
                     current_track: None,
-                    music_volume: 0.7,  // Background music volume
+                    music_volume: 0.15,  // Background music volume (subtle ambient)
                     track_timer: 0.0,
                     enabled: true,
                 })
@@ -101,36 +101,47 @@ impl MusicManager {
 
     fn generate_ambient_track(track: MusicTrack) -> Vec<i16> {
         let sample_rate = 44100;
-        let duration_secs = 30.0;  // 30 second loops
+        let duration_secs = 60.0;  // 60 second loops for more variety
         let num_samples = (sample_rate as f32 * duration_secs) as usize;
         let mut samples = vec![0i16; num_samples];
 
         match track {
             MusicTrack::CalmDay => {
-                // Peaceful C major chord with slow modulation
-                // C4 (261.63), E4 (329.63), G4 (392.00)
-                let freqs = [130.81, 164.81, 196.00, 261.63];  // C3, E3, G3, C4
-                Self::add_layered_tones(&mut samples, &freqs, 0.5, 0.02, sample_rate);
+                // Soft, ethereal pad - C major 7th spread across octaves
+                // Very quiet, slowly evolving tones
+                Self::add_ambient_pad(&mut samples, &[
+                    (130.81, 0.0),   // C3
+                    (196.00, 5.0),   // G3 (offset by 5 seconds)
+                    (246.94, 12.0),  // B3 (offset by 12 seconds)
+                    (329.63, 20.0),  // E4 (offset by 20 seconds)
+                ], 0.12, sample_rate);
             }
             MusicTrack::CalmNight => {
-                // Minor key, lower frequencies
-                // A minor: A2, C3, E3
-                let freqs = [110.00, 130.81, 164.81, 220.00];  // A2, C3, E3, A3
-                Self::add_layered_tones(&mut samples, &freqs, 0.4, 0.015, sample_rate);
+                // Darker, more mysterious - A minor with added 9th
+                Self::add_ambient_pad(&mut samples, &[
+                    (110.00, 0.0),   // A2
+                    (164.81, 8.0),   // E3
+                    (220.00, 15.0),  // A3
+                    (246.94, 25.0),  // B3 (add9)
+                ], 0.10, sample_rate);
             }
             MusicTrack::Underwater => {
-                // Muffled, low frequencies with heavy filtering effect
-                let freqs = [65.41, 82.41, 98.00];  // C2, E2, G2 (very low)
-                Self::add_layered_tones(&mut samples, &freqs, 0.5, 0.025, sample_rate);
-                // Apply simple low-pass effect by averaging
-                Self::apply_lowpass(&mut samples, 0.3);
+                // Very low, muffled drone
+                Self::add_ambient_pad(&mut samples, &[
+                    (55.00, 0.0),    // A1 (very low)
+                    (82.41, 10.0),   // E2
+                    (110.00, 20.0),  // A2
+                ], 0.15, sample_rate);
+                // Heavy low-pass for muffled underwater sound
+                Self::apply_lowpass(&mut samples, 0.15);
+                Self::apply_lowpass(&mut samples, 0.15);
             }
         }
 
-        // Apply fade in/out for seamless looping
-        let fade_samples = (sample_rate as f32 * 2.0) as usize;  // 2 second fades
+        // Apply long fade in/out for seamless looping
+        let fade_samples = (sample_rate as f32 * 5.0) as usize;  // 5 second fades
         for i in 0..fade_samples.min(num_samples / 2) {
-            let factor = i as f32 / fade_samples as f32;
+            let factor = (i as f32 / fade_samples as f32).powf(0.5);  // Smooth curve
             samples[i] = (samples[i] as f32 * factor) as i16;
             let end_idx = num_samples - 1 - i;
             samples[end_idx] = (samples[end_idx] as f32 * factor) as i16;
@@ -139,35 +150,51 @@ impl MusicManager {
         samples
     }
 
-    fn add_layered_tones(samples: &mut [i16], freqs: &[f32], volume: f32, modulation: f32, sample_rate: u32) {
+    // Generate soft ambient pad tones with slow attack/release
+    fn add_ambient_pad(samples: &mut [i16], notes: &[(f32, f32)], volume: f32, sample_rate: u32) {
         let num_samples = samples.len();
-        let mut rng = rand::thread_rng();
+        let duration_secs = num_samples as f32 / sample_rate as f32;
 
         for (i, sample) in samples.iter_mut().enumerate() {
             let t = i as f32 / sample_rate as f32;
-
-            // Slow volume modulation
-            let mod_factor = 1.0 + modulation * (t * 0.1).sin();
-
-            // Sum all frequencies with slight detuning
             let mut value = 0.0f32;
-            for (j, &freq) in freqs.iter().enumerate() {
-                // Slight random detuning for organic feel
-                let detune = 1.0 + (j as f32 * 0.001);
-                let phase_offset = j as f32 * 0.5;
 
-                // Very slow attack/decay envelope
-                let env_cycle = (t * 0.05 + phase_offset).sin().abs();
-                let env = 0.3 + 0.7 * env_cycle;
+            for &(freq, offset_secs) in notes.iter() {
+                // Each note fades in slowly, sustains, then fades out
+                let note_duration = 20.0;  // Each note lasts ~20 seconds
+                let attack = 6.0;   // 6 second fade in
+                let release = 6.0;  // 6 second fade out
 
-                value += (2.0 * std::f32::consts::PI * freq * detune * t).sin() * env;
+                // Calculate envelope for this note
+                let note_time = t - offset_secs;
+                let env = if note_time < 0.0 {
+                    0.0
+                } else if note_time < attack {
+                    // Smooth attack curve
+                    (note_time / attack).powf(2.0)
+                } else if note_time < note_duration - release {
+                    // Sustain
+                    1.0
+                } else if note_time < note_duration {
+                    // Smooth release curve
+                    let release_time = note_time - (note_duration - release);
+                    1.0 - (release_time / release).powf(2.0)
+                } else {
+                    0.0
+                };
+
+                // Soft sine wave with slight vibrato
+                let vibrato = 1.0 + 0.002 * (t * 4.0).sin();
+                let tone = (2.0 * std::f32::consts::PI * freq * vibrato * t).sin();
+
+                // Add a subtle harmonic (octave above, very quiet)
+                let harmonic = (2.0 * std::f32::consts::PI * freq * 2.0 * t).sin() * 0.1;
+
+                value += (tone + harmonic) * env * volume;
             }
 
-            // Normalize and apply volume
-            value = value / freqs.len() as f32 * volume * mod_factor;
-
-            // Add subtle noise for texture
-            value += rng.gen_range(-0.01..0.01);
+            // Soft limiting
+            value = value.tanh() * 0.8;
 
             // Mix with existing
             let current = *sample as f32 / i16::MAX as f32;
@@ -349,13 +376,13 @@ impl AudioManager {
         }
 
         let (duration, volume) = match block_type {
-            BlockType::Stone | BlockType::Cobblestone => (80, 0.3),
-            BlockType::Dirt | BlockType::Grass => (60, 0.25),
-            BlockType::Sand | BlockType::Gravel => (50, 0.2),
-            BlockType::Wood => (70, 0.25),
-            BlockType::Leaves => (40, 0.15),
-            BlockType::Ice | BlockType::Snow => (60, 0.2),
-            _ => (70, 0.25),
+            BlockType::Stone | BlockType::Cobblestone => (80, 0.08),
+            BlockType::Dirt | BlockType::Grass => (60, 0.06),
+            BlockType::Sand | BlockType::Gravel => (50, 0.05),
+            BlockType::Wood => (70, 0.06),
+            BlockType::Leaves => (40, 0.04),
+            BlockType::Ice | BlockType::Snow => (60, 0.05),
+            _ => (70, 0.06),
         };
 
         let samples = generate_noise_burst(duration, volume);
@@ -370,10 +397,10 @@ impl AudioManager {
 
         let pitch = self.random_pitch(0.95, 1.05);
         let (freq, duration, volume) = match block_type {
-            BlockType::Stone | BlockType::Cobblestone => (150.0, 100, 0.3),
-            BlockType::Dirt | BlockType::Grass => (120.0, 80, 0.25),
-            BlockType::Wood => (200.0, 90, 0.25),
-            _ => (140.0, 85, 0.25),
+            BlockType::Stone | BlockType::Cobblestone => (150.0, 100, 0.08),
+            BlockType::Dirt | BlockType::Grass => (120.0, 80, 0.06),
+            BlockType::Wood => (200.0, 90, 0.06),
+            _ => (140.0, 85, 0.06),
         };
 
         let samples = generate_sine_wave(freq * pitch, duration, volume);
@@ -386,12 +413,12 @@ impl AudioManager {
         }
 
         let (duration, volume) = match block_type {
-            BlockType::Stone | BlockType::Cobblestone => (30, 0.06),
-            BlockType::Dirt | BlockType::Grass => (25, 0.05),
-            BlockType::Sand | BlockType::Gravel => (35, 0.04),
-            BlockType::Wood => (20, 0.06),
-            BlockType::Snow => (40, 0.03),
-            _ => (25, 0.05),
+            BlockType::Stone | BlockType::Cobblestone => (30, 0.015),
+            BlockType::Dirt | BlockType::Grass => (25, 0.012),
+            BlockType::Sand | BlockType::Gravel => (35, 0.010),
+            BlockType::Wood => (20, 0.015),
+            BlockType::Snow => (40, 0.008),
+            _ => (25, 0.012),
         };
 
         let samples = generate_noise_burst(duration, volume);
@@ -404,8 +431,8 @@ impl AudioManager {
             return;
         }
 
-        let noise_samples = generate_noise_burst(200, 0.3);
-        let sine_samples = generate_sine_wave(80.0, 200, 0.2);
+        let noise_samples = generate_noise_burst(200, 0.08);
+        let sine_samples = generate_sine_wave(80.0, 200, 0.05);
 
         let samples: Vec<i16> = noise_samples.iter()
             .zip(sine_samples.iter())
@@ -420,7 +447,7 @@ impl AudioManager {
             return;
         }
 
-        let samples = generate_rising_tone(100, 200.0, 500.0, 0.2);
+        let samples = generate_rising_tone(100, 200.0, 500.0, 0.04);
         self.play_samples(samples, 44100);
     }
 
@@ -429,7 +456,7 @@ impl AudioManager {
             return;
         }
 
-        let samples = generate_noise_burst(60, 0.25);
+        let samples = generate_noise_burst(60, 0.05);
         self.play_samples(samples, 44100);
     }
 

@@ -33,6 +33,29 @@ pub enum BlockType {
     Fence,             // Support beams
     Brick,             // Stone brick
     MossyCobblestone,  // Aged dungeon walls
+    // Food items (dropped by animals)
+    RawPork,           // Dropped by pigs, +3 hunger
+    RawBeef,           // Dropped by cows, +3 hunger
+    RawChicken,        // Dropped by chickens, +2 hunger
+    RawMutton,         // Dropped by sheep, +2 hunger
+}
+
+impl BlockType {
+    /// Returns (hunger_restore, saturation_restore) if this is a food item
+    pub fn food_properties(&self) -> Option<(f32, f32)> {
+        match self {
+            BlockType::RawPork => Some((3.0, 1.8)),
+            BlockType::RawBeef => Some((3.0, 1.8)),
+            BlockType::RawChicken => Some((2.0, 1.2)),
+            BlockType::RawMutton => Some((2.0, 1.2)),
+            _ => None,
+        }
+    }
+
+    /// Check if this block type is food
+    pub fn is_food(&self) -> bool {
+        self.food_properties().is_some()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
