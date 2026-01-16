@@ -7,6 +7,7 @@ A Minecraft-inspired voxel game built in Rust with wgpu.
 ![p1](img/p1.png)
 ![p2](img/p2.png)
 ![p3](img/p3.png)
+![p4](img/p4.png)
 
 ## Getting Started
 
