@@ -18,7 +18,7 @@ use renderer::Renderer;
 use ui::{Inventory, DebugInfo, PauseMenu, ChestUI};
 use entity::EntityManager;
 use particle::{ParticleSystem, WeatherState};
-use audio::AudioManager;
+use audio::{AudioManager, MusicManager};
 
 #[derive(PartialEq, Clone, Copy)]
 enum LoadingStage {
@@ -62,6 +62,7 @@ fn main() {
     let mut weather_state = WeatherState::new();
     let mut weather_rng = rand::thread_rng();
     let audio_manager = AudioManager::new();
+    let mut music_manager = MusicManager::new();
 
     let mut last_frame = std::time::Instant::now();
     let mut mouse_captured = false;
@@ -317,6 +318,8 @@ fn main() {
                     last_frame = now;
 
                     world.update_loaded_chunks(camera.position);
+                    // Process water flow updates (limit per frame for performance)
+                    world.process_water_updates(50);
                     camera.update(dt, &world);
                     entity_manager.update(dt, &world, camera.position);
 
@@ -347,6 +350,13 @@ fn main() {
                     }
 
                     particle_system.update(dt);
+
+                    // Update background music based on time and underwater state
+                    if let Some(ref mut music) = music_manager {
+                        let is_underwater = camera.is_underwater(&world);
+                        music.update(dt, renderer.get_time_of_day(), is_underwater);
+                    }
+
                     targeted_block = camera.get_targeted_block(&world, 5.0);
 
                     // Update block preview for placement visualization

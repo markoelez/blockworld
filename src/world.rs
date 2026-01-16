@@ -1,6 +1,6 @@
 use noise::{NoiseFn, Perlin, Simplex};
 use cgmath::{Vector3, Point3};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use rand::Rng;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -76,6 +76,9 @@ pub struct World {
     block_damage: HashMap<(i32, i32, i32), f32>,
     pub torch_orientations: HashMap<(i32, i32, i32), TorchFace>,
     pub chest_contents: HashMap<(i32, i32, i32), [Option<(BlockType, u32)>; 9]>,
+    // Water flow system: level 8 = source, 7-1 = flowing (7 = nearly full, 1 = thin layer)
+    pub water_levels: HashMap<(i32, i32, i32), u8>,
+    water_update_queue: VecDeque<(i32, i32, i32)>,
     seed: u32,
 }
 
@@ -111,6 +114,8 @@ impl World {
             block_damage: HashMap::new(),
             torch_orientations: HashMap::new(),
             chest_contents: HashMap::new(),
+            water_levels: HashMap::new(),
+            water_update_queue: VecDeque::new(),
             seed,
         };
 
@@ -242,7 +247,7 @@ impl World {
         self.chunks.get(&(chunk_x, chunk_z))
     }
     
-    fn get_biome(&self, world_x: f64, world_z: f64) -> Biome {
+    pub fn get_biome(&self, world_x: f64, world_z: f64) -> Biome {
         let temperature = self.temperature_noise.get([world_x * 0.003, world_z * 0.003]);
         let humidity = self.humidity_noise.get([world_x * 0.004, world_z * 0.004]);
         let elevation = self.get_base_continent_height(world_x, world_z);
@@ -1111,6 +1116,8 @@ impl World {
     pub fn place_block(&mut self, x: i32, y: i32, z: i32, block_type: BlockType) -> bool {
         if self.can_place_block_at(x, y, z) {
             self.set_block(x, y, z, block_type);
+            // Trigger water flow updates for adjacent water blocks
+            self.trigger_water_updates_around(x, y, z);
             true
         } else {
             false
@@ -1176,6 +1183,8 @@ impl World {
             if block_type == BlockType::Torch {
                 self.torch_orientations.remove(&pos);
             }
+            // Trigger water flow updates for adjacent water blocks
+            self.trigger_water_updates_around(x, y, z);
             Some(block_type)
         } else {
             self.block_damage.insert(pos, new_damage);
@@ -1199,6 +1208,191 @@ impl World {
             .take_while(|&check_y| self.get_block(x, check_y, z) == Some(BlockType::Water))
             .count() as i32
     }
+
+    // ========== Water Flow System ==========
+
+    /// Get water level at position (0 = no water, 8 = source, 1-7 = flowing)
+    pub fn get_water_level(&self, x: i32, y: i32, z: i32) -> u8 {
+        match self.get_block(x, y, z) {
+            Some(BlockType::Water) => {
+                // Check if we have a stored level, otherwise it's a source (8)
+                *self.water_levels.get(&(x, y, z)).unwrap_or(&8)
+            }
+            _ => 0,
+        }
+    }
+
+    /// Set water at position with given level. Level 0 removes water.
+    fn set_water(&mut self, x: i32, y: i32, z: i32, level: u8) {
+        if level == 0 {
+            // Remove water
+            if self.get_block(x, y, z) == Some(BlockType::Water) {
+                self.set_block(x, y, z, BlockType::Air);
+                self.water_levels.remove(&(x, y, z));
+            }
+        } else {
+            // Set or update water
+            let current_block = self.get_block(x, y, z);
+            if current_block != Some(BlockType::Water) {
+                self.set_block(x, y, z, BlockType::Water);
+            }
+            if level == 8 {
+                // Source blocks don't need level stored (8 is default)
+                self.water_levels.remove(&(x, y, z));
+            } else {
+                self.water_levels.insert((x, y, z), level);
+            }
+        }
+    }
+
+    /// Check if water can flow to this position
+    fn can_water_flow_to(&self, x: i32, y: i32, z: i32) -> bool {
+        if y < 0 || y >= Self::CHUNK_HEIGHT as i32 {
+            return false;
+        }
+        match self.get_block(x, y, z) {
+            Some(BlockType::Air) => true,
+            Some(BlockType::Water) => true, // Can update existing water
+            _ => false,
+        }
+    }
+
+    /// Check if a block is solid (blocks water flow)
+    fn is_solid_for_water(&self, x: i32, y: i32, z: i32) -> bool {
+        match self.get_block(x, y, z) {
+            Some(BlockType::Air) | Some(BlockType::Water) | None => false,
+            Some(BlockType::Barrier) => true,
+            _ => true,
+        }
+    }
+
+    /// Queue a position for water update
+    fn queue_water_update(&mut self, x: i32, y: i32, z: i32) {
+        let pos = (x, y, z);
+        // Avoid duplicate entries (simple check - not perfect but good enough)
+        if !self.water_update_queue.iter().rev().take(100).any(|p| *p == pos) {
+            self.water_update_queue.push_back(pos);
+        }
+    }
+
+    /// Trigger water updates for blocks adjacent to a changed block
+    pub fn trigger_water_updates_around(&mut self, x: i32, y: i32, z: i32) {
+        // Check all 6 adjacent positions for water
+        let offsets = [
+            (1, 0, 0), (-1, 0, 0),
+            (0, 1, 0), (0, -1, 0),
+            (0, 0, 1), (0, 0, -1),
+        ];
+        for (dx, dy, dz) in offsets {
+            let nx = x + dx;
+            let ny = y + dy;
+            let nz = z + dz;
+            if self.get_block(nx, ny, nz) == Some(BlockType::Water) {
+                self.queue_water_update(nx, ny, nz);
+            }
+        }
+        // Also check the position itself if it became air (water above might flow down)
+        if self.get_block(x, y, z) == Some(BlockType::Air) {
+            // Check if there's water above that should flow down
+            if self.get_block(x, y + 1, z) == Some(BlockType::Water) {
+                self.queue_water_update(x, y + 1, z);
+            }
+        }
+    }
+
+    /// Process water updates using BFS algorithm
+    /// Returns true if any updates were made
+    pub fn process_water_updates(&mut self, max_updates: usize) -> bool {
+        let mut updates_made = 0;
+        let mut any_changes = false;
+
+        while let Some((x, y, z)) = self.water_update_queue.pop_front() {
+            if updates_made >= max_updates {
+                // Put it back for next frame
+                self.water_update_queue.push_front((x, y, z));
+                break;
+            }
+
+            let level = self.get_water_level(x, y, z);
+            if level == 0 {
+                continue; // No water here anymore
+            }
+
+            updates_made += 1;
+
+            // 1. Flow DOWN first (priority) - water flowing down becomes source-strength
+            if y > 0 && self.can_water_flow_to(x, y - 1, z) {
+                let below_level = self.get_water_level(x, y - 1, z);
+                if below_level < 8 {
+                    // Flow down with full strength
+                    self.set_water(x, y - 1, z, 8);
+                    self.queue_water_update(x, y - 1, z);
+                    any_changes = true;
+                }
+            }
+
+            // 2. Spread HORIZONTALLY if we have enough level
+            if level > 1 {
+                let new_level = level - 1;
+                let horizontal_offsets = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+
+                for (dx, dz) in horizontal_offsets {
+                    let nx = x + dx;
+                    let nz = z + dz;
+
+                    if self.can_water_flow_to(nx, y, nz) {
+                        let neighbor_level = self.get_water_level(nx, y, nz);
+
+                        // Only flow if we would increase the neighbor's level
+                        if new_level > neighbor_level {
+                            self.set_water(nx, y, nz, new_level);
+                            self.queue_water_update(nx, y, nz);
+                            any_changes = true;
+                        }
+                    }
+                }
+            }
+
+            // 3. Check if this flowing water should disappear (no source feeding it)
+            if level < 8 {
+                // This is flowing water - check if it still has a valid source
+                let has_source = self.check_water_source(x, y, z, level);
+                if !has_source {
+                    self.set_water(x, y, z, 0);
+                    // Re-check neighbors
+                    for (dx, dz) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+                        let neighbor_level = self.get_water_level(x + dx, y, z + dz);
+                        if neighbor_level > 0 && neighbor_level < 8 {
+                            self.queue_water_update(x + dx, y, z + dz);
+                        }
+                    }
+                    any_changes = true;
+                }
+            }
+        }
+
+        any_changes
+    }
+
+    /// Check if flowing water at position has a valid source feeding it
+    fn check_water_source(&self, x: i32, y: i32, z: i32, current_level: u8) -> bool {
+        // Check above - water above is always a valid source
+        if self.get_water_level(x, y + 1, z) > 0 {
+            return true;
+        }
+
+        // Check horizontal neighbors - need at least one with higher level
+        for (dx, dz) in [(1i32, 0i32), (-1, 0), (0, 1), (0, -1)] {
+            let neighbor_level = self.get_water_level(x + dx, y, z + dz);
+            if neighbor_level > current_level {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    // ========== End Water Flow System ==========
 
     /// Find a valid spawn position on solid ground with clearance above
     pub fn find_spawn_position(&self) -> Point3<f32> {

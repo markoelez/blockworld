@@ -317,6 +317,10 @@ pub struct Renderer {
     dropped_item_vertex_buffer: wgpu::Buffer,
     dropped_item_index_buffer: wgpu::Buffer,
     dropped_item_index_count: u32,
+    // Animal rendering
+    animal_vertex_buffer: wgpu::Buffer,
+    animal_index_buffer: wgpu::Buffer,
+    animal_index_count: u32,
 }
 
 impl Renderer {
@@ -2239,6 +2243,21 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // Animal buffers (40 animals max, each with ~6 body parts * 24 vertices)
+        let animal_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Animal Vertex Buffer"),
+            size: (40 * 6 * 24 * std::mem::size_of::<Vertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let animal_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Animal Index Buffer"),
+            size: (40 * 6 * 36 * std::mem::size_of::<u16>()) as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let particle_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Particle Pipeline"),
             layout: Some(&particle_pipeline_layout),
@@ -2396,6 +2415,10 @@ impl Renderer {
             dropped_item_vertex_buffer,
             dropped_item_index_buffer,
             dropped_item_index_count: 0,
+            // Animals
+            animal_vertex_buffer,
+            animal_index_buffer,
+            animal_index_count: 0,
         }
     }
 
@@ -2574,12 +2597,16 @@ impl Renderer {
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
             self.depth_texture = Self::create_depth_texture(&self.device, &self.config);
-            
+
             // Update UI elements for new aspect ratio
             self.ui_renderer.resize(&self.device, &self.config);
         }
     }
-    
+
+    pub fn get_time_of_day(&self) -> f32 {
+        self.time_of_day
+    }
+
     pub fn render(&mut self, camera: &Camera, world: &mut World, inventory: &Inventory, targeted_block: Option<(i32, i32, i32)>, entity_manager: &EntityManager, particle_system: &ParticleSystem, underwater: bool, debug_info: &DebugInfo, pause_menu: &PauseMenu, chest_ui: &ChestUI) {
         let now = Instant::now();
         let dt = (now - self.last_render).as_secs_f32();
@@ -2619,6 +2646,9 @@ impl Renderer {
 
         // Update villager mesh
         self.update_villager_mesh(entity_manager.get_villagers());
+
+        // Update animal mesh
+        self.update_animal_mesh(entity_manager.get_animals());
 
         // Update dropped item mesh
         self.update_dropped_items(entity_manager.get_dropped_items());
@@ -2735,6 +2765,13 @@ impl Renderer {
                 shadow_pass.set_index_buffer(self.villager_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                 shadow_pass.draw_indexed(0..self.villager_index_count, 0, 0..1);
             }
+
+            // Render animals to shadow map
+            if self.animal_index_count > 0 {
+                shadow_pass.set_vertex_buffer(0, self.animal_vertex_buffer.slice(..));
+                shadow_pass.set_index_buffer(self.animal_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                shadow_pass.draw_indexed(0..self.animal_index_count, 0, 0..1);
+            }
         }
 
         // === MAIN HDR RENDER PASS ===
@@ -2814,6 +2851,13 @@ impl Renderer {
                 render_pass.set_vertex_buffer(0, self.villager_vertex_buffer.slice(..));
                 render_pass.set_index_buffer(self.villager_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                 render_pass.draw_indexed(0..self.villager_index_count, 0, 0..1);
+            }
+
+            // Render animals
+            if self.animal_index_count > 0 {
+                render_pass.set_vertex_buffer(0, self.animal_vertex_buffer.slice(..));
+                render_pass.set_index_buffer(self.animal_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed(0..self.animal_index_count, 0, 0..1);
             }
 
             // Render dropped items
@@ -3779,11 +3823,13 @@ impl Renderer {
 
                     // Water uses transparent buffer, everything else uses opaque
                     if is_water {
-                        Self::add_greedy_face_horizontal(
+                        // Get water level for variable height (8 = source/full, 1-7 = flowing)
+                        let water_level = world.get_water_level(world_x, y as i32, world_z);
+                        Self::add_greedy_face_horizontal_water(
                             trans_vertices, trans_indices,
                             world_x as f32, y as f32, world_z as f32,
                             width as f32, depth as f32,
-                            face, block_type, water_depth,
+                            face, block_type, water_depth, water_level,
                         );
                     } else {
                         Self::add_greedy_face_horizontal(
@@ -4010,6 +4056,42 @@ impl Renderer {
                     }
                 }
             }
+        }
+    }
+
+    // Add a greedy-merged horizontal face for water with variable height
+    fn add_greedy_face_horizontal_water(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        x: f32, y: f32, z: f32,
+        width: f32, depth: f32,
+        face: Face,
+        block_type: BlockType,
+        water_depth: f32,
+        water_level: u8,  // 1-8, where 8 is full/source
+    ) {
+        let base_index = vertices.len() as u16;
+        let block_type_f = Self::block_type_to_float(block_type);
+        let is_top = matches!(face, Face::Top);
+        let normal = if is_top { [0.0, 1.0, 0.0] } else { [0.0, -1.0, 0.0] };
+
+        // For water top face, height depends on water level
+        // Level 8 (source) = 0.875 height, Level 1 = 0.125
+        let y_offset = if is_top {
+            (water_level as f32 / 8.0) * 0.875
+        } else {
+            0.0
+        };
+        let y_pos = y + y_offset;
+
+        vertices.push(Vertex { position: [x, y_pos, z], tex_coords: [0.0, 0.0], normal, block_type: block_type_f, damage: water_depth });
+        vertices.push(Vertex { position: [x + width, y_pos, z], tex_coords: [width, 0.0], normal, block_type: block_type_f, damage: water_depth });
+        vertices.push(Vertex { position: [x + width, y_pos, z + depth], tex_coords: [width, depth], normal, block_type: block_type_f, damage: water_depth });
+        vertices.push(Vertex { position: [x, y_pos, z + depth], tex_coords: [0.0, depth], normal, block_type: block_type_f, damage: water_depth });
+
+        let idx = if is_top { [0, 1, 2, 2, 3, 0] } else { [0, 3, 2, 2, 1, 0] };
+        for i in idx {
+            indices.push(base_index + i);
         }
     }
 
@@ -4529,6 +4611,98 @@ impl Renderer {
         if !vertices.is_empty() {
             self.queue.write_buffer(&self.villager_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
             self.queue.write_buffer(&self.villager_index_buffer, 0, bytemuck::cast_slice(&indices));
+        }
+    }
+
+    /// Update the animal mesh (pigs, cows, sheep)
+    pub fn update_animal_mesh(&mut self, animals: &[crate::entity::Animal]) {
+        use crate::entity::{AnimalState, AnimalType};
+
+        let mut vertices: Vec<Vertex> = Vec::with_capacity(animals.len() * 6 * 24);
+        let mut indices: Vec<u16> = Vec::with_capacity(animals.len() * 6 * 36);
+
+        for animal in animals {
+            let x = animal.position.x;
+            let y = animal.position.y;
+            let z = animal.position.z;
+            let yaw = animal.yaw.to_radians();
+            let color = animal.animal_type.color_index();
+            let (width, height) = animal.animal_type.dimensions();
+
+            // Animation
+            let swing = if animal.state == AnimalState::Walking {
+                (animal.animation_time * 6.0).sin() * 0.25
+            } else {
+                0.0
+            };
+
+            // Head offset when eating
+            let head_y_offset = if animal.state == AnimalState::Eating { -0.15 } else { 0.0 };
+
+            let pivot = [x, y, z];
+
+            // Body (main mass)
+            let body_y = y - height * 0.4;
+            Self::generate_villager_cube(
+                &mut vertices,
+                &mut indices,
+                [x, body_y, z],
+                [width * 0.5, height * 0.35, width * 0.7],
+                color,
+                yaw,
+                pivot,
+            );
+
+            // Head (front of body)
+            let head_forward = width * 0.5 + width * 0.2;
+            let head_x = x - yaw.sin() * head_forward;
+            let head_z = z - yaw.cos() * head_forward;
+            let head_y = y - height * 0.25 + head_y_offset;
+            Self::generate_villager_cube(
+                &mut vertices,
+                &mut indices,
+                [head_x, head_y, head_z],
+                [width * 0.3, width * 0.3, width * 0.35],
+                color,
+                yaw,
+                pivot,
+            );
+
+            // 4 Legs
+            let leg_height = height * 0.35;
+            let leg_y = y - height + leg_height * 0.5;
+            let leg_offsets = [
+                (-0.15 * width, 0.25 * width, 1.0),   // Front left
+                (0.15 * width, 0.25 * width, -1.0),   // Front right
+                (-0.15 * width, -0.25 * width, -1.0), // Back left
+                (0.15 * width, -0.25 * width, 1.0),   // Back right
+            ];
+
+            for (dx, dz, phase) in leg_offsets {
+                // Rotate offset by yaw
+                let rot_dx = dx * yaw.cos() - dz * yaw.sin();
+                let rot_dz = dx * yaw.sin() + dz * yaw.cos();
+                let leg_swing = swing * phase;
+                let swing_x = -yaw.sin() * leg_swing * 0.3;
+                let swing_z = -yaw.cos() * leg_swing * 0.3;
+
+                Self::generate_villager_cube(
+                    &mut vertices,
+                    &mut indices,
+                    [x + rot_dx + swing_x, leg_y, z + rot_dz + swing_z],
+                    [0.12, leg_height, 0.12],
+                    color,
+                    yaw,
+                    pivot,
+                );
+            }
+        }
+
+        self.animal_index_count = indices.len() as u32;
+
+        if !vertices.is_empty() {
+            self.queue.write_buffer(&self.animal_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+            self.queue.write_buffer(&self.animal_index_buffer, 0, bytemuck::cast_slice(&indices));
         }
     }
 

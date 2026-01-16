@@ -319,6 +319,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         let wood_grain = noise(in.tex_coords * 8.0) * 0.1;
         texture_color = vec4<f32>(0.45 + wood_grain, 0.3 + wood_grain * 0.5, 0.15, 1.0);
         roughness = 0.8;
+    } else if (bt == 27.0) {
+        // Pig - pink
+        texture_color = vec4<f32>(0.95, 0.70, 0.70, 1.0);
+        roughness = 0.7;
+    } else if (bt == 28.0) {
+        // Cow - brown/tan
+        texture_color = vec4<f32>(0.45, 0.30, 0.20, 1.0);
+        roughness = 0.7;
+    } else if (bt == 29.0) {
+        // Sheep - white wool
+        texture_color = vec4<f32>(0.92, 0.90, 0.88, 1.0);
+        roughness = 0.8;
     }
 
     // Crack effect - dark cracks that spread as damage increases

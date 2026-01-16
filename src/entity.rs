@@ -316,6 +316,279 @@ impl Villager {
     }
 }
 
+// Animal constants
+pub const ANIMAL_GRAVITY: f32 = 32.0;
+pub const ANIMAL_TERMINAL_VELOCITY: f32 = 50.0;
+pub const MAX_ANIMALS: usize = 40;
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum AnimalType {
+    Pig,
+    Cow,
+    Sheep,
+}
+
+impl AnimalType {
+    /// Returns (width, height) for collision
+    pub fn dimensions(&self) -> (f32, f32) {
+        match self {
+            AnimalType::Pig => (0.9, 0.9),
+            AnimalType::Cow => (0.9, 1.4),
+            AnimalType::Sheep => (0.9, 1.2),
+        }
+    }
+
+    pub fn speed(&self) -> f32 {
+        match self {
+            AnimalType::Pig => 1.2,
+            AnimalType::Cow => 1.0,
+            AnimalType::Sheep => 1.3,
+        }
+    }
+
+    /// Color index for rendering (block type index)
+    pub fn color_index(&self) -> f32 {
+        match self {
+            AnimalType::Pig => 27.0,   // Pink
+            AnimalType::Cow => 28.0,   // Brown
+            AnimalType::Sheep => 29.0, // White wool
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum AnimalState {
+    Idle,
+    Walking,
+    Eating,
+}
+
+pub struct Animal {
+    pub id: u32,
+    pub animal_type: AnimalType,
+    pub position: Point3<f32>,
+    pub velocity: Vector3<f32>,
+    pub yaw: f32,
+    pub state: AnimalState,
+    pub state_timer: f32,
+    pub animation_time: f32,
+    pub on_ground: bool,
+}
+
+impl Animal {
+    pub fn new(id: u32, animal_type: AnimalType, position: Point3<f32>) -> Self {
+        let mut rng = rand::thread_rng();
+        Self {
+            id,
+            animal_type,
+            position,
+            velocity: Vector3::new(0.0, 0.0, 0.0),
+            yaw: rng.gen_range(0.0..360.0),
+            state: AnimalState::Idle,
+            state_timer: rng.gen_range(1.0..3.0),
+            animation_time: 0.0,
+            on_ground: false,
+        }
+    }
+
+    pub fn update(&mut self, dt: f32, world: &World) {
+        self.animation_time += dt;
+        self.update_physics(dt, world);
+    }
+
+    fn update_physics(&mut self, dt: f32, world: &World) {
+        let (width, height) = self.animal_type.dimensions();
+        let half_width = width / 2.0;
+
+        // Apply gravity
+        self.velocity.y -= ANIMAL_GRAVITY * dt;
+        self.velocity.y = self.velocity.y.max(-ANIMAL_TERMINAL_VELOCITY).min(ANIMAL_TERMINAL_VELOCITY);
+
+        // Apply horizontal movement based on state
+        if self.state == AnimalState::Walking {
+            let speed = self.animal_type.speed();
+            let yaw_rad = self.yaw.to_radians();
+            self.velocity.x = -yaw_rad.sin() * speed;
+            self.velocity.z = -yaw_rad.cos() * speed;
+        } else {
+            self.velocity.x *= 0.8;
+            self.velocity.z *= 0.8;
+        }
+
+        // X-axis collision
+        let new_x = self.position.x + self.velocity.x * dt;
+        let mut can_move_x = true;
+        for dy in 0..2 {
+            let check_y = (self.position.y - height + 0.1 + dy as f32).floor() as i32;
+            for dz in [-1.0, 0.0, 1.0] {
+                let check_z = (self.position.z + dz * half_width).floor() as i32;
+                let check_x = if self.velocity.x > 0.0 {
+                    (new_x + half_width).floor() as i32
+                } else {
+                    (new_x - half_width).floor() as i32
+                };
+                if let Some(block) = world.get_block(check_x, check_y, check_z) {
+                    if block != BlockType::Air && block != BlockType::Water {
+                        can_move_x = false;
+                        break;
+                    }
+                }
+            }
+            if !can_move_x { break; }
+        }
+        if can_move_x {
+            self.position.x = new_x;
+        } else {
+            self.velocity.x = 0.0;
+        }
+
+        // Z-axis collision
+        let new_z = self.position.z + self.velocity.z * dt;
+        let mut can_move_z = true;
+        for dy in 0..2 {
+            let check_y = (self.position.y - height + 0.1 + dy as f32).floor() as i32;
+            for dx in [-1.0, 0.0, 1.0] {
+                let check_x = (self.position.x + dx * half_width).floor() as i32;
+                let check_z = if self.velocity.z > 0.0 {
+                    (new_z + half_width).floor() as i32
+                } else {
+                    (new_z - half_width).floor() as i32
+                };
+                if let Some(block) = world.get_block(check_x, check_y, check_z) {
+                    if block != BlockType::Air && block != BlockType::Water {
+                        can_move_z = false;
+                        break;
+                    }
+                }
+            }
+            if !can_move_z { break; }
+        }
+        if can_move_z {
+            self.position.z = new_z;
+        } else {
+            self.velocity.z = 0.0;
+        }
+
+        // Y-axis (gravity/ground)
+        let new_y = self.position.y + self.velocity.y * dt;
+        self.on_ground = false;
+
+        if self.velocity.y <= 0.0 {
+            let feet_y = (new_y - height).floor() as i32;
+            for dx in [-1.0, 0.0, 1.0] {
+                for dz in [-1.0, 0.0, 1.0] {
+                    let check_x = (self.position.x + dx * half_width * 0.8).floor() as i32;
+                    let check_z = (self.position.z + dz * half_width * 0.8).floor() as i32;
+                    if let Some(block) = world.get_block(check_x, feet_y, check_z) {
+                        if block != BlockType::Air && block != BlockType::Water {
+                            self.position.y = (feet_y + 1) as f32 + height;
+                            self.velocity.y = 0.0;
+                            self.on_ground = true;
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        self.position.y = new_y;
+    }
+
+    pub fn update_ai(&mut self, dt: f32, world: &World, rng: &mut impl Rng) {
+        self.state_timer -= dt;
+
+        match self.state {
+            AnimalState::Idle => {
+                if self.state_timer <= 0.0 {
+                    let roll: f32 = rng.gen();
+                    if roll < 0.5 {
+                        // Start walking
+                        self.state = AnimalState::Walking;
+                        self.yaw = rng.gen_range(0.0..360.0);
+                        self.state_timer = rng.gen_range(3.0..8.0);
+                    } else if roll < 0.8 {
+                        // Start eating
+                        self.state = AnimalState::Eating;
+                        self.state_timer = rng.gen_range(2.0..4.0);
+                    } else {
+                        // Stay idle longer
+                        self.state_timer = rng.gen_range(2.0..5.0);
+                    }
+                }
+            }
+            AnimalState::Walking => {
+                // Check for obstacles
+                if self.is_blocked(world) || self.is_cliff_ahead(world) || self.is_water_ahead(world) {
+                    self.yaw += 90.0 + rng.gen::<f32>() * 90.0;
+                    if self.yaw >= 360.0 { self.yaw -= 360.0; }
+                    self.state = AnimalState::Idle;
+                    self.state_timer = rng.gen_range(1.0..3.0);
+                }
+                if self.state_timer <= 0.0 {
+                    self.state = AnimalState::Idle;
+                    self.state_timer = rng.gen_range(1.0..3.0);
+                }
+            }
+            AnimalState::Eating => {
+                if self.state_timer <= 0.0 {
+                    self.state = AnimalState::Idle;
+                    self.state_timer = rng.gen_range(1.0..3.0);
+                }
+            }
+        }
+    }
+
+    fn is_blocked(&self, world: &World) -> bool {
+        let (_, height) = self.animal_type.dimensions();
+        let yaw_rad = self.yaw.to_radians();
+        let check_x = (self.position.x - yaw_rad.sin() * 1.2).floor() as i32;
+        let check_y = (self.position.y - height + 0.5).floor() as i32;
+        let check_z = (self.position.z - yaw_rad.cos() * 1.2).floor() as i32;
+
+        if let Some(block) = world.get_block(check_x, check_y, check_z) {
+            if block != BlockType::Air && block != BlockType::Water {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn is_cliff_ahead(&self, world: &World) -> bool {
+        let (_, height) = self.animal_type.dimensions();
+        let yaw_rad = self.yaw.to_radians();
+        let check_x = (self.position.x - yaw_rad.sin() * 1.5).floor() as i32;
+        let check_y = (self.position.y - height - 1.0).floor() as i32;
+        let check_z = (self.position.z - yaw_rad.cos() * 1.5).floor() as i32;
+
+        if let Some(block) = world.get_block(check_x, check_y, check_z) {
+            if block == BlockType::Air {
+                if let Some(below) = world.get_block(check_x, check_y - 1, check_z) {
+                    if below == BlockType::Air {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn is_water_ahead(&self, world: &World) -> bool {
+        let (_, height) = self.animal_type.dimensions();
+        let yaw_rad = self.yaw.to_radians();
+        let check_x = (self.position.x - yaw_rad.sin() * 1.5).floor() as i32;
+        let feet_y = (self.position.y - height).floor() as i32;
+        let check_z = (self.position.z - yaw_rad.cos() * 1.5).floor() as i32;
+
+        for dy in -1..=0 {
+            if let Some(block) = world.get_block(check_x, feet_y + dy, check_z) {
+                if block == BlockType::Water {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+}
+
 // Dropped item that can be picked up
 pub struct DroppedItem {
     pub position: Point3<f32>,
@@ -400,10 +673,12 @@ impl DroppedItem {
 pub struct EntityManager {
     pub villagers: Vec<Villager>,
     pub dropped_items: Vec<DroppedItem>,
+    pub animals: Vec<Animal>,
     next_id: u32,
     rng: rand::rngs::ThreadRng,
     ai_update_timer: f32,
     spawn_check_timer: f32,
+    animal_spawn_timer: f32,
 }
 
 impl EntityManager {
@@ -411,10 +686,12 @@ impl EntityManager {
         Self {
             villagers: Vec::new(),
             dropped_items: Vec::new(),
+            animals: Vec::new(),
             next_id: 0,
             rng: rand::thread_rng(),
             ai_update_timer: 0.0,
             spawn_check_timer: 0.0,
+            animal_spawn_timer: 0.0,
         }
     }
 
@@ -489,12 +766,33 @@ impl EntityManager {
         // Update dropped items
         self.dropped_items.retain_mut(|item| item.update(dt, world));
 
+        // Update animals
+        for animal in &mut self.animals {
+            animal.update(dt, world);
+
+            if update_ai {
+                let dist_sq = (animal.position.x - player_pos.x).powi(2)
+                    + (animal.position.z - player_pos.z).powi(2);
+                if dist_sq < 80.0 * 80.0 {
+                    animal.update_ai(ai_dt, world, &mut self.rng);
+                }
+            }
+        }
+
         // Periodically check for spawning
         self.spawn_check_timer -= dt;
         if self.spawn_check_timer <= 0.0 {
             self.spawn_check_timer = 2.0; // Check every 2 seconds
             self.try_spawn_villagers(world, player_pos);
             self.cleanup_distant_villagers(player_pos);
+        }
+
+        // Animal spawning (separate timer)
+        self.animal_spawn_timer -= dt;
+        if self.animal_spawn_timer <= 0.0 {
+            self.animal_spawn_timer = 3.0; // Check every 3 seconds
+            self.try_spawn_animals(world, player_pos);
+            self.cleanup_distant_animals(player_pos);
         }
     }
 
@@ -598,5 +896,119 @@ impl EntityManager {
 
     pub fn get_dropped_items(&self) -> &[DroppedItem] {
         &self.dropped_items
+    }
+
+    pub fn get_animals(&self) -> &[Animal] {
+        &self.animals
+    }
+
+    fn try_spawn_animals(&mut self, world: &World, player_pos: Point3<f32>) {
+        if self.animals.len() >= MAX_ANIMALS {
+            return;
+        }
+
+        let player_chunk_x = (player_pos.x / 16.0).floor() as i32;
+        let player_chunk_z = (player_pos.z / 16.0).floor() as i32;
+
+        for dx in -4..=4 {
+            for dz in -4..=4 {
+                let chunk_x = player_chunk_x + dx;
+                let chunk_z = player_chunk_z + dz;
+                let chunk_key = (chunk_x, chunk_z);
+
+                // Skip if chunk not loaded
+                if !world.chunks.contains_key(&chunk_key) {
+                    continue;
+                }
+
+                // Check biome - animals spawn in Plains and Forest
+                let world_x = (chunk_x * 16 + 8) as f64;
+                let world_z = (chunk_z * 16 + 8) as f64;
+                let biome = world.get_biome(world_x, world_z);
+
+                // Only spawn in Plains or Forest biomes
+                use crate::world::Biome;
+                if biome != Biome::Plains && biome != Biome::Forest {
+                    continue;
+                }
+
+                // Low chance to spawn per chunk per check (1%)
+                if self.rng.gen::<f32>() > 0.01 {
+                    continue;
+                }
+
+                // Check if this chunk already has enough animals nearby
+                let chunk_center = Point3::new(
+                    (chunk_x * 16 + 8) as f32,
+                    player_pos.y,
+                    (chunk_z * 16 + 8) as f32,
+                );
+                let animals_in_chunk = self.animals.iter().filter(|a| {
+                    let dist_sq = (a.position.x - chunk_center.x).powi(2)
+                        + (a.position.z - chunk_center.z).powi(2);
+                    dist_sq < 20.0 * 20.0
+                }).count();
+
+                if animals_in_chunk >= 4 {
+                    continue;
+                }
+
+                // Pick random animal type
+                let animal_type = match self.rng.gen_range(0..3) {
+                    0 => AnimalType::Pig,
+                    1 => AnimalType::Cow,
+                    _ => AnimalType::Sheep,
+                };
+
+                // Try to find spawn position
+                let offset_x = self.rng.gen_range(-8..8);
+                let offset_z = self.rng.gen_range(-8..8);
+                let try_x = chunk_x * 16 + 8 + offset_x;
+                let try_z = chunk_z * 16 + 8 + offset_z;
+
+                if let Some(spawn_pos) = self.find_animal_spawn_position(world, try_x, try_z, animal_type) {
+                    let animal = Animal::new(self.next_id, animal_type, spawn_pos);
+                    self.next_id += 1;
+                    self.animals.push(animal);
+
+                    if self.animals.len() >= MAX_ANIMALS {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+
+    fn find_animal_spawn_position(&self, world: &World, world_x: i32, world_z: i32, animal_type: AnimalType) -> Option<Point3<f32>> {
+        let (_, height) = animal_type.dimensions();
+
+        // Search for valid ground position
+        for y in (30..90).rev() {
+            if let Some(block) = world.get_block(world_x, y, world_z) {
+                // Must spawn on grass or dirt
+                if block == BlockType::Grass || block == BlockType::Dirt {
+                    // Check clearance above
+                    let above1 = world.get_block(world_x, y + 1, world_z);
+                    let above2 = world.get_block(world_x, y + 2, world_z);
+
+                    if above1 == Some(BlockType::Air) && above2 == Some(BlockType::Air) {
+                        return Some(Point3::new(
+                            world_x as f32 + 0.5,
+                            (y + 1) as f32 + height,
+                            world_z as f32 + 0.5,
+                        ));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn cleanup_distant_animals(&mut self, player_pos: Point3<f32>) {
+        self.animals.retain(|a| {
+            let dist_sq = (a.position.x - player_pos.x).powi(2)
+                + (a.position.z - player_pos.z).powi(2);
+            dist_sq < 80.0 * 80.0 // Keep within 80 blocks
+        });
     }
 }
