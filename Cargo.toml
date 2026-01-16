@@ -16,5 +16,4 @@ pollster = "0.3"
 rand = "0.8.5"
 rayon = "=1.10.0"
 rayon-core = "=1.12.1"
-rodio = { version = "=0.15.0", default-features = false, features = ["wav"] }
-coreaudio-sys = "=0.2.15"
+rodio = { version = "0.15", default-features = false, features = ["wav"] }
