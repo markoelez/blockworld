@@ -12,10 +12,10 @@ mod entity;
 mod particle;
 mod audio;
 
-use world::World;
+use world::{World, ItemStack, Tool, ToolType, ToolMaterial};
 use camera::{Camera, HungerAction};
 use renderer::Renderer;
-use ui::{Inventory, DebugInfo, PauseMenu, ChestUI};
+use ui::{Inventory, DebugInfo, PauseMenu, ChestUI, CraftingUI, RecipeRegistry};
 use entity::EntityManager;
 use particle::{ParticleSystem, WeatherState, LightningSystem};
 use audio::{AudioManager, MusicManager};
@@ -57,6 +57,8 @@ fn main() {
     let mut debug_info = DebugInfo::new();
     let mut pause_menu = PauseMenu::new();
     let mut chest_ui = ChestUI::new();
+    let mut crafting_ui = CraftingUI::new();
+    let recipe_registry = RecipeRegistry::new();
     let mut entity_manager = EntityManager::new();
     let mut particle_system = ParticleSystem::new();
     let mut weather_state = WeatherState::new();
@@ -87,7 +89,15 @@ fn main() {
                         let is_pressed = input.state == ElementState::Pressed;
 
                         if is_pressed && keycode == VirtualKeyCode::Escape {
-                            if chest_ui.open {
+                            if crafting_ui.open {
+                                // Close crafting UI and return items to inventory
+                                let items = crafting_ui.close();
+                                for item in items {
+                                    inventory.add_item(item);
+                                }
+                                mouse_captured = true;
+                                set_cursor_captured(&window, true);
+                            } else if chest_ui.open {
                                 // Close chest UI first
                                 chest_ui.close();
                                 mouse_captured = true;
@@ -154,8 +164,8 @@ fn main() {
                                                     }
                                                 }
                                             } else {
-                                                // Put from inventory to chest
-                                                if let Some((block_type, qty)) = inventory.slots[chest_ui.selected_slot] {
+                                                // Put from inventory to chest (only blocks, not tools)
+                                                if let Some(ItemStack::Block(block_type, qty)) = inventory.slots[chest_ui.selected_slot].clone() {
                                                     // Try to stack with existing item in chest
                                                     let mut stacked = false;
                                                     for slot in contents.iter_mut() {
@@ -182,13 +192,84 @@ fn main() {
                                                         if qty <= 1 {
                                                             inventory.slots[chest_ui.selected_slot] = None;
                                                         } else {
-                                                            inventory.slots[chest_ui.selected_slot] = Some((block_type, qty - 1));
+                                                            inventory.slots[chest_ui.selected_slot] = Some(ItemStack::Block(block_type, qty - 1));
                                                         }
                                                     }
                                                 }
                                             }
                                         }
                                     },
+                                    _ => {}
+                                }
+                            }
+                        } else if crafting_ui.open {
+                            // Handle crafting UI navigation
+                            if is_pressed {
+                                match keycode {
+                                    VirtualKeyCode::Up | VirtualKeyCode::W => crafting_ui.navigate(0, -1),
+                                    VirtualKeyCode::Down | VirtualKeyCode::S => crafting_ui.navigate(0, 1),
+                                    VirtualKeyCode::Left | VirtualKeyCode::A => crafting_ui.navigate(-1, 0),
+                                    VirtualKeyCode::Right | VirtualKeyCode::D => crafting_ui.navigate(1, 0),
+                                    VirtualKeyCode::Tab => crafting_ui.switch_section(1),
+                                    VirtualKeyCode::LShift => crafting_ui.switch_section(-1),
+                                    VirtualKeyCode::Return => {
+                                        // Handle place/take based on current section
+                                        match crafting_ui.section {
+                                            0 => {
+                                                // In crafting grid - place item from inventory or remove
+                                                let (row, col) = (crafting_ui.selected_row, crafting_ui.selected_col);
+                                                if crafting_ui.grid[row][col].is_some() {
+                                                    // Remove item back to inventory
+                                                    if let Some(item) = crafting_ui.grid[row][col].take() {
+                                                        inventory.add_item(item);
+                                                    }
+                                                } else if let Some(item) = inventory.slots[inventory.selected_slot].as_ref() {
+                                                    // Place item from selected inventory slot
+                                                    if let ItemStack::Block(block_type, qty) = item {
+                                                        crafting_ui.grid[row][col] = Some(ItemStack::Block(*block_type, 1));
+                                                        if *qty <= 1 {
+                                                            inventory.slots[inventory.selected_slot] = None;
+                                                        } else {
+                                                            inventory.slots[inventory.selected_slot] = Some(ItemStack::Block(*block_type, qty - 1));
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            1 => {
+                                                // In result slot - take crafted item
+                                                if let Some(recipe) = recipe_registry.find_match(&crafting_ui.grid, crafting_ui.grid_size) {
+                                                    let result = recipe.result.clone();
+                                                    if inventory.add_item(result) {
+                                                        // Consume ingredients
+                                                        for row in 0..crafting_ui.grid_size {
+                                                            for col in 0..crafting_ui.grid_size {
+                                                                if let Some(ref mut item) = crafting_ui.grid[row][col] {
+                                                                    if let ItemStack::Block(_, ref mut qty) = item {
+                                                                        if *qty <= 1 {
+                                                                            crafting_ui.grid[row][col] = None;
+                                                                        } else {
+                                                                            *qty -= 1;
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            2 => {
+                                                // In inventory - select slot (already handled by number keys)
+                                                inventory.select_slot(crafting_ui.inventory_slot);
+                                            }
+                                            _ => {}
+                                        }
+                                    },
+                                    VirtualKeyCode::Key1 => { crafting_ui.section = 2; crafting_ui.inventory_slot = 0; },
+                                    VirtualKeyCode::Key2 => { crafting_ui.section = 2; crafting_ui.inventory_slot = 1; },
+                                    VirtualKeyCode::Key3 => { crafting_ui.section = 2; crafting_ui.inventory_slot = 2; },
+                                    VirtualKeyCode::Key4 => { crafting_ui.section = 2; crafting_ui.inventory_slot = 3; },
+                                    VirtualKeyCode::Key5 => { crafting_ui.section = 2; crafting_ui.inventory_slot = 4; },
+                                    VirtualKeyCode::Key6 => { crafting_ui.section = 2; crafting_ui.inventory_slot = 5; },
                                     _ => {}
                                 }
                             }
@@ -210,8 +291,13 @@ fn main() {
                                                 }
                                                 // Don't process further if we tried to eat
                                             } else if let Some((x, y, z)) = targeted_block {
-                                                // Check for chest first
-                                                if world.get_block(x, y, z) == Some(world::BlockType::Chest) {
+                                                // Check for interactable blocks first
+                                                if world.get_block(x, y, z) == Some(world::BlockType::CraftingTable) {
+                                                    // Open crafting table UI
+                                                    crafting_ui.open_crafting_table((x, y, z));
+                                                    mouse_captured = false;
+                                                    set_cursor_captured(&window, false);
+                                                } else if world.get_block(x, y, z) == Some(world::BlockType::Chest) {
                                                     // Open chest UI
                                                     chest_ui.open_chest((x, y, z));
                                                     mouse_captured = false;
@@ -280,15 +366,36 @@ fn main() {
                                         // Give player a chest for testing
                                         inventory.add_block(world::BlockType::Chest);
                                     },
+                                    VirtualKeyCode::G => {
+                                        // Give player a diamond pickaxe for testing
+                                        inventory.add_tool(Tool::new(ToolType::Pickaxe, ToolMaterial::Diamond));
+                                    },
+                                    VirtualKeyCode::B => {
+                                        // Give player a diamond sword for testing
+                                        inventory.add_tool(Tool::new(ToolType::Sword, ToolMaterial::Diamond));
+                                    },
+                                    VirtualKeyCode::I => {
+                                        // Open inventory crafting (2x2)
+                                        crafting_ui.open_inventory_crafting();
+                                        mouse_captured = false;
+                                        set_cursor_captured(&window, false);
+                                    },
                                     VirtualKeyCode::R => {
                                         // Respawn if dead
                                         if camera.is_dead {
                                             // Drop inventory at death location before respawn
                                             let death_pos = camera.position;
                                             for slot in inventory.slots.iter_mut() {
-                                                if let Some((block_type, qty)) = slot.take() {
-                                                    for _ in 0..qty {
-                                                        entity_manager.spawn_dropped_item(death_pos, block_type);
+                                                if let Some(item) = slot.take() {
+                                                    match item {
+                                                        ItemStack::Block(block_type, qty) => {
+                                                            for _ in 0..qty {
+                                                                entity_manager.spawn_dropped_item(death_pos, block_type);
+                                                            }
+                                                        }
+                                                        ItemStack::Tool(tool) => {
+                                                            entity_manager.spawn_dropped_tool(death_pos, tool);
+                                                        }
                                                     }
                                                 }
                                             }
@@ -297,7 +404,12 @@ fn main() {
                                             // Try to attack a hostile mob first (within 4 blocks)
                                             let mut attacked_something = false;
                                             if let Some((mob_id, _dist)) = entity_manager.get_closest_hostile_mob(camera.position, 4.0) {
-                                                let damage = 1.0; // Fist damage
+                                                // Calculate damage based on held tool/weapon
+                                                let damage = if let Some(tool) = inventory.get_selected_tool() {
+                                                    tool.attack_damage()
+                                                } else {
+                                                    1.0 // Fist damage
+                                                };
                                                 // Calculate knockback direction from player to mob
                                                 if let Some(mob) = entity_manager.get_hostile_mobs().iter().find(|m| m.id == mob_id) {
                                                     let kb_dir = cgmath::Vector3::new(
@@ -306,6 +418,13 @@ fn main() {
                                                         (mob.position.z - camera.position.z).signum() * 6.0,
                                                     );
                                                     entity_manager.damage_hostile_mob(mob_id, damage, Some(kb_dir));
+                                                    // Reduce weapon durability on attack
+                                                    if let Some(tool) = inventory.get_selected_tool_mut() {
+                                                        tool.durability = tool.durability.saturating_sub(1);
+                                                        if tool.durability == 0 {
+                                                            inventory.slots[inventory.selected_slot] = None;
+                                                        }
+                                                    }
                                                 }
                                                 renderer.start_arm_swing();
                                                 camera.deplete_hunger(HungerAction::Attack);
@@ -315,7 +434,12 @@ fn main() {
                                             // Try to attack animals if no hostile mob nearby
                                             if !attacked_something {
                                                 if let Some((animal_id, _dist)) = entity_manager.get_closest_animal(camera.position, 4.0) {
-                                                    let damage = 1.0; // Fist damage
+                                                    // Calculate damage based on held tool/weapon
+                                                    let damage = if let Some(tool) = inventory.get_selected_tool() {
+                                                        tool.attack_damage()
+                                                    } else {
+                                                        1.0 // Fist damage
+                                                    };
                                                     // Calculate knockback direction from player to animal
                                                     if let Some(animal) = entity_manager.get_animals().iter().find(|a| a.id == animal_id) {
                                                         let kb_dir = cgmath::Vector3::new(
@@ -330,6 +454,13 @@ fn main() {
                                                                 entity_manager.spawn_dropped_item(death_pos, meat_type);
                                                             }
                                                         }
+                                                        // Reduce weapon durability on attack
+                                                        if let Some(tool) = inventory.get_selected_tool_mut() {
+                                                            tool.durability = tool.durability.saturating_sub(1);
+                                                            if tool.durability == 0 {
+                                                                inventory.slots[inventory.selected_slot] = None;
+                                                            }
+                                                        }
                                                     }
                                                     renderer.start_arm_swing();
                                                     camera.deplete_hunger(HungerAction::Attack);
@@ -342,17 +473,30 @@ fn main() {
                                                 if let Some((x, y, z)) = targeted_block {
                                                     // Get block type for particles before damaging
                                                     let block_type = world.get_block(x, y, z);
-                                                    if let Some(broken_type) = world.damage_block(x, y, z) {
-                                                        // Block was fully destroyed - spawn more particles
+
+                                                    // Get the currently held tool (if any)
+                                                    let tool_ref = inventory.get_selected_tool();
+                                                    let broken_type = world.damage_block_with_tool(x, y, z, tool_ref);
+
+                                                    if let Some(dropped_block) = broken_type {
+                                                        // Block was fully destroyed and can be harvested
                                                         let block_center = cgmath::Point3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5);
-                                                        particle_system.spawn_block_break(block_center, broken_type);
-                                                        // Spawn dropped item instead of directly adding to inventory
-                                                        entity_manager.spawn_dropped_item(block_center, broken_type);
+                                                        particle_system.spawn_block_break(block_center, dropped_block);
+                                                        // Spawn dropped item
+                                                        entity_manager.spawn_dropped_item(block_center, dropped_block);
                                                         if let Some(ref audio) = audio_manager {
-                                                            audio.play_block_break(broken_type);
+                                                            audio.play_block_break(dropped_block);
+                                                        }
+                                                        // Reduce tool durability if a tool was used
+                                                        if let Some(tool) = inventory.get_selected_tool_mut() {
+                                                            tool.durability = tool.durability.saturating_sub(1);
+                                                            // Remove tool if broken
+                                                            if tool.durability == 0 {
+                                                                inventory.slots[inventory.selected_slot] = None;
+                                                            }
                                                         }
                                                     } else if let Some(bt) = block_type {
-                                                        // Block was just damaged - spawn fewer particles
+                                                        // Block was just damaged (not destroyed) or destroyed but not harvestable
                                                         particle_system.spawn_block_break(
                                                             cgmath::Point3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
                                                             bt
@@ -405,8 +549,8 @@ fn main() {
                     }
 
                     // Collect nearby dropped items
-                    for block_type in entity_manager.collect_nearby_items(camera.position) {
-                        inventory.add_block(block_type);
+                    for item in entity_manager.collect_nearby_items(camera.position) {
+                        inventory.add_item(item);
                     }
 
                     weather_state.update(dt, &mut weather_rng);
@@ -484,7 +628,7 @@ fn main() {
             Event::RedrawRequested(_) => {
                 if is_loaded {
                     let is_underwater = camera.is_underwater(&world);
-                    renderer.render(&camera, &mut world, &inventory, targeted_block, &entity_manager, &particle_system, is_underwater, &debug_info, &pause_menu, &chest_ui, &lightning_system, &weather_state);
+                    renderer.render(&camera, &mut world, &inventory, targeted_block, &entity_manager, &particle_system, is_underwater, &debug_info, &pause_menu, &chest_ui, &crafting_ui, &recipe_registry, &lightning_system, &weather_state);
                 } else {
                     // Process loading stages
                     let (progress, message) = match loading_stage {

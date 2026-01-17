@@ -647,9 +647,9 @@ impl Camera {
         if self.on_ground && !self.was_on_ground && !is_in_water {
             self.just_landed = true;
 
-            // Apply fall damage if fell more than 3 blocks
-            if self.fall_distance > 3.0 {
-                let damage = (self.fall_distance - 3.0).floor();
+            // Apply fall damage if fell more than 5 blocks (reduced damage)
+            if self.fall_distance > 5.0 {
+                let damage = ((self.fall_distance - 5.0) * 0.5).floor().max(1.0);
                 self.take_damage(damage, None);
             }
             self.fall_distance = 0.0;

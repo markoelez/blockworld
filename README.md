@@ -32,6 +32,8 @@ cargo run --release
 | `R` | Break block / Attack / Respawn when dead |
 | `T` | Give torch (debug) |
 | `C` | Give chest (debug) |
+| `G` | Give diamond pickaxe (debug) |
+| `B` | Give diamond sword (debug) |
 | `F3` | Toggle debug info |
 | `Escape` | Pause menu |
 
@@ -62,10 +64,30 @@ cargo run --release
 - **Aquatic Life**: Fish, Squid, Dolphins
 - **Flying Creatures**: Bats, Bees, Parrots
 - **Villagers**: NPCs that wander around villages
-- **Dropped Items**: Blocks and food drop as pickups
+- **Dropped Items**: Blocks, food, and tools drop as pickups
+
+### Tools & Weapons
+- **Tool Types**: Pickaxe, Axe, Shovel, Sword
+- **Materials**: Wood, Stone, Iron, Gold, Diamond (increasing effectiveness)
+- **Mining Speed**: Tools speed up mining when used on appropriate blocks
+  - Pickaxe: Stone, ores, brick
+  - Axe: Wood, planks, fences
+  - Shovel: Dirt, grass, sand, gravel
+- **Weapon Damage**: Swords deal extra damage in combat
+- **Durability**: Tools wear out with use and break when depleted
+- **Harvest Requirements**: Some blocks require specific tool tiers to drop items
+
+| Material | Mining Speed | Attack Damage | Durability |
+|----------|--------------|---------------|------------|
+| Wood | 2x | +0 | 60 |
+| Stone | 4x | +1 | 132 |
+| Iron | 6x | +2 | 251 |
+| Gold | 12x | +0 | 33 |
+| Diamond | 8x | +3 | 1562 |
 
 ### Combat
-- Attack mobs and animals with fists
+- Attack mobs and animals with fists or weapons
+- Tool-based damage (swords deal most damage)
 - Knockback on hit
 - Damage cooldown with invincibility frames
 - Animals flee when attacked, drop meat when killed
@@ -102,6 +124,7 @@ cargo run --release
 
 ### UI
 - Hotbar with item icons and counts
+- Tool durability bars (color-coded: green/yellow/red)
 - Health bar (hearts)
 - Hunger bar (drumsticks)
 - Air bubbles when underwater

@@ -1,6 +1,6 @@
 use wgpu::util::DeviceExt;
 use bytemuck::{Pod, Zeroable};
-use crate::world::BlockType;
+use crate::world::{BlockType, ItemStack, Tool, ToolType, ToolMaterial};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
@@ -12,18 +12,20 @@ struct UIVertex {
 }
 
 pub struct Inventory {
-    pub slots: [Option<(BlockType, u32)>; HOTBAR_NUM_SLOTS],
+    pub slots: [Option<ItemStack>; HOTBAR_NUM_SLOTS],
     pub selected_slot: usize,
 }
 
 impl Inventory {
     pub fn new() -> Self {
         Self {
-            slots: [None; HOTBAR_NUM_SLOTS],
+            slots: Default::default(),
             selected_slot: 0,
         }
     }
 }
+
+const HOTBAR_NUM_SLOTS: usize = 9;
 
 pub struct DebugInfo {
     pub visible: bool,
@@ -118,32 +120,502 @@ impl ChestUI {
     }
 }
 
+// ============ CRAFTING SYSTEM ============
+
+/// Represents a crafting recipe
+#[derive(Clone)]
+pub struct Recipe {
+    /// 3x3 pattern (None = empty slot, Some = required item)
+    /// Patterns smaller than 3x3 are stored in top-left
+    pub pattern: [[Option<BlockType>; 3]; 3],
+    /// The resulting item from this recipe
+    pub result: ItemStack,
+    /// Pattern dimensions (width, height) for matching
+    pub width: usize,
+    pub height: usize,
+    /// If false, this is a shapeless recipe (order doesn't matter)
+    pub shaped: bool,
+}
+
+impl Recipe {
+    /// Create a shaped recipe from a pattern string and mapping
+    /// Pattern uses characters mapped to BlockTypes, ' ' for empty
+    pub fn shaped(pattern: &[&str], mapping: &[(char, BlockType)], result: ItemStack) -> Self {
+        let mut grid = [[None; 3]; 3];
+        let height = pattern.len().min(3);
+        let mut width = 0;
+
+        for (row, line) in pattern.iter().enumerate() {
+            if row >= 3 { break; }
+            let chars: Vec<char> = line.chars().collect();
+            width = width.max(chars.len());
+            for (col, ch) in chars.iter().enumerate() {
+                if col >= 3 { break; }
+                if *ch != ' ' {
+                    for (map_char, block_type) in mapping {
+                        if *ch == *map_char {
+                            grid[row][col] = Some(*block_type);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        Self {
+            pattern: grid,
+            result,
+            width: width.min(3),
+            height,
+            shaped: true,
+        }
+    }
+
+    /// Create a shapeless recipe (ingredients only, order doesn't matter)
+    pub fn shapeless(ingredients: &[BlockType], result: ItemStack) -> Self {
+        let mut grid = [[None; 3]; 3];
+        for (i, block) in ingredients.iter().enumerate() {
+            if i >= 9 { break; }
+            grid[i / 3][i % 3] = Some(*block);
+        }
+        Self {
+            pattern: grid,
+            result,
+            width: 0,  // Not used for shapeless
+            height: 0,
+            shaped: false,
+        }
+    }
+}
+
+/// Registry of all crafting recipes
+pub struct RecipeRegistry {
+    pub recipes: Vec<Recipe>,
+}
+
+impl RecipeRegistry {
+    pub fn new() -> Self {
+        let mut registry = Self { recipes: Vec::new() };
+        registry.register_default_recipes();
+        registry
+    }
+
+    fn register_default_recipes(&mut self) {
+        // === BASIC RECIPES (2x2 craftable) ===
+
+        // Wood -> 4 Planks
+        self.recipes.push(Recipe::shaped(
+            &["W"],
+            &[('W', BlockType::Wood)],
+            ItemStack::Block(BlockType::Planks, 4),
+        ));
+
+        // Planks -> 4 Sticks (vertical)
+        self.recipes.push(Recipe::shaped(
+            &["P", "P"],
+            &[('P', BlockType::Planks)],
+            ItemStack::Block(BlockType::Stick, 4),
+        ));
+
+        // 4 Planks -> Crafting Table
+        self.recipes.push(Recipe::shaped(
+            &["PP", "PP"],
+            &[('P', BlockType::Planks)],
+            ItemStack::Block(BlockType::CraftingTable, 1),
+        ));
+
+        // Coal + Stick -> 4 Torches
+        self.recipes.push(Recipe::shaped(
+            &["C", "S"],
+            &[('C', BlockType::Coal), ('S', BlockType::Stick)],
+            ItemStack::Block(BlockType::Torch, 4),
+        ));
+
+        // === 3x3 RECIPES (Crafting Table required) ===
+
+        // 8 Planks (ring) -> Chest
+        self.recipes.push(Recipe::shaped(
+            &["PPP", "P P", "PPP"],
+            &[('P', BlockType::Planks)],
+            ItemStack::Block(BlockType::Chest, 1),
+        ));
+
+        // 4 Cobblestone -> 4 Stone Bricks
+        self.recipes.push(Recipe::shaped(
+            &["CC", "CC"],
+            &[('C', BlockType::Cobblestone)],
+            ItemStack::Block(BlockType::Brick, 4),
+        ));
+
+        // Fence: Stick-Plank-Stick pattern
+        self.recipes.push(Recipe::shaped(
+            &["SPS", "SPS"],
+            &[('S', BlockType::Stick), ('P', BlockType::Planks)],
+            ItemStack::Block(BlockType::Fence, 3),
+        ));
+
+        // === TOOL RECIPES ===
+        self.register_tool_recipes();
+    }
+
+    fn register_tool_recipes(&mut self) {
+        // Materials for tools (in order: Wood, Stone, Iron, Gold, Diamond)
+        let materials = [
+            (BlockType::Planks, ToolMaterial::Wood),
+            (BlockType::Cobblestone, ToolMaterial::Stone),
+            (BlockType::Iron, ToolMaterial::Iron),
+            (BlockType::Gold, ToolMaterial::Gold),
+            (BlockType::Diamond, ToolMaterial::Diamond),
+        ];
+
+        for (block, material) in materials {
+            // Pickaxe: MMM / _S_ / _S_
+            self.recipes.push(Recipe::shaped(
+                &["MMM", " S ", " S "],
+                &[('M', block), ('S', BlockType::Stick)],
+                ItemStack::Tool(Tool::new(ToolType::Pickaxe, material)),
+            ));
+
+            // Axe: MM_ / MS_ / _S_
+            self.recipes.push(Recipe::shaped(
+                &["MM", "MS", " S"],
+                &[('M', block), ('S', BlockType::Stick)],
+                ItemStack::Tool(Tool::new(ToolType::Axe, material)),
+            ));
+
+            // Axe (mirrored): _MM / _SM / _S_
+            self.recipes.push(Recipe::shaped(
+                &["MM", "SM", "S "],
+                &[('M', block), ('S', BlockType::Stick)],
+                ItemStack::Tool(Tool::new(ToolType::Axe, material)),
+            ));
+
+            // Shovel: _M_ / _S_ / _S_
+            self.recipes.push(Recipe::shaped(
+                &["M", "S", "S"],
+                &[('M', block), ('S', BlockType::Stick)],
+                ItemStack::Tool(Tool::new(ToolType::Shovel, material)),
+            ));
+
+            // Sword: _M_ / _M_ / _S_
+            self.recipes.push(Recipe::shaped(
+                &["M", "M", "S"],
+                &[('M', block), ('S', BlockType::Stick)],
+                ItemStack::Tool(Tool::new(ToolType::Sword, material)),
+            ));
+        }
+    }
+
+    /// Find a matching recipe for the given crafting grid
+    pub fn find_match(&self, grid: &[[Option<ItemStack>; 3]; 3], grid_size: usize) -> Option<&Recipe> {
+        // Convert ItemStack grid to BlockType grid for matching
+        let mut block_grid = [[None; 3]; 3];
+        for row in 0..3 {
+            for col in 0..3 {
+                block_grid[row][col] = match &grid[row][col] {
+                    Some(ItemStack::Block(bt, _)) => Some(*bt),
+                    _ => None,
+                };
+            }
+        }
+
+        for recipe in &self.recipes {
+            if self.matches_recipe(recipe, &block_grid, grid_size) {
+                return Some(recipe);
+            }
+        }
+        None
+    }
+
+    fn matches_recipe(&self, recipe: &Recipe, grid: &[[Option<BlockType>; 3]; 3], grid_size: usize) -> bool {
+        if recipe.shaped {
+            self.matches_shaped(recipe, grid, grid_size)
+        } else {
+            self.matches_shapeless(recipe, grid)
+        }
+    }
+
+    fn matches_shaped(&self, recipe: &Recipe, grid: &[[Option<BlockType>; 3]; 3], grid_size: usize) -> bool {
+        // Check if recipe fits in available grid size
+        if recipe.width > grid_size || recipe.height > grid_size {
+            return false;
+        }
+
+        // Try all possible positions in the grid
+        for start_row in 0..=(grid_size - recipe.height) {
+            for start_col in 0..=(grid_size - recipe.width) {
+                if self.matches_at_position(recipe, grid, start_row, start_col, grid_size) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn matches_at_position(
+        &self,
+        recipe: &Recipe,
+        grid: &[[Option<BlockType>; 3]; 3],
+        start_row: usize,
+        start_col: usize,
+        grid_size: usize,
+    ) -> bool {
+        // Check that pattern matches at this position
+        for row in 0..recipe.height {
+            for col in 0..recipe.width {
+                let grid_row = start_row + row;
+                let grid_col = start_col + col;
+                let pattern_item = recipe.pattern[row][col];
+                let grid_item = grid[grid_row][grid_col];
+
+                if pattern_item != grid_item {
+                    return false;
+                }
+            }
+        }
+
+        // Check that all other cells in the grid are empty
+        for row in 0..grid_size {
+            for col in 0..grid_size {
+                let in_pattern = row >= start_row && row < start_row + recipe.height
+                    && col >= start_col && col < start_col + recipe.width;
+                if !in_pattern && grid[row][col].is_some() {
+                    return false;
+                }
+            }
+        }
+
+        true
+    }
+
+    fn matches_shapeless(&self, recipe: &Recipe, grid: &[[Option<BlockType>; 3]; 3]) -> bool {
+        // Collect ingredients from recipe
+        let mut recipe_items: Vec<BlockType> = Vec::new();
+        for row in &recipe.pattern {
+            for item in row {
+                if let Some(bt) = item {
+                    recipe_items.push(*bt);
+                }
+            }
+        }
+
+        // Collect ingredients from grid
+        let mut grid_items: Vec<BlockType> = Vec::new();
+        for row in grid {
+            for item in row {
+                if let Some(bt) = item {
+                    grid_items.push(*bt);
+                }
+            }
+        }
+
+        // Check same count
+        if recipe_items.len() != grid_items.len() {
+            return false;
+        }
+
+        // Check all recipe items are in grid (order doesn't matter)
+        let mut grid_items_remaining = grid_items.clone();
+        for recipe_item in &recipe_items {
+            if let Some(pos) = grid_items_remaining.iter().position(|x| x == recipe_item) {
+                grid_items_remaining.remove(pos);
+            } else {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+/// Crafting UI state
+pub struct CraftingUI {
+    pub open: bool,
+    /// 2 for inventory crafting, 3 for crafting table
+    pub grid_size: usize,
+    /// 3x3 crafting grid (only uses grid_size x grid_size)
+    pub grid: [[Option<ItemStack>; 3]; 3],
+    /// Currently selected position (row, col) - can also select result or inventory
+    pub selected_row: usize,
+    pub selected_col: usize,
+    /// Which section is selected: 0=grid, 1=result, 2=inventory
+    pub section: usize,
+    /// Selected inventory slot (when section=2)
+    pub inventory_slot: usize,
+    /// Position of crafting table (None for inventory crafting)
+    pub table_pos: Option<(i32, i32, i32)>,
+}
+
+impl CraftingUI {
+    const EMPTY_ROW: [Option<ItemStack>; 3] = [None, None, None];
+
+    pub fn new() -> Self {
+        Self {
+            open: false,
+            grid_size: 2,
+            grid: [Self::EMPTY_ROW, Self::EMPTY_ROW, Self::EMPTY_ROW],
+            selected_row: 0,
+            selected_col: 0,
+            section: 0,
+            inventory_slot: 0,
+            table_pos: None,
+        }
+    }
+
+    /// Open inventory crafting (2x2)
+    pub fn open_inventory_crafting(&mut self) {
+        self.open = true;
+        self.grid_size = 2;
+        self.table_pos = None;
+        self.clear_grid();
+        self.selected_row = 0;
+        self.selected_col = 0;
+        self.section = 0;
+        self.inventory_slot = 0;
+    }
+
+    /// Open crafting table (3x3)
+    pub fn open_crafting_table(&mut self, pos: (i32, i32, i32)) {
+        self.open = true;
+        self.grid_size = 3;
+        self.table_pos = Some(pos);
+        self.clear_grid();
+        self.selected_row = 0;
+        self.selected_col = 0;
+        self.section = 0;
+        self.inventory_slot = 0;
+    }
+
+    pub fn close(&mut self) -> Vec<ItemStack> {
+        self.open = false;
+        self.table_pos = None;
+        // Return items in grid to be added back to inventory
+        let mut items = Vec::new();
+        for row in 0..3 {
+            for col in 0..3 {
+                if let Some(item) = self.grid[row][col].take() {
+                    items.push(item);
+                }
+            }
+        }
+        items
+    }
+
+    fn clear_grid(&mut self) {
+        self.grid = [Self::EMPTY_ROW, Self::EMPTY_ROW, Self::EMPTY_ROW];
+    }
+
+    pub fn navigate(&mut self, dx: i32, dy: i32) {
+        match self.section {
+            0 => {
+                // In crafting grid
+                let new_col = (self.selected_col as i32 + dx).clamp(0, self.grid_size as i32 - 1) as usize;
+                let new_row = (self.selected_row as i32 + dy).clamp(0, self.grid_size as i32 - 1) as usize;
+                self.selected_col = new_col;
+                self.selected_row = new_row;
+            }
+            1 => {
+                // In result slot - no horizontal movement
+            }
+            2 => {
+                // In inventory
+                let new_slot = (self.inventory_slot as i32 + dx).clamp(0, 8) as usize;
+                self.inventory_slot = new_slot;
+            }
+            _ => {}
+        }
+    }
+
+    /// Switch between sections (grid, result, inventory)
+    pub fn switch_section(&mut self, direction: i32) {
+        // Circular navigation: 0 -> 1 -> 2 -> 0 (forward) or 0 -> 2 -> 1 -> 0 (backward)
+        let num_sections = 3i32;
+        let new_section = (self.section as i32 + direction).rem_euclid(num_sections) as usize;
+        self.section = new_section;
+    }
+
+    /// Get the currently selected grid position (if in grid section)
+    pub fn get_selected_grid_pos(&self) -> Option<(usize, usize)> {
+        if self.section == 0 {
+            Some((self.selected_row, self.selected_col))
+        } else {
+            None
+        }
+    }
+}
+
 impl Inventory {
     pub fn select_slot(&mut self, slot: usize) {
         if slot < self.slots.len() {
             self.selected_slot = slot;
         }
     }
-    
-    pub fn get_selected_block(&self) -> Option<BlockType> {
-        self.slots[self.selected_slot].and_then(|(bt, qty)| if qty > 0 { Some(bt) } else { None })
+
+    /// Get the selected item (block or tool)
+    pub fn get_selected_item(&self) -> Option<&ItemStack> {
+        self.slots[self.selected_slot].as_ref()
     }
 
-    pub fn decrement_selected(&mut self) {
-        if let Some((_, qty)) = &mut self.slots[self.selected_slot] {
-            if *qty > 0 {
-                *qty -= 1;
-                if *qty == 0 {
-                    self.slots[self.selected_slot] = None;
-                }
-            }
+    /// Get mutable reference to selected item
+    pub fn get_selected_item_mut(&mut self) -> Option<&mut ItemStack> {
+        self.slots[self.selected_slot].as_mut()
+    }
+
+    /// Get the selected block type (if holding a block)
+    pub fn get_selected_block(&self) -> Option<BlockType> {
+        match &self.slots[self.selected_slot] {
+            Some(ItemStack::Block(bt, qty)) if *qty > 0 => Some(*bt),
+            _ => None,
         }
     }
 
+    /// Get the selected tool (if holding a tool)
+    pub fn get_selected_tool(&self) -> Option<&Tool> {
+        match &self.slots[self.selected_slot] {
+            Some(ItemStack::Tool(tool)) => Some(tool),
+            _ => None,
+        }
+    }
+
+    /// Get mutable reference to selected tool
+    pub fn get_selected_tool_mut(&mut self) -> Option<&mut Tool> {
+        match &mut self.slots[self.selected_slot] {
+            Some(ItemStack::Tool(tool)) => Some(tool),
+            _ => None,
+        }
+    }
+
+    /// Decrement the selected item (for blocks) or remove tool if broken
+    pub fn decrement_selected(&mut self) {
+        match &mut self.slots[self.selected_slot] {
+            Some(ItemStack::Block(_, qty)) => {
+                if *qty > 0 {
+                    *qty -= 1;
+                    if *qty == 0 {
+                        self.slots[self.selected_slot] = None;
+                    }
+                }
+            }
+            Some(ItemStack::Tool(tool)) => {
+                // For tools, this is called when tool breaks
+                if tool.durability == 0 {
+                    self.slots[self.selected_slot] = None;
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Remove the selected item entirely
+    pub fn remove_selected(&mut self) {
+        self.slots[self.selected_slot] = None;
+    }
+
+    /// Add a block to inventory (stacks with existing)
     pub fn add_block(&mut self, block_type: BlockType) -> bool {
-        // First try to add to existing slot
+        // First try to add to existing slot with same block type
         for slot in self.slots.iter_mut() {
-            if let Some((bt, qty)) = slot {
+            if let Some(ItemStack::Block(bt, qty)) = slot {
                 if *bt == block_type {
                     *qty += 1;
                     return true;
@@ -153,17 +625,43 @@ impl Inventory {
         // Then try to add to empty slot
         for slot in self.slots.iter_mut() {
             if slot.is_none() {
-                *slot = Some((block_type, 1));
+                *slot = Some(ItemStack::Block(block_type, 1));
                 return true;
             }
         }
         false
     }
+
+    /// Add a tool to inventory (doesn't stack)
+    pub fn add_tool(&mut self, tool: Tool) -> bool {
+        // Tools don't stack, find empty slot
+        for slot in self.slots.iter_mut() {
+            if slot.is_none() {
+                *slot = Some(ItemStack::Tool(tool));
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Add an item stack to inventory
+    pub fn add_item(&mut self, item: ItemStack) -> bool {
+        match item {
+            ItemStack::Block(bt, qty) => {
+                for _ in 0..qty {
+                    if !self.add_block(bt) {
+                        return false;
+                    }
+                }
+                true
+            }
+            ItemStack::Tool(tool) => self.add_tool(tool),
+        }
+    }
 }
 
 // Hotbar layout constants
 const HOTBAR_SLOT_SIZE: f32 = 0.04;
-const HOTBAR_NUM_SLOTS: usize = 9;  // Expanded to 9 slots like Minecraft
 const HOTBAR_DIVIDER_WIDTH: f32 = 0.002;
 const HOTBAR_Y: f32 = -0.92;
 const HOTBAR_BG_PADDING: f32 = 0.006;
@@ -419,8 +917,31 @@ impl UIRenderer {
             BlockType::RawBeef => 50.0,
             BlockType::RawChicken => 51.0,
             BlockType::RawMutton => 52.0,
+            // Crafting items
+            BlockType::Stick => 53.0,
+            BlockType::CraftingTable => 54.0,
             BlockType::Air | BlockType::Barrier => 0.0,
         }
+    }
+
+    fn tool_to_ui_index(tool: &Tool) -> f32 {
+        // Tool indices: 60-79 reserved for tools
+        // Layout: Pickaxe=60-64, Axe=65-69, Shovel=70-74, Sword=75-79
+        // Materials: Wood=0, Stone=1, Iron=2, Gold=3, Diamond=4
+        let type_offset = match tool.tool_type {
+            ToolType::Pickaxe => 60.0,
+            ToolType::Axe => 65.0,
+            ToolType::Shovel => 70.0,
+            ToolType::Sword => 75.0,
+        };
+        let material_offset = match tool.material {
+            ToolMaterial::Wood => 0.0,
+            ToolMaterial::Stone => 1.0,
+            ToolMaterial::Iron => 2.0,
+            ToolMaterial::Gold => 3.0,
+            ToolMaterial::Diamond => 4.0,
+        };
+        type_offset + material_offset
     }
 
     /// Calculate UV coordinates for a character in the font atlas
@@ -750,33 +1271,85 @@ impl UIRenderer {
             vertices.extend(slot_verts);
             indices.extend(slot_inds);
 
-            // Slot content (block texture)
-            if let Some((block_type, qty)) = inventory.slots[i] {
-                if qty > 0 {
-                    let block_type_val = Self::block_type_to_ui_index(block_type);
-                    let icon_base = vertices.len() as u16;
-                    vertices.extend_from_slice(&[
-                        UIVertex { position: [slot_x - icon_size, HOTBAR_Y - icon_size], tex_coords: [0.0, 1.0], color: icon_color, use_texture: block_type_val },
-                        UIVertex { position: [slot_x + icon_size, HOTBAR_Y - icon_size], tex_coords: [1.0, 1.0], color: icon_color, use_texture: block_type_val },
-                        UIVertex { position: [slot_x + icon_size, HOTBAR_Y + icon_size], tex_coords: [1.0, 0.0], color: icon_color, use_texture: block_type_val },
-                        UIVertex { position: [slot_x - icon_size, HOTBAR_Y + icon_size], tex_coords: [0.0, 0.0], color: icon_color, use_texture: block_type_val },
-                    ]);
-                    indices.extend_from_slice(&[icon_base, icon_base + 1, icon_base + 2, icon_base, icon_base + 2, icon_base + 3]);
+            // Slot content (block or tool)
+            if let Some(item) = &inventory.slots[i] {
+                match item {
+                    ItemStack::Block(block_type, qty) if *qty > 0 => {
+                        let block_type_val = Self::block_type_to_ui_index(*block_type);
+                        let icon_base = vertices.len() as u16;
+                        vertices.extend_from_slice(&[
+                            UIVertex { position: [slot_x - icon_size, HOTBAR_Y - icon_size], tex_coords: [0.0, 1.0], color: icon_color, use_texture: block_type_val },
+                            UIVertex { position: [slot_x + icon_size, HOTBAR_Y - icon_size], tex_coords: [1.0, 1.0], color: icon_color, use_texture: block_type_val },
+                            UIVertex { position: [slot_x + icon_size, HOTBAR_Y + icon_size], tex_coords: [1.0, 0.0], color: icon_color, use_texture: block_type_val },
+                            UIVertex { position: [slot_x - icon_size, HOTBAR_Y + icon_size], tex_coords: [0.0, 0.0], color: icon_color, use_texture: block_type_val },
+                        ]);
+                        indices.extend_from_slice(&[icon_base, icon_base + 1, icon_base + 2, icon_base, icon_base + 2, icon_base + 3]);
 
-                    // Quantity in bottom-right corner with shadow (Minecraft style)
-                    if qty > 1 {
-                        let qty_str = qty.to_string();
-                        let text_scale = HOTBAR_SLOT_SIZE * 0.7;  // Larger text
-                        let text_w = Self::text_width(&qty_str, text_scale);
-                        let text_x = slot_x + HOTBAR_SLOT_SIZE * 0.85 - text_w;
-                        let text_y = HOTBAR_Y - HOTBAR_SLOT_SIZE * 0.85;
-                        let (text_verts, text_inds) = Self::generate_text_with_shadow(
-                            &qty_str, text_x, text_y, text_scale,
-                            [1.0, 1.0, 1.0, 1.0], vertices.len() as u16
-                        );
-                        vertices.extend(text_verts);
-                        indices.extend(text_inds);
+                        // Quantity in bottom-right corner with shadow (Minecraft style)
+                        if *qty > 1 {
+                            let qty_str = qty.to_string();
+                            let text_scale = HOTBAR_SLOT_SIZE * 0.7;
+                            let text_w = Self::text_width(&qty_str, text_scale);
+                            let text_x = slot_x + HOTBAR_SLOT_SIZE * 0.85 - text_w;
+                            let text_y = HOTBAR_Y - HOTBAR_SLOT_SIZE * 0.85;
+                            let (text_verts, text_inds) = Self::generate_text_with_shadow(
+                                &qty_str, text_x, text_y, text_scale,
+                                [1.0, 1.0, 1.0, 1.0], vertices.len() as u16
+                            );
+                            vertices.extend(text_verts);
+                            indices.extend(text_inds);
+                        }
                     }
+                    ItemStack::Tool(tool) => {
+                        // Render tool icon
+                        let tool_type_val = Self::tool_to_ui_index(tool);
+                        let icon_base = vertices.len() as u16;
+                        vertices.extend_from_slice(&[
+                            UIVertex { position: [slot_x - icon_size, HOTBAR_Y - icon_size], tex_coords: [0.0, 1.0], color: icon_color, use_texture: tool_type_val },
+                            UIVertex { position: [slot_x + icon_size, HOTBAR_Y - icon_size], tex_coords: [1.0, 1.0], color: icon_color, use_texture: tool_type_val },
+                            UIVertex { position: [slot_x + icon_size, HOTBAR_Y + icon_size], tex_coords: [1.0, 0.0], color: icon_color, use_texture: tool_type_val },
+                            UIVertex { position: [slot_x - icon_size, HOTBAR_Y + icon_size], tex_coords: [0.0, 0.0], color: icon_color, use_texture: tool_type_val },
+                        ]);
+                        indices.extend_from_slice(&[icon_base, icon_base + 1, icon_base + 2, icon_base, icon_base + 2, icon_base + 3]);
+
+                        // Durability bar (only if damaged)
+                        if tool.durability < tool.max_durability {
+                            let durability_ratio = tool.durability_ratio();
+                            let bar_width = icon_size * 1.6;
+                            let bar_height = icon_size * 0.15;
+                            let bar_y = HOTBAR_Y - icon_size + bar_height;
+
+                            // Background (dark)
+                            let bar_bg_base = vertices.len() as u16;
+                            let bg_color = [0.1, 0.1, 0.1, 1.0];
+                            vertices.extend_from_slice(&[
+                                UIVertex { position: [slot_x - bar_width / 2.0, bar_y - bar_height], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 },
+                                UIVertex { position: [slot_x + bar_width / 2.0, bar_y - bar_height], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 },
+                                UIVertex { position: [slot_x + bar_width / 2.0, bar_y], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 },
+                                UIVertex { position: [slot_x - bar_width / 2.0, bar_y], tex_coords: [0.0, 0.0], color: bg_color, use_texture: 0.0 },
+                            ]);
+                            indices.extend_from_slice(&[bar_bg_base, bar_bg_base + 1, bar_bg_base + 2, bar_bg_base, bar_bg_base + 2, bar_bg_base + 3]);
+
+                            // Foreground (green -> yellow -> red)
+                            let bar_color = if durability_ratio > 0.5 {
+                                [0.2, 0.8, 0.2, 1.0] // Green
+                            } else if durability_ratio > 0.25 {
+                                [0.8, 0.8, 0.2, 1.0] // Yellow
+                            } else {
+                                [0.8, 0.2, 0.2, 1.0] // Red
+                            };
+                            let fill_width = bar_width * durability_ratio;
+                            let bar_fg_base = vertices.len() as u16;
+                            vertices.extend_from_slice(&[
+                                UIVertex { position: [slot_x - bar_width / 2.0, bar_y - bar_height], tex_coords: [0.0, 0.0], color: bar_color, use_texture: 0.0 },
+                                UIVertex { position: [slot_x - bar_width / 2.0 + fill_width, bar_y - bar_height], tex_coords: [0.0, 0.0], color: bar_color, use_texture: 0.0 },
+                                UIVertex { position: [slot_x - bar_width / 2.0 + fill_width, bar_y], tex_coords: [0.0, 0.0], color: bar_color, use_texture: 0.0 },
+                                UIVertex { position: [slot_x - bar_width / 2.0, bar_y], tex_coords: [0.0, 0.0], color: bar_color, use_texture: 0.0 },
+                            ]);
+                            indices.extend_from_slice(&[bar_fg_base, bar_fg_base + 1, bar_fg_base + 2, bar_fg_base, bar_fg_base + 2, bar_fg_base + 3]);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1372,14 +1945,17 @@ impl UIRenderer {
             indices.extend(slot_inds);
 
             // Draw item if present
-            if let Some((block_type, qty)) = inventory.slots[i] {
-                let block_type_val = Self::block_type_to_ui_index(block_type);
+            if let Some(ref item_stack) = inventory.slots[i] {
+                let (item_index, qty) = match item_stack {
+                    ItemStack::Block(block_type, qty) => (Self::block_type_to_ui_index(*block_type), *qty),
+                    ItemStack::Tool(tool) => (Self::tool_to_ui_index(tool), 1),
+                };
                 let icon_size = slot_size * 0.7;
                 let icon_base = vertices.len() as u16;
-                vertices.push(UIVertex { position: [slot_x - icon_size, inv_row_y - icon_size], tex_coords: [0.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
-                vertices.push(UIVertex { position: [slot_x + icon_size, inv_row_y - icon_size], tex_coords: [1.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
-                vertices.push(UIVertex { position: [slot_x + icon_size, inv_row_y + icon_size], tex_coords: [1.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
-                vertices.push(UIVertex { position: [slot_x - icon_size, inv_row_y + icon_size], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
+                vertices.push(UIVertex { position: [slot_x - icon_size, inv_row_y - icon_size], tex_coords: [0.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: item_index });
+                vertices.push(UIVertex { position: [slot_x + icon_size, inv_row_y - icon_size], tex_coords: [1.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: item_index });
+                vertices.push(UIVertex { position: [slot_x + icon_size, inv_row_y + icon_size], tex_coords: [1.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: item_index });
+                vertices.push(UIVertex { position: [slot_x - icon_size, inv_row_y + icon_size], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: item_index });
                 indices.extend_from_slice(&[icon_base, icon_base + 1, icon_base + 2, icon_base, icon_base + 2, icon_base + 3]);
 
                 // Quantity display with shadow (Minecraft style) - bottom right corner
@@ -1446,6 +2022,435 @@ impl UIRenderer {
         }
 
         queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Render crafting UI overlay
+    pub fn render_crafting_ui(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        texture_bind_group: &wgpu::BindGroup,
+        crafting_ui: &CraftingUI,
+        inventory: &Inventory,
+        recipe_result: Option<&ItemStack>,
+    ) {
+        let mut vertices: Vec<UIVertex> = Vec::new();
+        let mut indices: Vec<u16> = Vec::new();
+
+        // Full screen dark overlay
+        let overlay_color = [0.0, 0.0, 0.0, 0.7];
+        let base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [-1.0, -1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [1.0, -1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [1.0, 1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [-1.0, 1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+        // Layout constants - larger, more readable
+        let slot_size = 0.09;
+        let slot_spacing = 0.11;
+        let panel_border = 0.02;
+        let grid_size = crafting_ui.grid_size;
+
+        // Calculate panel dimensions - much larger with proper spacing
+        let grid_width = grid_size as f32 * slot_spacing;
+        let arrow_width = 0.12;
+        let result_width = slot_spacing;
+        let horizontal_padding = 0.08;
+        let panel_width = horizontal_padding + grid_width + arrow_width + result_width + horizontal_padding;
+
+        // Height: title + grid + separator + inventory label + inventory + instructions
+        let title_height = 0.12;
+        let grid_height = grid_size as f32 * slot_spacing + 0.04;
+        let separator_height = 0.06;
+        let inv_section_height = 0.18;
+        let instructions_height = 0.08;
+        let panel_height = title_height + grid_height + separator_height + inv_section_height + instructions_height;
+
+        let panel_x = -panel_width / 2.0;
+        let panel_y = -panel_height / 2.0;
+
+        // Main container panel - dark gray background
+        let panel_color = [0.2, 0.2, 0.2, 0.95];
+        let base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [panel_x, panel_y], tex_coords: [0.0, 0.0], color: panel_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [panel_x + panel_width, panel_y], tex_coords: [0.0, 0.0], color: panel_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [panel_x + panel_width, panel_y + panel_height], tex_coords: [0.0, 0.0], color: panel_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [panel_x, panel_y + panel_height], tex_coords: [0.0, 0.0], color: panel_color, use_texture: 0.0 });
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+        // Panel border - lighter gray
+        let border_color = [0.4, 0.4, 0.4, 1.0];
+        let border_thickness = 0.006;
+        // Top border
+        let base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [panel_x, panel_y + panel_height - border_thickness], tex_coords: [0.0, 0.0], color: border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [panel_x + panel_width, panel_y + panel_height - border_thickness], tex_coords: [0.0, 0.0], color: border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [panel_x + panel_width, panel_y + panel_height], tex_coords: [0.0, 0.0], color: border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [panel_x, panel_y + panel_height], tex_coords: [0.0, 0.0], color: border_color, use_texture: 0.0 });
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        // Bottom border
+        let base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [panel_x, panel_y], tex_coords: [0.0, 0.0], color: border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [panel_x + panel_width, panel_y], tex_coords: [0.0, 0.0], color: border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [panel_x + panel_width, panel_y + border_thickness], tex_coords: [0.0, 0.0], color: border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [panel_x, panel_y + border_thickness], tex_coords: [0.0, 0.0], color: border_color, use_texture: 0.0 });
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        // Left border
+        let base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [panel_x, panel_y], tex_coords: [0.0, 0.0], color: border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [panel_x + border_thickness, panel_y], tex_coords: [0.0, 0.0], color: border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [panel_x + border_thickness, panel_y + panel_height], tex_coords: [0.0, 0.0], color: border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [panel_x, panel_y + panel_height], tex_coords: [0.0, 0.0], color: border_color, use_texture: 0.0 });
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        // Right border
+        let base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [panel_x + panel_width - border_thickness, panel_y], tex_coords: [0.0, 0.0], color: border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [panel_x + panel_width, panel_y], tex_coords: [0.0, 0.0], color: border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [panel_x + panel_width, panel_y + panel_height], tex_coords: [0.0, 0.0], color: border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [panel_x + panel_width - border_thickness, panel_y + panel_height], tex_coords: [0.0, 0.0], color: border_color, use_texture: 0.0 });
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+        // Title - large and centered at top
+        let title = if grid_size == 3 { "Crafting Table" } else { "Crafting" };
+        let title_y = panel_y + panel_height - 0.07;
+        let (title_verts, title_inds) = Self::generate_centered_text(
+            title, 0.0, title_y, 0.05, [1.0, 1.0, 1.0, 1.0], vertices.len() as u16
+        );
+        vertices.extend(title_verts);
+        indices.extend(title_inds);
+
+        // Crafting area - positioned below title
+        let crafting_area_top = title_y - 0.08;
+        let grid_total_width = grid_size as f32 * slot_spacing;
+        let grid_start_x = panel_x + horizontal_padding;
+        let grid_center_y = crafting_area_top - slot_spacing / 2.0;
+
+        // Render crafting grid slots
+        for row in 0..grid_size {
+            for col in 0..grid_size {
+                let slot_x = grid_start_x + col as f32 * slot_spacing + slot_spacing / 2.0;
+                let slot_y = grid_center_y - row as f32 * slot_spacing;
+
+                let is_selected = crafting_ui.section == 0
+                    && crafting_ui.selected_row == row
+                    && crafting_ui.selected_col == col;
+
+                // Slot background - darker for unselected, highlighted for selected
+                let slot_bg_color = if is_selected {
+                    [0.4, 0.6, 0.4, 1.0]  // Green tint for selected
+                } else {
+                    [0.15, 0.15, 0.15, 1.0]  // Dark gray
+                };
+                let slot_border_color = if is_selected {
+                    [0.6, 1.0, 0.6, 1.0]  // Bright green border
+                } else {
+                    [0.35, 0.35, 0.35, 1.0]  // Gray border
+                };
+
+                // Draw slot background
+                let half_size = slot_size / 2.0;
+                let base = vertices.len() as u16;
+                vertices.push(UIVertex { position: [slot_x - half_size, slot_y - half_size], tex_coords: [0.0, 0.0], color: slot_bg_color, use_texture: 0.0 });
+                vertices.push(UIVertex { position: [slot_x + half_size, slot_y - half_size], tex_coords: [0.0, 0.0], color: slot_bg_color, use_texture: 0.0 });
+                vertices.push(UIVertex { position: [slot_x + half_size, slot_y + half_size], tex_coords: [0.0, 0.0], color: slot_bg_color, use_texture: 0.0 });
+                vertices.push(UIVertex { position: [slot_x - half_size, slot_y + half_size], tex_coords: [0.0, 0.0], color: slot_bg_color, use_texture: 0.0 });
+                indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+                // Draw slot border
+                let b = 0.004;
+                // Top
+                let base = vertices.len() as u16;
+                vertices.push(UIVertex { position: [slot_x - half_size, slot_y + half_size - b], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+                vertices.push(UIVertex { position: [slot_x + half_size, slot_y + half_size - b], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+                vertices.push(UIVertex { position: [slot_x + half_size, slot_y + half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+                vertices.push(UIVertex { position: [slot_x - half_size, slot_y + half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+                indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                // Bottom
+                let base = vertices.len() as u16;
+                vertices.push(UIVertex { position: [slot_x - half_size, slot_y - half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+                vertices.push(UIVertex { position: [slot_x + half_size, slot_y - half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+                vertices.push(UIVertex { position: [slot_x + half_size, slot_y - half_size + b], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+                vertices.push(UIVertex { position: [slot_x - half_size, slot_y - half_size + b], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+                indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                // Left
+                let base = vertices.len() as u16;
+                vertices.push(UIVertex { position: [slot_x - half_size, slot_y - half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+                vertices.push(UIVertex { position: [slot_x - half_size + b, slot_y - half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+                vertices.push(UIVertex { position: [slot_x - half_size + b, slot_y + half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+                vertices.push(UIVertex { position: [slot_x - half_size, slot_y + half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+                indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+                // Right
+                let base = vertices.len() as u16;
+                vertices.push(UIVertex { position: [slot_x + half_size - b, slot_y - half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+                vertices.push(UIVertex { position: [slot_x + half_size, slot_y - half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+                vertices.push(UIVertex { position: [slot_x + half_size, slot_y + half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+                vertices.push(UIVertex { position: [slot_x + half_size - b, slot_y + half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+                indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+                // Draw item if present
+                if let Some(ref item) = crafting_ui.grid[row][col] {
+                    Self::render_item_in_slot(
+                        &mut vertices, &mut indices,
+                        slot_x, slot_y, slot_size * 0.8, item
+                    );
+                }
+            }
+        }
+
+        // Arrow pointing to result - larger and more visible
+        let arrow_x = grid_start_x + grid_total_width + arrow_width / 2.0;
+        let arrow_y = grid_center_y - (grid_size as f32 - 1.0) * slot_spacing / 2.0;
+
+        // Draw arrow as a simple triangle
+        let arrow_color = [0.7, 0.7, 0.7, 1.0];
+        let arrow_size = 0.04;
+        let base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [arrow_x - arrow_size, arrow_y + arrow_size * 0.6], tex_coords: [0.0, 0.0], color: arrow_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [arrow_x - arrow_size, arrow_y - arrow_size * 0.6], tex_coords: [0.0, 0.0], color: arrow_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [arrow_x + arrow_size, arrow_y], tex_coords: [0.0, 0.0], color: arrow_color, use_texture: 0.0 });
+        indices.extend_from_slice(&[base, base + 1, base + 2]);
+
+        // Result slot - positioned after arrow
+        let result_x = grid_start_x + grid_total_width + arrow_width + slot_spacing / 2.0;
+        let result_y = arrow_y;
+        let is_result_selected = crafting_ui.section == 1;
+
+        let result_bg_color = if is_result_selected {
+            [0.4, 0.5, 0.6, 1.0]  // Blue tint for result selected
+        } else {
+            [0.18, 0.18, 0.18, 1.0]
+        };
+        let result_border_color = if is_result_selected {
+            [0.6, 0.8, 1.0, 1.0]  // Bright blue border
+        } else {
+            [0.4, 0.4, 0.4, 1.0]
+        };
+
+        // Draw result slot background (slightly larger)
+        let result_slot_size = slot_size * 1.1;
+        let half_size = result_slot_size / 2.0;
+        let base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [result_x - half_size, result_y - half_size], tex_coords: [0.0, 0.0], color: result_bg_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [result_x + half_size, result_y - half_size], tex_coords: [0.0, 0.0], color: result_bg_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [result_x + half_size, result_y + half_size], tex_coords: [0.0, 0.0], color: result_bg_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [result_x - half_size, result_y + half_size], tex_coords: [0.0, 0.0], color: result_bg_color, use_texture: 0.0 });
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+        // Result slot border
+        let b = 0.005;
+        let base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [result_x - half_size, result_y + half_size - b], tex_coords: [0.0, 0.0], color: result_border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [result_x + half_size, result_y + half_size - b], tex_coords: [0.0, 0.0], color: result_border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [result_x + half_size, result_y + half_size], tex_coords: [0.0, 0.0], color: result_border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [result_x - half_size, result_y + half_size], tex_coords: [0.0, 0.0], color: result_border_color, use_texture: 0.0 });
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        let base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [result_x - half_size, result_y - half_size], tex_coords: [0.0, 0.0], color: result_border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [result_x + half_size, result_y - half_size], tex_coords: [0.0, 0.0], color: result_border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [result_x + half_size, result_y - half_size + b], tex_coords: [0.0, 0.0], color: result_border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [result_x - half_size, result_y - half_size + b], tex_coords: [0.0, 0.0], color: result_border_color, use_texture: 0.0 });
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        let base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [result_x - half_size, result_y - half_size], tex_coords: [0.0, 0.0], color: result_border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [result_x - half_size + b, result_y - half_size], tex_coords: [0.0, 0.0], color: result_border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [result_x - half_size + b, result_y + half_size], tex_coords: [0.0, 0.0], color: result_border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [result_x - half_size, result_y + half_size], tex_coords: [0.0, 0.0], color: result_border_color, use_texture: 0.0 });
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        let base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [result_x + half_size - b, result_y - half_size], tex_coords: [0.0, 0.0], color: result_border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [result_x + half_size, result_y - half_size], tex_coords: [0.0, 0.0], color: result_border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [result_x + half_size, result_y + half_size], tex_coords: [0.0, 0.0], color: result_border_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [result_x + half_size - b, result_y + half_size], tex_coords: [0.0, 0.0], color: result_border_color, use_texture: 0.0 });
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+        // Draw result item if recipe matches
+        if let Some(result_item) = recipe_result {
+            Self::render_item_in_slot(
+                &mut vertices, &mut indices,
+                result_x, result_y, slot_size * 0.85, result_item
+            );
+        }
+
+        // Separator line between crafting and inventory
+        let separator_y = grid_center_y - grid_size as f32 * slot_spacing - 0.03;
+        let separator_color = [0.35, 0.35, 0.35, 1.0];
+        let base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [panel_x + 0.04, separator_y], tex_coords: [0.0, 0.0], color: separator_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [panel_x + panel_width - 0.04, separator_y], tex_coords: [0.0, 0.0], color: separator_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [panel_x + panel_width - 0.04, separator_y + 0.003], tex_coords: [0.0, 0.0], color: separator_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [panel_x + 0.04, separator_y + 0.003], tex_coords: [0.0, 0.0], color: separator_color, use_texture: 0.0 });
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+        // Inventory section label
+        let inv_label_y = separator_y - 0.05;
+        let (inv_label_verts, inv_label_inds) = Self::generate_centered_text(
+            "Inventory", 0.0, inv_label_y, 0.035, [0.8, 0.8, 0.8, 1.0], vertices.len() as u16
+        );
+        vertices.extend(inv_label_verts);
+        indices.extend(inv_label_inds);
+
+        // Inventory row - centered, with proper spacing
+        let inv_row_y = inv_label_y - 0.08;
+        let inv_num_slots = 6;  // Show 6 slots (hotbar slots 1-6)
+        let inv_slot_spacing = slot_spacing;
+        let inv_total_width = inv_num_slots as f32 * inv_slot_spacing;
+        let inv_start_x = -inv_total_width / 2.0 + inv_slot_spacing / 2.0;
+
+        for i in 0..inv_num_slots {
+            let slot_x = inv_start_x + i as f32 * inv_slot_spacing;
+            let is_selected = crafting_ui.section == 2 && crafting_ui.inventory_slot == i;
+
+            let slot_bg_color = if is_selected {
+                [0.5, 0.4, 0.3, 1.0]  // Orange tint for inventory selected
+            } else {
+                [0.15, 0.15, 0.15, 1.0]
+            };
+            let slot_border_color = if is_selected {
+                [1.0, 0.8, 0.4, 1.0]  // Orange border
+            } else {
+                [0.35, 0.35, 0.35, 1.0]
+            };
+
+            // Draw slot background
+            let half_size = slot_size / 2.0;
+            let base = vertices.len() as u16;
+            vertices.push(UIVertex { position: [slot_x - half_size, inv_row_y - half_size], tex_coords: [0.0, 0.0], color: slot_bg_color, use_texture: 0.0 });
+            vertices.push(UIVertex { position: [slot_x + half_size, inv_row_y - half_size], tex_coords: [0.0, 0.0], color: slot_bg_color, use_texture: 0.0 });
+            vertices.push(UIVertex { position: [slot_x + half_size, inv_row_y + half_size], tex_coords: [0.0, 0.0], color: slot_bg_color, use_texture: 0.0 });
+            vertices.push(UIVertex { position: [slot_x - half_size, inv_row_y + half_size], tex_coords: [0.0, 0.0], color: slot_bg_color, use_texture: 0.0 });
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+            // Draw slot border
+            let b = 0.004;
+            let base = vertices.len() as u16;
+            vertices.push(UIVertex { position: [slot_x - half_size, inv_row_y + half_size - b], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+            vertices.push(UIVertex { position: [slot_x + half_size, inv_row_y + half_size - b], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+            vertices.push(UIVertex { position: [slot_x + half_size, inv_row_y + half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+            vertices.push(UIVertex { position: [slot_x - half_size, inv_row_y + half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            let base = vertices.len() as u16;
+            vertices.push(UIVertex { position: [slot_x - half_size, inv_row_y - half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+            vertices.push(UIVertex { position: [slot_x + half_size, inv_row_y - half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+            vertices.push(UIVertex { position: [slot_x + half_size, inv_row_y - half_size + b], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+            vertices.push(UIVertex { position: [slot_x - half_size, inv_row_y - half_size + b], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            let base = vertices.len() as u16;
+            vertices.push(UIVertex { position: [slot_x - half_size, inv_row_y - half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+            vertices.push(UIVertex { position: [slot_x - half_size + b, inv_row_y - half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+            vertices.push(UIVertex { position: [slot_x - half_size + b, inv_row_y + half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+            vertices.push(UIVertex { position: [slot_x - half_size, inv_row_y + half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            let base = vertices.len() as u16;
+            vertices.push(UIVertex { position: [slot_x + half_size - b, inv_row_y - half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+            vertices.push(UIVertex { position: [slot_x + half_size, inv_row_y - half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+            vertices.push(UIVertex { position: [slot_x + half_size, inv_row_y + half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+            vertices.push(UIVertex { position: [slot_x + half_size - b, inv_row_y + half_size], tex_coords: [0.0, 0.0], color: slot_border_color, use_texture: 0.0 });
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+            // Draw item if present
+            if let Some(ref item) = inventory.slots[i] {
+                Self::render_item_in_slot(
+                    &mut vertices, &mut indices,
+                    slot_x, inv_row_y, slot_size * 0.8, item
+                );
+            }
+
+            // Draw slot number
+            let num_str = format!("{}", i + 1);
+            let (num_verts, num_inds) = Self::generate_centered_text(
+                &num_str, slot_x, inv_row_y - half_size - 0.025, 0.022, [0.5, 0.5, 0.5, 1.0], vertices.len() as u16
+            );
+            vertices.extend(num_verts);
+            indices.extend(num_inds);
+        }
+
+        // Instructions below the panel
+        let inst_y = panel_y - 0.05;
+        let (inst_verts, inst_inds) = Self::generate_centered_text(
+            "WASD: Move  E: Place/Take  Tab/Shift: Section  Esc: Close",
+            0.0, inst_y, 0.025, [0.75, 0.75, 0.75, 1.0], vertices.len() as u16
+        );
+        vertices.extend(inst_verts);
+        indices.extend(inst_inds);
+
+        // Create buffers and render
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Crafting UI Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Crafting UI Index Buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Crafting UI Encoder"),
+        });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Crafting UI Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            render_pass.set_pipeline(&self.ui_render_pipeline);
+            render_pass.set_bind_group(0, texture_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+        }
+
+        queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Helper to render an item (block or tool) in a slot
+    fn render_item_in_slot(
+        vertices: &mut Vec<UIVertex>,
+        indices: &mut Vec<u16>,
+        slot_x: f32,
+        slot_y: f32,
+        slot_size: f32,
+        item: &ItemStack,
+    ) {
+        let (item_index, qty) = match item {
+            ItemStack::Block(block_type, qty) => (Self::block_type_to_ui_index(*block_type), *qty),
+            ItemStack::Tool(tool) => (Self::tool_to_ui_index(tool), 1),
+        };
+
+        let icon_size = slot_size * 0.7;
+        let icon_base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [slot_x - icon_size, slot_y - icon_size], tex_coords: [0.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: item_index });
+        vertices.push(UIVertex { position: [slot_x + icon_size, slot_y - icon_size], tex_coords: [1.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: item_index });
+        vertices.push(UIVertex { position: [slot_x + icon_size, slot_y + icon_size], tex_coords: [1.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: item_index });
+        vertices.push(UIVertex { position: [slot_x - icon_size, slot_y + icon_size], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: item_index });
+        indices.extend_from_slice(&[icon_base, icon_base + 1, icon_base + 2, icon_base, icon_base + 2, icon_base + 3]);
+
+        // Quantity display for blocks with qty > 1
+        if qty > 1 {
+            let qty_str = qty.to_string();
+            let text_scale = slot_size * 0.6;
+            let text_x = slot_x - slot_size * 0.1;
+            let text_y = slot_y - slot_size * 0.75;
+            let (qty_verts, qty_inds) = Self::generate_text_with_shadow(
+                &qty_str, text_x, text_y, text_scale,
+                [1.0, 1.0, 1.0, 1.0], vertices.len() as u16
+            );
+            vertices.extend(qty_verts);
+            indices.extend(qty_inds);
+        }
     }
 
     /// Render survival UI (health hearts, hunger drumsticks, air bubbles)

@@ -38,6 +38,9 @@ pub enum BlockType {
     RawBeef,           // Dropped by cows, +3 hunger
     RawChicken,        // Dropped by chickens, +2 hunger
     RawMutton,         // Dropped by sheep, +2 hunger
+    // Crafting items
+    Stick,             // Crafted from planks, used in tools
+    CraftingTable,     // Enables 3x3 crafting grid
 }
 
 impl BlockType {
@@ -55,6 +58,273 @@ impl BlockType {
     /// Check if this block type is food
     pub fn is_food(&self) -> bool {
         self.food_properties().is_some()
+    }
+
+    /// Base hardness value (hits to break with fist)
+    pub fn hardness(&self) -> f32 {
+        match self {
+            BlockType::Air | BlockType::Water | BlockType::Lava => 0.0,
+            BlockType::Leaves => 1.0,
+            BlockType::Grass | BlockType::Dirt => 3.0,
+            BlockType::Sand | BlockType::Gravel | BlockType::Clay => 3.0,
+            BlockType::Wood | BlockType::Planks | BlockType::Fence => 5.0,
+            BlockType::Stone | BlockType::Cobblestone | BlockType::MossyCobblestone => 10.0,
+            BlockType::Brick => 10.0,
+            BlockType::Coal => 10.0,
+            BlockType::Iron => 15.0,
+            BlockType::Gold => 15.0,
+            BlockType::Diamond => 20.0,
+            BlockType::Ice | BlockType::Snow => 2.0,
+            _ => 1.0, // Default for misc blocks
+        }
+    }
+
+    /// Required tool type to harvest this block (None = any tool works)
+    pub fn required_tool(&self) -> Option<ToolType> {
+        match self {
+            // Stone/ores require pickaxe
+            BlockType::Stone | BlockType::Cobblestone | BlockType::MossyCobblestone
+            | BlockType::Brick | BlockType::Coal | BlockType::Iron
+            | BlockType::Gold | BlockType::Diamond => Some(ToolType::Pickaxe),
+            // Wood requires axe (but can break without)
+            BlockType::Wood | BlockType::Planks | BlockType::Fence => None,
+            _ => None,
+        }
+    }
+
+    /// Minimum tool material required to harvest (None = any material)
+    pub fn min_harvest_material(&self) -> Option<ToolMaterial> {
+        match self {
+            BlockType::Iron => Some(ToolMaterial::Stone),
+            BlockType::Gold | BlockType::Diamond => Some(ToolMaterial::Iron),
+            BlockType::Stone | BlockType::Cobblestone | BlockType::Coal => Some(ToolMaterial::Wood),
+            _ => None,
+        }
+    }
+
+    /// Which tool type is effective for faster mining
+    pub fn effective_tool(&self) -> Option<ToolType> {
+        match self {
+            // Pickaxe for stone/ores
+            BlockType::Stone | BlockType::Cobblestone | BlockType::MossyCobblestone
+            | BlockType::Brick | BlockType::Coal | BlockType::Iron
+            | BlockType::Gold | BlockType::Diamond | BlockType::Ice => Some(ToolType::Pickaxe),
+            // Axe for wood
+            BlockType::Wood | BlockType::Planks | BlockType::Fence | BlockType::Leaves => Some(ToolType::Axe),
+            // Shovel for earth
+            BlockType::Dirt | BlockType::Grass | BlockType::Sand
+            | BlockType::Gravel | BlockType::Clay | BlockType::Snow => Some(ToolType::Shovel),
+            _ => None,
+        }
+    }
+}
+
+// === TOOL SYSTEM ===
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolMaterial {
+    Wood,
+    Stone,
+    Iron,
+    Gold,
+    Diamond,
+}
+
+impl ToolMaterial {
+    pub fn durability(&self) -> u32 {
+        match self {
+            ToolMaterial::Wood => 59,
+            ToolMaterial::Stone => 131,
+            ToolMaterial::Iron => 250,
+            ToolMaterial::Gold => 32,
+            ToolMaterial::Diamond => 1561,
+        }
+    }
+
+    pub fn mining_speed(&self) -> f32 {
+        match self {
+            ToolMaterial::Wood => 2.0,
+            ToolMaterial::Stone => 4.0,
+            ToolMaterial::Iron => 6.0,
+            ToolMaterial::Gold => 12.0,
+            ToolMaterial::Diamond => 8.0,
+        }
+    }
+
+    pub fn attack_bonus(&self) -> f32 {
+        match self {
+            ToolMaterial::Wood => 0.0,
+            ToolMaterial::Stone => 1.0,
+            ToolMaterial::Iron => 2.0,
+            ToolMaterial::Gold => 0.0,
+            ToolMaterial::Diamond => 3.0,
+        }
+    }
+
+    /// Material tier for comparison (higher = better)
+    pub fn tier(&self) -> u8 {
+        match self {
+            ToolMaterial::Wood => 0,
+            ToolMaterial::Stone => 1,
+            ToolMaterial::Iron => 2,
+            ToolMaterial::Gold => 2, // Gold same tier as iron for harvesting
+            ToolMaterial::Diamond => 3,
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            ToolMaterial::Wood => "Wooden",
+            ToolMaterial::Stone => "Stone",
+            ToolMaterial::Iron => "Iron",
+            ToolMaterial::Gold => "Golden",
+            ToolMaterial::Diamond => "Diamond",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolType {
+    Pickaxe,
+    Axe,
+    Shovel,
+    Sword,
+}
+
+impl ToolType {
+    pub fn base_attack_damage(&self) -> f32 {
+        match self {
+            ToolType::Sword => 4.0,
+            ToolType::Axe => 3.0,
+            ToolType::Pickaxe => 2.0,
+            ToolType::Shovel => 1.5,
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            ToolType::Pickaxe => "Pickaxe",
+            ToolType::Axe => "Axe",
+            ToolType::Shovel => "Shovel",
+            ToolType::Sword => "Sword",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Tool {
+    pub tool_type: ToolType,
+    pub material: ToolMaterial,
+    pub durability: u32,
+    pub max_durability: u32,
+}
+
+impl Tool {
+    pub fn new(tool_type: ToolType, material: ToolMaterial) -> Self {
+        let max_durability = material.durability();
+        Self {
+            tool_type,
+            material,
+            durability: max_durability,
+            max_durability,
+        }
+    }
+
+    /// Attack damage for this tool
+    pub fn attack_damage(&self) -> f32 {
+        self.tool_type.base_attack_damage() + self.material.attack_bonus()
+    }
+
+    /// Mining speed multiplier when used on appropriate block
+    pub fn mining_speed(&self) -> f32 {
+        self.material.mining_speed()
+    }
+
+    /// Check if this tool is effective on the given block type
+    pub fn is_effective_on(&self, block: BlockType) -> bool {
+        block.effective_tool() == Some(self.tool_type)
+    }
+
+    /// Check if this tool can harvest the given block (get drops)
+    pub fn can_harvest(&self, block: BlockType) -> bool {
+        // Check if correct tool type
+        if let Some(required) = block.required_tool() {
+            if self.tool_type != required {
+                return false;
+            }
+        }
+        // Check if material tier is high enough
+        if let Some(min_mat) = block.min_harvest_material() {
+            if self.material.tier() < min_mat.tier() {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Use durability, returns false if tool breaks
+    pub fn use_durability(&mut self) -> bool {
+        if self.durability > 0 {
+            self.durability -= 1;
+            self.durability > 0
+        } else {
+            false
+        }
+    }
+
+    /// Durability as a ratio (1.0 = full, 0.0 = broken)
+    pub fn durability_ratio(&self) -> f32 {
+        self.durability as f32 / self.max_durability as f32
+    }
+
+    pub fn display_name(&self) -> String {
+        format!("{} {}", self.material.name(), self.tool_type.name())
+    }
+}
+
+// === ITEM STACK (for inventory) ===
+
+#[derive(Clone, Debug)]
+pub enum ItemStack {
+    Block(BlockType, u32),  // Block type with quantity
+    Tool(Tool),             // Single tool (doesn't stack)
+}
+
+impl ItemStack {
+    pub fn is_block(&self) -> bool {
+        matches!(self, ItemStack::Block(_, _))
+    }
+
+    pub fn is_tool(&self) -> bool {
+        matches!(self, ItemStack::Tool(_))
+    }
+
+    pub fn block_type(&self) -> Option<BlockType> {
+        match self {
+            ItemStack::Block(bt, _) => Some(*bt),
+            ItemStack::Tool(_) => None,
+        }
+    }
+
+    pub fn tool(&self) -> Option<&Tool> {
+        match self {
+            ItemStack::Tool(t) => Some(t),
+            ItemStack::Block(_, _) => None,
+        }
+    }
+
+    pub fn tool_mut(&mut self) -> Option<&mut Tool> {
+        match self {
+            ItemStack::Tool(t) => Some(t),
+            ItemStack::Block(_, _) => None,
+        }
+    }
+
+    pub fn quantity(&self) -> u32 {
+        match self {
+            ItemStack::Block(_, qty) => *qty,
+            ItemStack::Tool(_) => 1,
+        }
     }
 }
 
@@ -1791,7 +2061,14 @@ impl World {
         }
     }
 
+    /// Damage a block with bare hands (1.0 damage per hit)
     pub fn damage_block(&mut self, x: i32, y: i32, z: i32) -> Option<BlockType> {
+        self.damage_block_with_tool(x, y, z, None)
+    }
+
+    /// Damage a block with an optional tool
+    /// Returns (Option<BlockType dropped>, can_harvest, damage_dealt)
+    pub fn damage_block_with_tool(&mut self, x: i32, y: i32, z: i32, tool: Option<&Tool>) -> Option<BlockType> {
         if !self.can_destroy_block_at(x, y, z) {
             return None;
         }
@@ -1799,10 +2076,24 @@ impl World {
         let block_type = self.get_block(x, y, z)?;
         let pos = (x, y, z);
         let current_damage = self.block_damage.get(&pos).copied().unwrap_or(0.0);
-        let new_damage = current_damage + 1.0;
-        let hardness = Self::get_hardness(block_type);
+
+        // Calculate damage based on tool
+        let damage = if let Some(tool) = tool {
+            // Tool mining speed is only applied if tool is effective on this block
+            if tool.is_effective_on(block_type) {
+                tool.mining_speed()
+            } else {
+                1.0 // Wrong tool type, same as bare hands
+            }
+        } else {
+            1.0 // Bare hands
+        };
+
+        let new_damage = current_damage + damage;
+        let hardness = block_type.hardness();
 
         if new_damage >= hardness {
+            // Block broken!
             self.set_block(x, y, z, BlockType::Air);
             self.block_damage.remove(&pos);
             // Clean up torch orientation if it was a torch
@@ -1811,7 +2102,20 @@ impl World {
             }
             // Trigger water flow updates for adjacent water blocks
             self.trigger_water_updates_around(x, y, z);
-            Some(block_type)
+
+            // Check if player can actually harvest this block with their tool
+            let can_harvest = if let Some(tool) = tool {
+                tool.can_harvest(block_type)
+            } else {
+                // Bare hands can only harvest blocks that don't require tools
+                block_type.required_tool().is_none()
+            };
+
+            if can_harvest {
+                Some(block_type)
+            } else {
+                None // Block broken but nothing dropped
+            }
         } else {
             self.block_damage.insert(pos, new_damage);
             let chunk_x = x.div_euclid(Self::CHUNK_SIZE as i32);

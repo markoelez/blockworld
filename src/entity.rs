@@ -1,7 +1,7 @@
 use cgmath::{Point3, Vector3};
 use rand::Rng;
 
-use crate::world::{World, BlockType};
+use crate::world::{World, BlockType, ItemStack, Tool};
 
 // Villager constants
 pub const VILLAGER_HEIGHT: f32 = 1.8;
@@ -1389,14 +1389,14 @@ impl HostileMob {
 pub struct DroppedItem {
     pub position: Point3<f32>,
     pub velocity: Vector3<f32>,
-    pub block_type: BlockType,
+    pub item: ItemStack,
     pub rotation: f32,
     pub lifetime: f32,
     pub bobbing_phase: f32,
 }
 
 impl DroppedItem {
-    pub fn new(position: Point3<f32>, block_type: BlockType) -> Self {
+    pub fn new(position: Point3<f32>, item: ItemStack) -> Self {
         let mut rng = rand::thread_rng();
         Self {
             position,
@@ -1405,11 +1405,21 @@ impl DroppedItem {
                 rng.gen_range(4.0..6.0),  // Pop up
                 rng.gen_range(-1.5..1.5),
             ),
-            block_type,
+            item,
             rotation: rng.gen_range(0.0..std::f32::consts::TAU),
             lifetime: 300.0,  // 5 minutes
             bobbing_phase: rng.gen_range(0.0..std::f32::consts::TAU),
         }
+    }
+
+    /// Helper to create a dropped block item
+    pub fn new_block(position: Point3<f32>, block_type: BlockType) -> Self {
+        Self::new(position, ItemStack::Block(block_type, 1))
+    }
+
+    /// Helper to create a dropped tool item
+    pub fn new_tool(position: Point3<f32>, tool: Tool) -> Self {
+        Self::new(position, ItemStack::Tool(tool))
     }
 
     pub fn update(&mut self, dt: f32, world: &World) -> bool {
@@ -1499,12 +1509,19 @@ impl EntityManager {
     pub fn spawn_dropped_item(&mut self, position: Point3<f32>, block_type: BlockType) {
         // Limit total dropped items
         if self.dropped_items.len() < 200 {
-            self.dropped_items.push(DroppedItem::new(position, block_type));
+            self.dropped_items.push(DroppedItem::new_block(position, block_type));
         }
     }
 
-    /// Collect dropped items near the player, returns list of collected block types
-    pub fn collect_nearby_items(&mut self, player_pos: Point3<f32>) -> Vec<BlockType> {
+    /// Spawn a dropped tool at a position
+    pub fn spawn_dropped_tool(&mut self, position: Point3<f32>, tool: Tool) {
+        if self.dropped_items.len() < 200 {
+            self.dropped_items.push(DroppedItem::new_tool(position, tool));
+        }
+    }
+
+    /// Collect dropped items near the player, returns list of collected items
+    pub fn collect_nearby_items(&mut self, player_pos: Point3<f32>) -> Vec<ItemStack> {
         let mut collected = Vec::new();
 
         // Horizontal pickup radius (squared) - 1.5 blocks
@@ -1526,7 +1543,7 @@ impl EntityManager {
             let in_vertical_range = dy > -vertical_range_below && dy < vertical_range_above;
 
             if horiz_dist_sq < horizontal_dist_sq && in_vertical_range {
-                collected.push(item.block_type);
+                collected.push(item.item.clone());
                 false  // Remove from list
             } else {
                 true   // Keep in list

@@ -10,8 +10,8 @@ use rayon::prelude::*;
 use rand::Rng;
 
 use crate::camera::Camera;
-use crate::world::{World, BlockType, TorchFace};
-use crate::ui::{Inventory, UIRenderer, DebugInfo, PauseMenu, ChestUI};
+use crate::world::{World, BlockType, TorchFace, ItemStack, Tool, ToolType, ToolMaterial};
+use crate::ui::{Inventory, UIRenderer, DebugInfo, PauseMenu, ChestUI, CraftingUI, RecipeRegistry};
 use crate::entity::{EntityManager, Villager, VillagerState, VILLAGER_HEIGHT};
 use crate::particle::{ParticleSystem, LightningSystem, WeatherState, WeatherType};
 
@@ -2101,12 +2101,12 @@ impl Renderer {
         let ui_renderer = UIRenderer::new(&device, &queue, &config, &texture_bind_group, &texture_bind_group_layout);
         let start_time = Instant::now();
         
-        // Create indices for up to 2 cubes (item + arm)
+        // Create indices for up to 10 cubes (tool parts + arm) - enough for any tool
+        let max_cubes = 10;
         let mut held_indices: Vec<u16> = vec![];
         let face_indices = &[0u16, 1, 2, 2, 3, 0];
-        
-        // Always create indices for 2 cubes worth of vertices
-        for cube in 0..2 {
+
+        for cube in 0..max_cubes {
             let vert_base = (cube * 24) as u16;
             for face in 0..6 {
                 let base = vert_base + (face * 4) as u16;
@@ -2125,7 +2125,7 @@ impl Renderer {
 
         let held_item_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Held Item Vertex Buffer"),
-            size: (48 * std::mem::size_of::<Vertex>()) as u64, // 2 cubes * 24 vertices each
+            size: (max_cubes * 24 * std::mem::size_of::<Vertex>()) as u64, // max_cubes * 24 vertices each
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -2643,7 +2643,7 @@ impl Renderer {
         self.time_of_day
     }
 
-    pub fn render(&mut self, camera: &Camera, world: &mut World, inventory: &Inventory, targeted_block: Option<(i32, i32, i32)>, entity_manager: &EntityManager, particle_system: &ParticleSystem, underwater: bool, debug_info: &DebugInfo, pause_menu: &PauseMenu, chest_ui: &ChestUI, lightning_system: &LightningSystem, weather_state: &WeatherState) {
+    pub fn render(&mut self, camera: &Camera, world: &mut World, inventory: &Inventory, targeted_block: Option<(i32, i32, i32)>, entity_manager: &EntityManager, particle_system: &ParticleSystem, underwater: bool, debug_info: &DebugInfo, pause_menu: &PauseMenu, chest_ui: &ChestUI, crafting_ui: &CraftingUI, recipe_registry: &RecipeRegistry, lightning_system: &LightningSystem, weather_state: &WeatherState) {
         let now = Instant::now();
         let dt = (now - self.last_render).as_secs_f32();
         self.last_render = now;
@@ -2996,9 +2996,13 @@ impl Renderer {
                 render_pass.draw_indexed(0..72, 0, 0..1);
             }
 
-            let opt_block_type = inventory.get_selected_block();
-            let vertices = Self::create_held_item_vertices(camera, opt_block_type, self.arm_swing_progress);
+            let opt_item = inventory.get_selected_item();
+            let vertices = Self::create_held_item_vertices(camera, opt_item, self.arm_swing_progress);
             self.queue.write_buffer(&self.held_item_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+
+            // Calculate index count based on actual vertices (24 verts per cube, 36 indices per cube)
+            let num_cubes = vertices.len() / 24;
+            let actual_index_count = (num_cubes * 36) as u32;
 
             // Render held item
             render_pass.set_pipeline(&self.held_item_pipeline);
@@ -3006,7 +3010,7 @@ impl Renderer {
             render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.held_item_vertex_buffer.slice(..));
             render_pass.set_index_buffer(self.held_item_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.draw_indexed(0..self.held_item_index_count, 0, 0..1);
+            render_pass.draw_indexed(0..actual_index_count, 0, 0..1);
         }
 
         // === BLOOM EXTRACT PASS ===
@@ -3115,7 +3119,8 @@ impl Renderer {
         }
 
         // === UI PASS ===
-        {
+        // Only render hotbar/crosshair when crafting UI is not open
+        if !crafting_ui.open {
             let mut ui_render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("UI Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -3179,8 +3184,23 @@ impl Renderer {
             }
         }
 
+        // Render crafting UI
+        if crafting_ui.open {
+            let recipe_result = recipe_registry.find_match(&crafting_ui.grid, crafting_ui.grid_size)
+                .map(|r| &r.result);
+            self.ui_renderer.render_crafting_ui(
+                &self.device,
+                &self.queue,
+                &view,
+                &self.texture_bind_group,
+                crafting_ui,
+                inventory,
+                recipe_result,
+            );
+        }
+
         // Render survival UI (health, hunger, air)
-        if !pause_menu.visible && !chest_ui.open {
+        if !pause_menu.visible && !chest_ui.open && !crafting_ui.open {
             self.ui_renderer.render_survival_ui(
                 &self.device,
                 &self.queue,
@@ -4325,10 +4345,7 @@ impl Renderer {
         }
     }
 
-    fn create_held_item_vertices(_camera: &Camera, opt_block_type: Option<BlockType>, progress: f32) -> Vec<Vertex> {
-        let block_type_f = opt_block_type.map_or(6.0, Self::block_type_to_float);
-        let size = 0.4;
-
+    fn create_held_item_vertices(_camera: &Camera, opt_item: Option<&ItemStack>, progress: f32) -> Vec<Vertex> {
         let face_verts = [
             TOP_FACE_VERTICES,
             BOTTOM_FACE_VERTICES,
@@ -4340,30 +4357,40 @@ impl Renderer {
 
         let mut verts: Vec<Vertex> = vec![];
 
-        // Generate item vertices if a block is selected
-        if opt_block_type.is_some() {
-            for &face_vert in face_verts.iter() {
-                for v in face_vert.iter() {
-                    let mut new_v = *v;
-                    new_v.position[0] = (new_v.position[0] - 0.5) * size;
-                    new_v.position[1] = (new_v.position[1] - 0.5) * size;
-                    new_v.position[2] = (new_v.position[2] - 0.5) * size;
-                    new_v.block_type = block_type_f;
-                    new_v.damage = 0.0;
-                    verts.push(new_v);
+        // Generate item vertices based on what's held
+        match opt_item {
+            Some(ItemStack::Block(block_type, _)) => {
+                // Render block as cube
+                let block_type_f = Self::block_type_to_float(*block_type);
+                let size = 0.4;
+                for &face_vert in face_verts.iter() {
+                    for v in face_vert.iter() {
+                        let mut new_v = *v;
+                        new_v.position[0] = (new_v.position[0] - 0.5) * size;
+                        new_v.position[1] = (new_v.position[1] - 0.5) * size;
+                        new_v.position[2] = (new_v.position[2] - 0.5) * size;
+                        new_v.block_type = block_type_f;
+                        new_v.damage = 0.0;
+                        verts.push(new_v);
+                    }
                 }
             }
-        } else {
-            // Add dummy vertices for the item cube if no block is selected
-            let dummy = Vertex {
-                position: [0.0, 0.0, 0.0],
-                tex_coords: [0.0, 0.0],
-                normal: [0.0, 0.0, 0.0],
-                block_type: -1.0,
-                damage: 0.0,
-            };
-            for _ in 0..24 {
-                verts.push(dummy);
+            Some(ItemStack::Tool(tool)) => {
+                // Render tool model
+                Self::generate_tool_vertices(&mut verts, tool);
+            }
+            None => {
+                // Add dummy vertices for the item cube if nothing is selected
+                let dummy = Vertex {
+                    position: [0.0, 0.0, 0.0],
+                    tex_coords: [0.0, 0.0],
+                    normal: [0.0, 0.0, 0.0],
+                    block_type: -1.0,
+                    damage: 0.0,
+                };
+                for _ in 0..24 {
+                    verts.push(dummy);
+                }
             }
         }
 
@@ -4378,7 +4405,7 @@ impl Renderer {
                 new_v.position[0] = (new_v.position[0] - 0.5) * arm_size_x + arm_offset[0];
                 new_v.position[1] = (new_v.position[1] - 0.5) * arm_size_y + arm_offset[1];
                 new_v.position[2] = (new_v.position[2] - 0.5) * arm_size_z + arm_offset[2];
-                new_v.block_type = 6.0;
+                new_v.block_type = 6.0;  // Skin color
                 new_v.damage = 0.0;
                 verts.push(new_v);
             }
@@ -4386,15 +4413,15 @@ impl Renderer {
 
         // Position in view space
         let view_offset = Vector3::new(0.8, -0.6, -1.5);
-        
+
         // Apply swing animation rotation
         let angle = -progress.powi(2) * 80.0;
         let rotation = Matrix4::from_axis_angle(Vector3::unit_x(), Deg(angle));
-        
+
         // Apply base tilt
-        let tilt_rotation = Matrix4::from_axis_angle(Vector3::unit_x(), Deg(-30.0)) * 
+        let tilt_rotation = Matrix4::from_axis_angle(Vector3::unit_x(), Deg(-30.0)) *
                           Matrix4::from_axis_angle(Vector3::unit_y(), Deg(20.0));
-        
+
         // Combine transformations in view space
         let model = Matrix4::from_translation(view_offset) * rotation * tilt_rotation;
         let normal_mat = model.invert().unwrap().transpose();
@@ -4411,6 +4438,95 @@ impl Renderer {
         }
 
         verts
+    }
+
+    /// Generate vertices for a tool model (pickaxe, sword, axe, shovel)
+    fn generate_tool_vertices(verts: &mut Vec<Vertex>, tool: &Tool) {
+        // Get material color (block type index for texturing)
+        // Using visually distinct colors for each material tier:
+        // - Wood (4): Brown wood log texture
+        // - Stone (11): Gray cobblestone - looks crafted
+        // - Iron (9): White snow texture - appears silvery/metallic
+        // - Gold (14): Gold ore - golden yellow tones
+        // - Diamond (15): Diamond ore - cyan/teal blue
+        let material_color = match tool.material {
+            ToolMaterial::Wood => 4.0,      // Wood log - brown
+            ToolMaterial::Stone => 11.0,    // Cobblestone - gray, crafted look
+            ToolMaterial::Iron => 9.0,      // Snow - white/silver metallic
+            ToolMaterial::Gold => 14.0,     // Gold ore - golden/yellow
+            ToolMaterial::Diamond => 15.0,  // Diamond ore - cyan/light blue
+        };
+        let handle_color = 4.0;  // Wood log for handle (brown)
+
+        let face_verts = [
+            TOP_FACE_VERTICES,
+            BOTTOM_FACE_VERTICES,
+            RIGHT_FACE_VERTICES,
+            LEFT_FACE_VERTICES,
+            FRONT_FACE_VERTICES,
+            BACK_FACE_VERTICES,
+        ];
+
+        // Helper to add a box
+        let add_box = |verts: &mut Vec<Vertex>,
+                       offset: [f32; 3],
+                       size: [f32; 3],
+                       color: f32| {
+            for &face_vert in face_verts.iter() {
+                for v in face_vert.iter() {
+                    let mut new_v = *v;
+                    new_v.position[0] = (new_v.position[0] - 0.5) * size[0] + offset[0];
+                    new_v.position[1] = (new_v.position[1] - 0.5) * size[1] + offset[1];
+                    new_v.position[2] = (new_v.position[2] - 0.5) * size[2] + offset[2];
+                    new_v.block_type = color;
+                    new_v.damage = 0.0;
+                    verts.push(new_v);
+                }
+            }
+        };
+
+        match tool.tool_type {
+            ToolType::Sword => {
+                // Sword: Long blade + crossguard + handle
+                // Handle (bottom)
+                add_box(verts, [0.0, -0.25, 0.0], [0.06, 0.2, 0.06], handle_color);
+                // Crossguard
+                add_box(verts, [0.0, -0.1, 0.0], [0.2, 0.04, 0.04], material_color);
+                // Blade (long, thin, tapered)
+                add_box(verts, [0.0, 0.25, 0.0], [0.08, 0.6, 0.02], material_color);
+                // Blade tip
+                add_box(verts, [0.0, 0.58, 0.0], [0.04, 0.1, 0.02], material_color);
+            }
+            ToolType::Pickaxe => {
+                // Pickaxe: Handle + T-shaped head
+                // Handle
+                add_box(verts, [0.0, -0.15, 0.0], [0.06, 0.5, 0.06], handle_color);
+                // Horizontal head bar
+                add_box(verts, [0.0, 0.2, 0.0], [0.5, 0.1, 0.06], material_color);
+                // Left pick point
+                add_box(verts, [-0.28, 0.15, 0.0], [0.08, 0.12, 0.04], material_color);
+                // Right pick point
+                add_box(verts, [0.28, 0.15, 0.0], [0.08, 0.12, 0.04], material_color);
+            }
+            ToolType::Axe => {
+                // Axe: Handle + blade head on one side
+                // Handle
+                add_box(verts, [0.0, -0.15, 0.0], [0.06, 0.5, 0.06], handle_color);
+                // Axe head (one-sided blade)
+                add_box(verts, [0.12, 0.18, 0.0], [0.25, 0.22, 0.05], material_color);
+                // Axe head back
+                add_box(verts, [-0.04, 0.18, 0.0], [0.08, 0.12, 0.06], material_color);
+            }
+            ToolType::Shovel => {
+                // Shovel: Long handle + spade head
+                // Handle
+                add_box(verts, [0.0, -0.1, 0.0], [0.05, 0.55, 0.05], handle_color);
+                // Spade head
+                add_box(verts, [0.0, 0.28, 0.0], [0.14, 0.2, 0.03], material_color);
+                // Spade edge (rounded look)
+                add_box(verts, [0.0, 0.4, 0.0], [0.1, 0.06, 0.025], material_color);
+            }
+        }
     }
 
     pub fn start_arm_swing(&mut self) {
@@ -5184,7 +5300,27 @@ impl Renderer {
                 [x + rx3, y + half_size, z + rz3],  // 7: top-front-left
             ];
 
-            let block_type_f = item.block_type as u32 as f32;
+            // Get texture index for block or tool
+            let block_type_f = match &item.item {
+                ItemStack::Block(block_type, _) => *block_type as u32 as f32,
+                ItemStack::Tool(tool) => {
+                    // Use tool texture indices (60-79 range reserved for tools)
+                    let type_offset = match tool.tool_type {
+                        ToolType::Pickaxe => 60.0,
+                        ToolType::Axe => 65.0,
+                        ToolType::Shovel => 70.0,
+                        ToolType::Sword => 75.0,
+                    };
+                    let material_offset = match tool.material {
+                        ToolMaterial::Wood => 0.0,
+                        ToolMaterial::Stone => 1.0,
+                        ToolMaterial::Iron => 2.0,
+                        ToolMaterial::Gold => 3.0,
+                        ToolMaterial::Diamond => 4.0,
+                    };
+                    type_offset + material_offset
+                }
+            };
 
             // Add 6 faces (order: bottom, top, front, back, left, right)
             let faces = [
