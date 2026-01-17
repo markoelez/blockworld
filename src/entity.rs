@@ -1719,18 +1719,253 @@ impl DroppedItem {
     }
 }
 
+// ============================================================================
+// PLANES - Flyable vehicles
+// ============================================================================
+
+pub const PLANE_WIDTH: f32 = 3.0;   // Wingspan
+pub const PLANE_LENGTH: f32 = 4.0;  // Fuselage length
+pub const PLANE_HEIGHT: f32 = 1.5;
+
+// Plane physics constants
+const PLANE_MAX_SPEED: f32 = 40.0;
+const PLANE_MIN_FLIGHT_SPEED: f32 = 15.0;
+const PLANE_ACCELERATION: f32 = 8.0;
+const PLANE_DRAG: f32 = 0.02;
+const PLANE_LIFT_FACTOR: f32 = 0.8;
+const PLANE_GRAVITY: f32 = 15.0;
+const PLANE_PITCH_RATE: f32 = 60.0;
+const PLANE_YAW_RATE: f32 = 45.0;
+const PLANE_ROLL_RATE: f32 = 90.0;
+const PLANE_THROTTLE_RATE: f32 = 0.5;
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum PlaneState {
+    Parked,     // On ground, engine off
+    Taxiing,    // On ground, moving
+    Flying,     // Airborne
+}
+
+pub struct Plane {
+    pub id: u32,
+    pub position: Point3<f32>,
+    pub velocity: Vector3<f32>,
+    pub yaw: f32,           // Heading in degrees
+    pub pitch: f32,         // Nose up/down in degrees
+    pub roll: f32,          // Bank angle in degrees
+    pub throttle: f32,      // 0.0 to 1.0
+    pub speed: f32,         // Forward speed
+    pub state: PlaneState,
+    pub propeller_rotation: f32,
+    pub on_ground: bool,
+}
+
+impl Plane {
+    pub fn new(id: u32, position: Point3<f32>) -> Self {
+        Self {
+            id,
+            position,
+            velocity: Vector3::new(0.0, 0.0, 0.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            roll: 0.0,
+            throttle: 0.0,
+            speed: 0.0,
+            state: PlaneState::Parked,
+            propeller_rotation: 0.0,
+            on_ground: true,
+        }
+    }
+
+    pub fn update(&mut self, dt: f32, world: &World) {
+        self.update_physics(dt, world);
+    }
+
+    fn update_physics(&mut self, dt: f32, world: &World) {
+        // Update throttle effect on speed
+        let target_speed = self.throttle * PLANE_MAX_SPEED;
+        if self.speed < target_speed {
+            self.speed += PLANE_ACCELERATION * dt;
+        } else {
+            self.speed -= PLANE_DRAG * self.speed * dt;
+        }
+        self.speed = self.speed.max(0.0).min(PLANE_MAX_SPEED);
+
+        // Calculate forward direction from yaw and pitch
+        let yaw_rad = self.yaw.to_radians();
+        let pitch_rad = self.pitch.to_radians();
+
+        let forward = Vector3::new(
+            -yaw_rad.sin() * pitch_rad.cos(),
+            pitch_rad.sin(),
+            -yaw_rad.cos() * pitch_rad.cos(),
+        );
+
+        // Apply forward velocity
+        self.velocity = forward * self.speed;
+
+        // Lift and gravity
+        if self.speed >= PLANE_MIN_FLIGHT_SPEED && !self.on_ground {
+            // Sufficient speed for flight
+            let lift = self.speed * PLANE_LIFT_FACTOR * pitch_rad.cos().abs();
+            let gravity_effect = PLANE_GRAVITY * (1.0 - (self.speed / PLANE_MAX_SPEED).min(0.8));
+            self.velocity.y += (lift - gravity_effect) * dt;
+            self.state = PlaneState::Flying;
+        } else if !self.on_ground {
+            // Stalling - apply extra gravity
+            self.velocity.y -= PLANE_GRAVITY * 2.0 * dt;
+            // Nose drops when stalling
+            self.pitch = (self.pitch - 30.0 * dt).max(-45.0);
+        }
+
+        // Ground collision
+        let new_y = self.position.y + self.velocity.y * dt;
+        let ground_y = self.find_ground_y(world);
+
+        if new_y <= ground_y + 0.1 {
+            self.position.y = ground_y + 0.1;
+            self.velocity.y = 0.0;
+            self.on_ground = true;
+            self.pitch = 0.0; // Level out on ground
+            self.roll = 0.0;
+
+            if self.speed > 5.0 {
+                self.state = PlaneState::Taxiing;
+            } else if self.throttle > 0.0 {
+                self.state = PlaneState::Taxiing;
+            } else {
+                self.state = PlaneState::Parked;
+            }
+
+            // Ground friction
+            self.speed *= 0.98;
+        } else {
+            self.position.y = new_y;
+            self.on_ground = false;
+        }
+
+        // Apply horizontal movement
+        self.position.x += self.velocity.x * dt;
+        self.position.z += self.velocity.z * dt;
+
+        // Block collision
+        self.check_block_collision(world);
+
+        // Update propeller animation
+        self.propeller_rotation += self.throttle * 360.0 * 5.0 * dt;
+        if self.propeller_rotation > 360.0 {
+            self.propeller_rotation -= 360.0;
+        }
+    }
+
+    fn find_ground_y(&self, world: &World) -> f32 {
+        let x = self.position.x.floor() as i32;
+        let z = self.position.z.floor() as i32;
+        let start_y = (self.position.y + 10.0).floor() as i32;
+
+        for y in (0..=start_y).rev() {
+            if let Some(block) = world.get_block(x, y, z) {
+                if block != BlockType::Air && block != BlockType::Water {
+                    return (y + 1) as f32;
+                }
+            }
+        }
+        0.0
+    }
+
+    fn check_block_collision(&mut self, world: &World) {
+        // Check corners of bounding box for collision
+        let half_w = PLANE_WIDTH / 2.0;
+        let half_l = PLANE_LENGTH / 2.0;
+
+        let check_points = [
+            (self.position.x - half_w, self.position.y + PLANE_HEIGHT / 2.0, self.position.z - half_l),
+            (self.position.x + half_w, self.position.y + PLANE_HEIGHT / 2.0, self.position.z - half_l),
+            (self.position.x - half_w, self.position.y + PLANE_HEIGHT / 2.0, self.position.z + half_l),
+            (self.position.x + half_w, self.position.y + PLANE_HEIGHT / 2.0, self.position.z + half_l),
+            (self.position.x, self.position.y + PLANE_HEIGHT, self.position.z),
+        ];
+
+        for (px, py, pz) in check_points {
+            let bx = px.floor() as i32;
+            let by = py.floor() as i32;
+            let bz = pz.floor() as i32;
+
+            if let Some(block) = world.get_block(bx, by, bz) {
+                if block != BlockType::Air && block != BlockType::Water {
+                    // Collision detected - stop
+                    self.velocity = Vector3::new(0.0, 0.0, 0.0);
+                    self.speed *= 0.5;
+                    break;
+                }
+            }
+        }
+    }
+
+    pub fn apply_pilot_input(
+        &mut self,
+        throttle_up: bool,
+        throttle_down: bool,
+        yaw_left: bool,
+        yaw_right: bool,
+        pitch_up: bool,
+        pitch_down: bool,
+        dt: f32,
+    ) {
+        // Throttle
+        if throttle_up {
+            self.throttle = (self.throttle + PLANE_THROTTLE_RATE * dt).min(1.0);
+        }
+        if throttle_down {
+            self.throttle = (self.throttle - PLANE_THROTTLE_RATE * dt).max(0.0);
+        }
+
+        // Pitch (only effective while flying or taking off)
+        if !self.on_ground || self.speed > PLANE_MIN_FLIGHT_SPEED * 0.8 {
+            if pitch_up {
+                self.pitch = (self.pitch + PLANE_PITCH_RATE * dt).min(60.0);
+            }
+            if pitch_down {
+                self.pitch = (self.pitch - PLANE_PITCH_RATE * dt).max(-30.0);
+            }
+        }
+
+        // Yaw (banking when flying, direct turn when taxiing)
+        if yaw_left {
+            self.yaw -= PLANE_YAW_RATE * dt;
+            if !self.on_ground {
+                self.roll = (self.roll - PLANE_ROLL_RATE * dt).max(-45.0);
+            }
+        } else if yaw_right {
+            self.yaw += PLANE_YAW_RATE * dt;
+            if !self.on_ground {
+                self.roll = (self.roll + PLANE_ROLL_RATE * dt).min(45.0);
+            }
+        } else {
+            // Auto-level roll when not turning
+            self.roll *= 0.95;
+        }
+
+        // Normalize yaw to 0-360
+        if self.yaw > 360.0 { self.yaw -= 360.0; }
+        if self.yaw < 0.0 { self.yaw += 360.0; }
+    }
+}
+
 pub struct EntityManager {
     pub villagers: Vec<Villager>,
     pub dropped_items: Vec<DroppedItem>,
     pub animals: Vec<Animal>,
     pub hostile_mobs: Vec<HostileMob>,
     pub projectiles: Vec<Projectile>,
+    pub planes: Vec<Plane>,
     next_id: u32,
     rng: rand::rngs::ThreadRng,
     ai_update_timer: f32,
     spawn_check_timer: f32,
     animal_spawn_timer: f32,
     hostile_spawn_timer: f32,
+    plane_spawn_timer: f32,
 }
 
 impl EntityManager {
@@ -1741,12 +1976,14 @@ impl EntityManager {
             animals: Vec::new(),
             hostile_mobs: Vec::new(),
             projectiles: Vec::new(),
+            planes: Vec::new(),
             next_id: 0,
             rng: rand::thread_rng(),
             ai_update_timer: 0.0,
             spawn_check_timer: 0.0,
             animal_spawn_timer: 0.0,
             hostile_spawn_timer: 0.0,
+            plane_spawn_timer: 0.0,
         }
     }
 
@@ -1909,6 +2146,19 @@ impl EntityManager {
             self.hostile_spawn_timer = 5.0; // Check every 5 seconds
             self.try_spawn_hostile_mobs(world, player_pos);
             self.cleanup_distant_hostile_mobs(player_pos);
+        }
+
+        // Update planes (physics only, no AI)
+        for plane in &mut self.planes {
+            plane.update(dt, world);
+        }
+
+        // Plane spawning
+        self.plane_spawn_timer -= dt;
+        if self.plane_spawn_timer <= 0.0 {
+            self.plane_spawn_timer = 10.0; // Check every 10 seconds
+            self.try_spawn_planes(world, player_pos);
+            self.cleanup_distant_planes(player_pos);
         }
     }
 
@@ -2571,5 +2821,146 @@ impl EntityManager {
 
     pub fn get_animals_mut(&mut self) -> &mut [Animal] {
         &mut self.animals
+    }
+
+    // ========================================================================
+    // Plane methods
+    // ========================================================================
+
+    pub fn spawn_plane(&mut self, position: Point3<f32>) {
+        if self.planes.len() < 20 {  // Max 20 planes
+            let id = self.next_id;
+            self.next_id += 1;
+            self.planes.push(Plane::new(id, position));
+        }
+    }
+
+    pub fn get_planes(&self) -> &[Plane] {
+        &self.planes
+    }
+
+    pub fn get_plane_mut(&mut self, id: u32) -> Option<&mut Plane> {
+        self.planes.iter_mut().find(|p| p.id == id)
+    }
+
+    pub fn find_nearby_plane(&self, pos: Point3<f32>, radius: f32) -> Option<u32> {
+        let radius_sq = radius * radius;
+        for plane in &self.planes {
+            let dist_sq = (plane.position.x - pos.x).powi(2)
+                + (plane.position.y - pos.y).powi(2)
+                + (plane.position.z - pos.z).powi(2);
+            if dist_sq < radius_sq && plane.state == PlaneState::Parked {
+                return Some(plane.id);
+            }
+        }
+        None
+    }
+
+    fn try_spawn_planes(&mut self, world: &World, player_pos: Point3<f32>) {
+        if self.planes.len() >= 20 {
+            return;
+        }
+
+        let player_chunk_x = (player_pos.x / 16.0).floor() as i32;
+        let player_chunk_z = (player_pos.z / 16.0).floor() as i32;
+
+        // Check chunks for flat areas to spawn planes
+        for dx in -8..=8 {
+            for dz in -8..=8 {
+                let chunk_x = player_chunk_x + dx;
+                let chunk_z = player_chunk_z + dz;
+
+                // Skip if too close or too far
+                let dist = ((dx * dx + dz * dz) as f32).sqrt() * 16.0;
+                if dist < 50.0 || dist > 120.0 {
+                    continue;
+                }
+
+                // Check if chunk loaded
+                if !world.chunks.contains_key(&(chunk_x, chunk_z)) {
+                    continue;
+                }
+
+                // Low spawn chance
+                if self.rng.gen::<f32>() > 0.005 {
+                    continue;
+                }
+
+                // Check for existing planes nearby
+                let chunk_center = Point3::new(
+                    (chunk_x * 16 + 8) as f32,
+                    player_pos.y,
+                    (chunk_z * 16 + 8) as f32,
+                );
+
+                let planes_nearby = self.planes.iter().filter(|p| {
+                    let dist_sq = (p.position.x - chunk_center.x).powi(2)
+                        + (p.position.z - chunk_center.z).powi(2);
+                    dist_sq < 100.0 * 100.0
+                }).count();
+
+                if planes_nearby >= 3 {
+                    continue;
+                }
+
+                // Find flat spawn location
+                if let Some(spawn_pos) = self.find_flat_area_for_plane(world, chunk_x * 16 + 8, chunk_z * 16 + 8) {
+                    self.spawn_plane(spawn_pos);
+                }
+            }
+        }
+    }
+
+    fn find_flat_area_for_plane(&self, world: &World, center_x: i32, center_z: i32) -> Option<Point3<f32>> {
+        // Check a 6x6 block area for flatness (plane needs runway)
+        let mut heights = Vec::new();
+
+        for dx in -3..=3 {
+            for dz in -3..=3 {
+                let x = center_x + dx;
+                let z = center_z + dz;
+
+                for y in (30..120).rev() {
+                    if let Some(block) = world.get_block(x, y, z) {
+                        if block != BlockType::Air && block != BlockType::Water && block != BlockType::Leaves {
+                            heights.push(y);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if heights.len() < 36 {
+            return None;
+        }
+
+        // Check flatness (all heights within 1 block)
+        let min_h = *heights.iter().min()?;
+        let max_h = *heights.iter().max()?;
+
+        if max_h - min_h <= 1 {
+            Some(Point3::new(
+                center_x as f32 + 0.5,
+                (max_h + 1) as f32,
+                center_z as f32 + 0.5,
+            ))
+        } else {
+            None
+        }
+    }
+
+    fn cleanup_distant_planes(&mut self, player_pos: Point3<f32>) {
+        // Remove planes that are too far away and not being piloted
+        self.planes.retain(|plane| {
+            // Keep planes that are flying (might be piloted)
+            if plane.state == PlaneState::Flying || plane.state == PlaneState::Taxiing {
+                return true;
+            }
+
+            let dist_sq = (plane.position.x - player_pos.x).powi(2)
+                + (plane.position.z - player_pos.z).powi(2);
+            dist_sq < 200.0 * 200.0  // Keep within 200 blocks
+        });
     }
 }

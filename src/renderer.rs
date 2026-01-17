@@ -325,6 +325,10 @@ pub struct Renderer {
     hostile_mob_vertex_buffer: wgpu::Buffer,
     hostile_mob_index_buffer: wgpu::Buffer,
     hostile_mob_index_count: u32,
+    // Plane rendering
+    plane_vertex_buffer: wgpu::Buffer,
+    plane_index_buffer: wgpu::Buffer,
+    plane_index_count: u32,
 }
 
 impl Renderer {
@@ -2277,6 +2281,21 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // Plane buffers (20 planes max, each with ~10 body parts * 24 vertices)
+        let plane_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Plane Vertex Buffer"),
+            size: (20 * 10 * 24 * std::mem::size_of::<Vertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let plane_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Plane Index Buffer"),
+            size: (20 * 10 * 36 * std::mem::size_of::<u16>()) as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let particle_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Particle Pipeline"),
             layout: Some(&particle_pipeline_layout),
@@ -2442,6 +2461,10 @@ impl Renderer {
             hostile_mob_vertex_buffer,
             hostile_mob_index_buffer,
             hostile_mob_index_count: 0,
+            // Planes
+            plane_vertex_buffer,
+            plane_index_buffer,
+            plane_index_count: 0,
         }
     }
 
@@ -2710,6 +2733,9 @@ impl Renderer {
         // Update hostile mob mesh (including projectiles)
         self.update_hostile_mob_mesh(entity_manager.get_hostile_mobs(), entity_manager.get_projectiles());
 
+        // Update plane mesh
+        self.update_plane_mesh(entity_manager.get_planes());
+
         // Update dropped item mesh
         self.update_dropped_items(entity_manager.get_dropped_items());
 
@@ -2932,6 +2958,13 @@ impl Renderer {
                 render_pass.set_vertex_buffer(0, self.hostile_mob_vertex_buffer.slice(..));
                 render_pass.set_index_buffer(self.hostile_mob_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
                 render_pass.draw_indexed(0..self.hostile_mob_index_count, 0, 0..1);
+            }
+
+            // Render planes
+            if self.plane_index_count > 0 {
+                render_pass.set_vertex_buffer(0, self.plane_vertex_buffer.slice(..));
+                render_pass.set_index_buffer(self.plane_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed(0..self.plane_index_count, 0, 0..1);
             }
 
             // Render dropped items
@@ -4184,8 +4217,6 @@ impl Renderer {
         world: &World,
         world_x: i32, world_y: i32, world_z: i32,
     ) {
-        use crate::world::BlockFacing;
-
         // Bottom half (y=0 to y=0.5) - always full width
         // Top face of bottom half at y+0.5 (partially exposed based on facing)
         // This is the step surface
@@ -4217,8 +4248,6 @@ impl Renderer {
         world: &World,
         world_x: i32, world_y: i32, world_z: i32,
     ) {
-        use crate::world::BlockFacing;
-
         // Top half (y=0.5 to y=1.0) - always full width
         // Bottom face of top half at y+0.5 (the step surface)
 
@@ -4321,8 +4350,6 @@ impl Renderer {
         world_x: i32, world_y: i32, world_z: i32,
         upside_down: bool,
     ) {
-        use crate::world::BlockFacing;
-
         // Full height side faces
         if Self::is_face_exposed(world, world_x + 1, world_y, world_z, BlockType::Stone) {
             Self::add_stair_side(vertices, indices, x, y, z, facing, Face::Right, block_type, upside_down);
@@ -4389,8 +4416,6 @@ impl Renderer {
         block_type: f32,
         upside_down: bool,
     ) {
-        use crate::world::BlockFacing;
-
         // For L-shaped sides, we need two rectangles
         // Bottom part (full width, half height) and top part (half width, half height)
 
@@ -4655,7 +4680,7 @@ impl Renderer {
                     if open {
                         // Open trapdoor: vertical panel against hinge side
                         Self::add_trapdoor_open(opaque_vertices, opaque_indices,
-                            base_x, base_y, base_z, facing, top_half, thickness, block_type_f);
+                            base_x, base_y, base_z, facing, thickness, block_type_f);
                     } else {
                         // Closed trapdoor: horizontal slab
                         Self::add_trapdoor_closed(opaque_vertices, opaque_indices,
@@ -4812,14 +4837,12 @@ impl Renderer {
         indices: &mut Vec<u16>,
         x: f32, y: f32, z: f32,
         facing: crate::world::BlockFacing,
-        top_half: bool,
         thickness: f32,
         block_type: f32,
     ) {
         use crate::world::BlockFacing;
 
         // Open trapdoor is a vertical panel against the hinge side
-        // If top_half, it opens upward from top; if bottom_half, it opens downward from bottom
         let (positions, normal): ([[f32; 3]; 8], [f32; 3]) = match facing {
             BlockFacing::North => {
                 // Hinge on +Z side, opens toward -Z
@@ -4862,9 +4885,6 @@ impl Renderer {
                 ], [-1.0, 0.0, 0.0])
             }
         };
-
-        // Suppress unused variable warning
-        let _ = top_half;
 
         let base_index = vertices.len() as u16;
         let tex_coords = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
@@ -4955,7 +4975,7 @@ impl Renderer {
                     for &bar_y in &bar_y_positions {
                         // North connection (+Z)
                         if connects_north {
-                            Self::add_fence_bar(opaque_vertices, opaque_indices,
+                            Self::add_fence_post(opaque_vertices, opaque_indices,
                                 base_x + post_min, base_y + bar_y, base_z + post_max,
                                 bar_width, bar_height, 1.0 - post_max,
                                 block_type_f);
@@ -4963,7 +4983,7 @@ impl Renderer {
 
                         // South connection (-Z)
                         if connects_south {
-                            Self::add_fence_bar(opaque_vertices, opaque_indices,
+                            Self::add_fence_post(opaque_vertices, opaque_indices,
                                 base_x + post_min, base_y + bar_y, base_z,
                                 bar_width, bar_height, post_min,
                                 block_type_f);
@@ -4971,7 +4991,7 @@ impl Renderer {
 
                         // East connection (+X)
                         if connects_east {
-                            Self::add_fence_bar(opaque_vertices, opaque_indices,
+                            Self::add_fence_post(opaque_vertices, opaque_indices,
                                 base_x + post_max, base_y + bar_y, base_z + post_min,
                                 1.0 - post_max, bar_height, bar_width,
                                 block_type_f);
@@ -4979,7 +4999,7 @@ impl Renderer {
 
                         // West connection (-X)
                         if connects_west {
-                            Self::add_fence_bar(opaque_vertices, opaque_indices,
+                            Self::add_fence_post(opaque_vertices, opaque_indices,
                                 base_x, base_y + bar_y, base_z + post_min,
                                 post_min, bar_height, bar_width,
                                 block_type_f);
@@ -5043,18 +5063,6 @@ impl Renderer {
         }
     }
 
-    // Add a fence bar (horizontal beam connecting to neighbor)
-    fn add_fence_bar(
-        vertices: &mut Vec<Vertex>,
-        indices: &mut Vec<u16>,
-        x: f32, y: f32, z: f32,
-        width: f32, height: f32, depth: f32,
-        block_type: f32,
-    ) {
-        // Reuse post function - they're the same geometry
-        Self::add_fence_post(vertices, indices, x, y, z, width, height, depth, block_type);
-    }
-
     // Render glass panes with thin connecting panels
     fn render_glass_panes(
         world: &World,
@@ -5089,11 +5097,12 @@ impl Renderer {
                     let half_thick = thickness / 2.0;
                     let center = 0.5;
 
-                    // If only 0-1 connections, add center post
-                    let connection_count = [north, south, east, west].iter().filter(|&&c| c).count();
-                    if connection_count <= 1 {
-                        // Center post
-                        Self::add_glass_pane_panel(trans_vertices, trans_indices,
+                    // Check if panes form a straight line (no center post needed)
+                    let is_straight_line = (north && south && !east && !west) || (east && west && !north && !south);
+
+                    // Add center post unless panes form a straight line
+                    if !is_straight_line {
+                        Self::add_fence_post(trans_vertices, trans_indices,
                             base_x + center - half_thick, base_y, base_z + center - half_thick,
                             thickness, 1.0, thickness,
                             block_type_f);
@@ -5101,62 +5110,35 @@ impl Renderer {
 
                     // Add panels to connected sides
                     if north {
-                        // Extend toward +Z
-                        Self::add_glass_pane_panel(trans_vertices, trans_indices,
+                        Self::add_fence_post(trans_vertices, trans_indices,
                             base_x + center - half_thick, base_y, base_z + center,
                             thickness, 1.0, 0.5,
                             block_type_f);
                     }
 
                     if south {
-                        // Extend toward -Z
-                        Self::add_glass_pane_panel(trans_vertices, trans_indices,
+                        Self::add_fence_post(trans_vertices, trans_indices,
                             base_x + center - half_thick, base_y, base_z,
                             thickness, 1.0, center,
                             block_type_f);
                     }
 
                     if east {
-                        // Extend toward +X
-                        Self::add_glass_pane_panel(trans_vertices, trans_indices,
+                        Self::add_fence_post(trans_vertices, trans_indices,
                             base_x + center, base_y, base_z + center - half_thick,
                             0.5, 1.0, thickness,
                             block_type_f);
                     }
 
                     if west {
-                        // Extend toward -X
-                        Self::add_glass_pane_panel(trans_vertices, trans_indices,
+                        Self::add_fence_post(trans_vertices, trans_indices,
                             base_x, base_y, base_z + center - half_thick,
                             center, 1.0, thickness,
-                            block_type_f);
-                    }
-
-                    // If connected on opposite sides (N-S or E-W), fill in center
-                    if (north && south) || (east && west) {
-                        // Don't need center post, panels already connect
-                    } else if connection_count == 2 && !((north && south) || (east && west)) {
-                        // L-shaped connection, need center connection
-                        Self::add_glass_pane_panel(trans_vertices, trans_indices,
-                            base_x + center - half_thick, base_y, base_z + center - half_thick,
-                            thickness, 1.0, thickness,
                             block_type_f);
                     }
                 }
             }
         }
-    }
-
-    // Add a glass pane panel (thin box)
-    fn add_glass_pane_panel(
-        vertices: &mut Vec<Vertex>,
-        indices: &mut Vec<u16>,
-        x: f32, y: f32, z: f32,
-        width: f32, height: f32, depth: f32,
-        block_type: f32,
-    ) {
-        // Reuse fence post geometry for the thin box
-        Self::add_fence_post(vertices, indices, x, y, z, width, height, depth, block_type);
     }
 
     // Greedy mesh for horizontal faces (top/bottom) - iterates Y layers, merges in XZ plane
@@ -6645,6 +6627,190 @@ impl Renderer {
         if !vertices.is_empty() {
             self.queue.write_buffer(&self.hostile_mob_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
             self.queue.write_buffer(&self.hostile_mob_index_buffer, 0, bytemuck::cast_slice(&indices));
+        }
+    }
+
+    /// Update the plane mesh for all planes in the world
+    pub fn update_plane_mesh(&mut self, planes: &[crate::entity::Plane]) {
+        let mut vertices: Vec<Vertex> = Vec::with_capacity(planes.len() * 10 * 24);
+        let mut indices: Vec<u16> = Vec::with_capacity(planes.len() * 10 * 36);
+
+        // Color indices for plane parts
+        const FUSELAGE_COLOR: f32 = 52.0;  // Light gray (stone)
+        const COCKPIT_COLOR: f32 = 54.0;   // Blue tint (ice)
+        const WING_COLOR: f32 = 53.0;      // Dark gray (cobblestone)
+        const PROPELLER_COLOR: f32 = 5.0;  // Dark (wood planks)
+
+        for plane in planes {
+            let x = plane.position.x;
+            let y = plane.position.y;
+            let z = plane.position.z;
+            let yaw = plane.yaw.to_radians();
+            let pitch = plane.pitch.to_radians();
+            let roll = plane.roll.to_radians();
+
+            let pivot = [x, y, z];
+
+            // Helper to rotate a point around all three axes
+            let rotate_point = |local_x: f32, local_y: f32, local_z: f32| -> [f32; 3] {
+                // Apply roll (rotation around forward/Z axis)
+                let cos_roll = roll.cos();
+                let sin_roll = roll.sin();
+                let rx1 = local_x * cos_roll - local_y * sin_roll;
+                let ry1 = local_x * sin_roll + local_y * cos_roll;
+                let rz1 = local_z;
+
+                // Apply pitch (rotation around right/X axis)
+                let cos_pitch = pitch.cos();
+                let sin_pitch = pitch.sin();
+                let rx2 = rx1;
+                let ry2 = ry1 * cos_pitch - rz1 * sin_pitch;
+                let rz2 = ry1 * sin_pitch + rz1 * cos_pitch;
+
+                // Apply yaw (rotation around up/Y axis)
+                let cos_yaw = yaw.cos();
+                let sin_yaw = yaw.sin();
+                let rx3 = rx2 * cos_yaw + rz2 * sin_yaw;
+                let ry3 = ry2;
+                let rz3 = -rx2 * sin_yaw + rz2 * cos_yaw;
+
+                [x + rx3, y + ry3, z + rz3]
+            };
+
+            // Generate a rotated cube for a plane part
+            let add_plane_part = |vertices: &mut Vec<Vertex>, indices: &mut Vec<u16>,
+                                  offset: [f32; 3], size: [f32; 3], color: f32| {
+                let base_idx = vertices.len() as u16;
+
+                // 8 corners of the cube in local space
+                let half = [size[0] / 2.0, size[1] / 2.0, size[2] / 2.0];
+                let corners = [
+                    [-half[0], -half[1], -half[2]],
+                    [half[0], -half[1], -half[2]],
+                    [half[0], half[1], -half[2]],
+                    [-half[0], half[1], -half[2]],
+                    [-half[0], -half[1], half[2]],
+                    [half[0], -half[1], half[2]],
+                    [half[0], half[1], half[2]],
+                    [-half[0], half[1], half[2]],
+                ];
+
+                // Transform corners to world space
+                let mut world_corners = [[0.0f32; 3]; 8];
+                for (i, corner) in corners.iter().enumerate() {
+                    world_corners[i] = rotate_point(
+                        corner[0] + offset[0],
+                        corner[1] + offset[1],
+                        corner[2] + offset[2],
+                    );
+                }
+
+                // Face definitions: [v0, v1, v2, v3] with counter-clockwise winding for outward normal
+                let faces = [
+                    ([4, 5, 6, 7], [0.0, 0.0, 1.0]),   // Front (+Z)
+                    ([1, 0, 3, 2], [0.0, 0.0, -1.0]),  // Back (-Z)
+                    ([5, 1, 2, 6], [1.0, 0.0, 0.0]),   // Right (+X)
+                    ([0, 4, 7, 3], [-1.0, 0.0, 0.0]),  // Left (-X)
+                    ([7, 6, 2, 3], [0.0, 1.0, 0.0]),   // Top (+Y)
+                    ([0, 1, 5, 4], [0.0, -1.0, 0.0]),  // Bottom (-Y)
+                ];
+
+                // Texture coordinates for each face vertex (counter-clockwise from bottom-left)
+                let tex_coords_quad = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+
+                for (face_indices, normal) in faces.iter() {
+                    let face_base = vertices.len() as u16;
+
+                    for (i, &vi) in face_indices.iter().enumerate() {
+                        let pos = world_corners[vi];
+                        vertices.push(Vertex {
+                            position: pos,
+                            tex_coords: tex_coords_quad[i],
+                            normal: *normal,
+                            block_type: color,
+                            damage: 0.0,
+                        });
+                    }
+
+                    // Two triangles for the quad
+                    indices.push(face_base);
+                    indices.push(face_base + 1);
+                    indices.push(face_base + 2);
+                    indices.push(face_base);
+                    indices.push(face_base + 2);
+                    indices.push(face_base + 3);
+                }
+            };
+
+            // Fuselage (main body) - centered
+            add_plane_part(&mut vertices, &mut indices,
+                [0.0, 0.0, 0.0],
+                [0.8, 0.6, 4.0],
+                FUSELAGE_COLOR);
+
+            // Cockpit (glass canopy) - forward and above
+            add_plane_part(&mut vertices, &mut indices,
+                [0.0, 0.4, -0.8],
+                [0.6, 0.4, 0.8],
+                COCKPIT_COLOR);
+
+            // Left wing
+            add_plane_part(&mut vertices, &mut indices,
+                [-1.8, 0.0, 0.3],
+                [3.0, 0.15, 1.2],
+                WING_COLOR);
+
+            // Right wing
+            add_plane_part(&mut vertices, &mut indices,
+                [1.8, 0.0, 0.3],
+                [3.0, 0.15, 1.2],
+                WING_COLOR);
+
+            // Tail vertical stabilizer
+            add_plane_part(&mut vertices, &mut indices,
+                [0.0, 0.5, 1.8],
+                [0.1, 0.8, 0.6],
+                WING_COLOR);
+
+            // Tail horizontal stabilizer
+            add_plane_part(&mut vertices, &mut indices,
+                [0.0, 0.15, 1.8],
+                [1.5, 0.1, 0.5],
+                WING_COLOR);
+
+            // Propeller (animated rotation)
+            let prop_angle = plane.propeller_rotation.to_radians();
+            let prop_cos = prop_angle.cos();
+            let prop_sin = prop_angle.sin();
+
+            // Propeller blade 1 (vertical when prop_angle = 0)
+            let blade1_x = prop_cos * 0.0 - prop_sin * 0.5;
+            let blade1_y = prop_sin * 0.0 + prop_cos * 0.5;
+            add_plane_part(&mut vertices, &mut indices,
+                [blade1_x, blade1_y, -2.1],
+                [0.15, 1.0, 0.1],
+                PROPELLER_COLOR);
+
+            // Propeller blade 2 (opposite)
+            let blade2_x = prop_cos * 0.0 - prop_sin * (-0.5);
+            let blade2_y = prop_sin * 0.0 + prop_cos * (-0.5);
+            add_plane_part(&mut vertices, &mut indices,
+                [blade2_x, blade2_y, -2.1],
+                [0.15, 1.0, 0.1],
+                PROPELLER_COLOR);
+
+            // Propeller hub
+            add_plane_part(&mut vertices, &mut indices,
+                [0.0, 0.0, -2.05],
+                [0.2, 0.2, 0.15],
+                PROPELLER_COLOR);
+        }
+
+        self.plane_index_count = indices.len() as u32;
+
+        if !vertices.is_empty() {
+            self.queue.write_buffer(&self.plane_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+            self.queue.write_buffer(&self.plane_index_buffer, 0, bytemuck::cast_slice(&indices));
         }
     }
 

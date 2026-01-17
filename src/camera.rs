@@ -18,6 +18,12 @@ pub enum HungerAction {
     Attack,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum VehicleState {
+    OnFoot,
+    InPlane,
+}
+
 pub struct Camera {
     pub position: Point3<f32>,
     pub yaw: f32,
@@ -34,8 +40,8 @@ pub struct Camera {
 
     moving_forward: bool,
     moving_backward: bool,
-    moving_left: bool,
-    moving_right: bool,
+    pub moving_left: bool,
+    pub moving_right: bool,
     jump_pressed: bool,
     bob_time: f32,
 
@@ -63,6 +69,14 @@ pub struct Camera {
     pub spawn_point: Point3<f32>, // Respawn location
     pub damage_flash: f32,     // Visual feedback timer for damage
     pub pending_knockback: Option<Vector3<f32>>, // Knockback to apply
+
+    // Vehicle/Plane controls
+    pub vehicle_state: VehicleState,
+    pub piloted_plane_id: Option<u32>,
+    pub throttle_up: bool,
+    pub throttle_down: bool,
+    pub pitch_up: bool,
+    pub pitch_down: bool,
 }
 
 impl Camera {
@@ -112,6 +126,14 @@ impl Camera {
             spawn_point: Point3::new(0.5, 50.0, 0.5),
             damage_flash: 0.0,
             pending_knockback: None,
+
+            // Vehicle/Plane controls
+            vehicle_state: VehicleState::OnFoot,
+            piloted_plane_id: None,
+            throttle_up: false,
+            throttle_down: false,
+            pitch_up: false,
+            pitch_down: false,
         };
         camera.update_view_proj();
         camera
@@ -132,13 +154,28 @@ impl Camera {
     }
     
     pub fn process_keyboard(&mut self, key: VirtualKeyCode, pressed: bool) {
-        match key {
-            VirtualKeyCode::W => self.moving_forward = pressed,
-            VirtualKeyCode::S => self.moving_backward = pressed,
-            VirtualKeyCode::A => self.moving_left = pressed,
-            VirtualKeyCode::D => self.moving_right = pressed,
-            VirtualKeyCode::Space => self.jump_pressed = pressed,
-            _ => {}
+        match self.vehicle_state {
+            VehicleState::OnFoot => {
+                match key {
+                    VirtualKeyCode::W => self.moving_forward = pressed,
+                    VirtualKeyCode::S => self.moving_backward = pressed,
+                    VirtualKeyCode::A => self.moving_left = pressed,
+                    VirtualKeyCode::D => self.moving_right = pressed,
+                    VirtualKeyCode::Space => self.jump_pressed = pressed,
+                    _ => {}
+                }
+            }
+            VehicleState::InPlane => {
+                match key {
+                    VirtualKeyCode::W => self.throttle_up = pressed,
+                    VirtualKeyCode::S => self.throttle_down = pressed,
+                    VirtualKeyCode::A => self.moving_left = pressed,   // Yaw left
+                    VirtualKeyCode::D => self.moving_right = pressed,  // Yaw right
+                    VirtualKeyCode::Space => self.pitch_up = pressed,  // Pull up
+                    VirtualKeyCode::LShift => self.pitch_down = pressed, // Push down
+                    _ => {}
+                }
+            }
         }
     }
     
@@ -1046,6 +1083,105 @@ impl Camera {
         );
         
         self.view_proj = OPENGL_TO_WGPU_MATRIX * proj * view;
+    }
+
+    // ========================================================================
+    // Plane/Vehicle methods
+    // ========================================================================
+
+    pub fn is_piloting(&self) -> bool {
+        self.vehicle_state == VehicleState::InPlane
+    }
+
+    pub fn try_enter_plane(&mut self, nearby_plane_id: Option<u32>) -> bool {
+        if self.vehicle_state != VehicleState::OnFoot {
+            return false;
+        }
+
+        if let Some(plane_id) = nearby_plane_id {
+            self.vehicle_state = VehicleState::InPlane;
+            self.piloted_plane_id = Some(plane_id);
+            // Reset flight controls
+            self.throttle_up = false;
+            self.throttle_down = false;
+            self.pitch_up = false;
+            self.pitch_down = false;
+            self.moving_left = false;
+            self.moving_right = false;
+            return true;
+        }
+        false
+    }
+
+    pub fn exit_plane(&mut self, plane_pos: Point3<f32>) {
+        if self.vehicle_state == VehicleState::InPlane {
+            self.vehicle_state = VehicleState::OnFoot;
+            self.piloted_plane_id = None;
+            // Position player next to plane
+            self.position = Point3::new(
+                plane_pos.x + 2.5,  // Offset to side of plane
+                plane_pos.y + PLAYER_HEIGHT,
+                plane_pos.z,
+            );
+            self.velocity = Vector3::new(0.0, 0.0, 0.0);
+            self.on_ground = true;
+            // Reset movement flags
+            self.moving_forward = false;
+            self.moving_backward = false;
+            self.moving_left = false;
+            self.moving_right = false;
+            self.jump_pressed = false;
+            self.throttle_up = false;
+            self.throttle_down = false;
+            self.pitch_up = false;
+            self.pitch_down = false;
+        }
+    }
+
+    /// Update camera for third-person flight view
+    pub fn update_flight_view(&mut self, plane_yaw: f32, plane_pitch: f32, plane_roll: f32, plane_pos: Point3<f32>) {
+        let plane_yaw_rad = plane_yaw.to_radians();
+        let plane_pitch_rad = (plane_pitch * 0.3).to_radians(); // Damped pitch follow
+
+        // Camera offset: behind and above
+        let offset_dist = 12.0;
+        let offset_height = 4.0;
+
+        // Calculate camera position behind the plane
+        let behind_x = plane_yaw_rad.sin() * offset_dist;
+        let behind_z = plane_yaw_rad.cos() * offset_dist;
+
+        let cam_pos = Point3::new(
+            plane_pos.x + behind_x,
+            plane_pos.y + offset_height + offset_dist * plane_pitch_rad.sin(),
+            plane_pos.z + behind_z,
+        );
+
+        // Look at point ahead of plane
+        let look_ahead = 15.0;
+        let target = Point3::new(
+            plane_pos.x - plane_yaw_rad.sin() * look_ahead,
+            plane_pos.y + plane_pitch_rad.sin() * look_ahead,
+            plane_pos.z - plane_yaw_rad.cos() * look_ahead,
+        );
+
+        // Apply slight roll to camera for immersion
+        let plane_roll_rad = plane_roll.to_radians();
+        let up = Vector3::new(
+            plane_roll_rad.sin() * 0.3,
+            1.0,
+            0.0,
+        ).normalize();
+
+        let view = Matrix4::look_at_rh(cam_pos, target, up);
+        let proj = perspective(
+            Deg(self.fovy),
+            self.aspect,
+            self.znear,
+            self.zfar,
+        );
+        self.view_proj = OPENGL_TO_WGPU_MATRIX * proj * view;
+        self.position = cam_pos; // Update position for audio/other systems
     }
 }
 

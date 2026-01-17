@@ -362,8 +362,24 @@ fn main() {
                                     VirtualKeyCode::Key5 => inventory.select_slot(4),
                                     VirtualKeyCode::Key6 => inventory.select_slot(5),
                                     VirtualKeyCode::E => {
-                                        // First check if holding food - eat it
-                                        if let Some(block_type) = inventory.get_selected_block() {
+                                        // First check for plane enter/exit
+                                        if camera.is_piloting() {
+                                            // Try to exit plane if landed and slow
+                                            if let Some(plane_id) = camera.piloted_plane_id {
+                                                if let Some(plane) = entity_manager.get_plane_mut(plane_id) {
+                                                    if plane.on_ground && plane.speed < 5.0 {
+                                                        let exit_pos = plane.position;
+                                                        camera.exit_plane(exit_pos);
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            // Not piloting - check for nearby plane to enter
+                                            let nearby_plane = entity_manager.find_nearby_plane(camera.position, 4.0);
+                                            if !camera.try_enter_plane(nearby_plane) {
+                                                // No plane entered, continue with normal E key actions
+                                                // Check if holding food - eat it
+                                                if let Some(block_type) = inventory.get_selected_block() {
                                             if let Some((hunger_restore, saturation_restore)) = block_type.food_properties() {
                                                 if camera.eat_food(hunger_restore, saturation_restore) {
                                                     inventory.decrement_selected();
@@ -627,6 +643,8 @@ fn main() {
                                                 set_cursor_captured(&window, false);
                                             }
                                         }
+                                            } // close "No plane entered" if
+                                        } // close "Not piloting" else
                                     },
                                     VirtualKeyCode::T => {
                                         // Give player a torch for testing
@@ -809,9 +827,34 @@ fn main() {
                     world.process_water_updates(50);
                     // Update furnace smelting
                     world.update_furnaces(dt);
-                    camera.update(dt, &world);
+                    // Update camera/player (skip normal movement if piloting)
+                    if !camera.is_piloting() {
+                        camera.update(dt, &world);
+                    }
                     camera.update_survival(dt, &world);
                     entity_manager.update(dt, &world, camera.position, renderer.get_time_of_day());
+
+                    // Handle plane piloting
+                    if camera.is_piloting() {
+                        if let Some(plane_id) = camera.piloted_plane_id {
+                            // Apply pilot inputs to the plane
+                            if let Some(plane) = entity_manager.get_plane_mut(plane_id) {
+                                plane.apply_pilot_input(
+                                    camera.throttle_up,
+                                    camera.throttle_down,
+                                    camera.moving_left,
+                                    camera.moving_right,
+                                    camera.pitch_up,
+                                    camera.pitch_down,
+                                    dt,
+                                );
+                                // Update plane physics
+                                plane.update(dt, &world);
+                                // Update flight camera to follow plane
+                                camera.update_flight_view(plane.yaw, plane.pitch, plane.roll, plane.position);
+                            }
+                        }
+                    }
 
                     // Check for hostile mob attacks on player
                     if !camera.is_dead {
