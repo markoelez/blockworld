@@ -329,6 +329,14 @@ pub struct Renderer {
     plane_vertex_buffer: wgpu::Buffer,
     plane_index_buffer: wgpu::Buffer,
     plane_index_count: u32,
+    // Missile rendering
+    missile_vertex_buffer: wgpu::Buffer,
+    missile_index_buffer: wgpu::Buffer,
+    missile_index_count: u32,
+    // Bomb rendering
+    bomb_vertex_buffer: wgpu::Buffer,
+    bomb_index_buffer: wgpu::Buffer,
+    bomb_index_count: u32,
 }
 
 impl Renderer {
@@ -2296,6 +2304,36 @@ impl Renderer {
             mapped_at_creation: false,
         });
 
+        // Missile buffers (50 missiles max, simple elongated cube)
+        let missile_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Missile Vertex Buffer"),
+            size: (50 * 24 * std::mem::size_of::<Vertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let missile_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Missile Index Buffer"),
+            size: (50 * 36 * std::mem::size_of::<u16>()) as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Bomb buffers (100 bombs max, simple sphere-ish shape)
+        let bomb_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Bomb Vertex Buffer"),
+            size: (100 * 24 * std::mem::size_of::<Vertex>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bomb_index_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Bomb Index Buffer"),
+            size: (100 * 36 * std::mem::size_of::<u16>()) as u64,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let particle_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("Particle Pipeline"),
             layout: Some(&particle_pipeline_layout),
@@ -2465,6 +2503,14 @@ impl Renderer {
             plane_vertex_buffer,
             plane_index_buffer,
             plane_index_count: 0,
+            // Missiles
+            missile_vertex_buffer,
+            missile_index_buffer,
+            missile_index_count: 0,
+            // Bombs
+            bomb_vertex_buffer,
+            bomb_index_buffer,
+            bomb_index_count: 0,
         }
     }
 
@@ -2736,6 +2782,12 @@ impl Renderer {
         // Update plane mesh
         self.update_plane_mesh(entity_manager.get_planes());
 
+        // Update missile mesh
+        self.update_missile_mesh(entity_manager.get_missiles());
+
+        // Update bomb mesh
+        self.update_bomb_mesh(entity_manager.get_bombs());
+
         // Update dropped item mesh
         self.update_dropped_items(entity_manager.get_dropped_items());
 
@@ -2967,6 +3019,20 @@ impl Renderer {
                 render_pass.draw_indexed(0..self.plane_index_count, 0, 0..1);
             }
 
+            // Render missiles
+            if self.missile_index_count > 0 {
+                render_pass.set_vertex_buffer(0, self.missile_vertex_buffer.slice(..));
+                render_pass.set_index_buffer(self.missile_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed(0..self.missile_index_count, 0, 0..1);
+            }
+
+            // Render bombs
+            if self.bomb_index_count > 0 {
+                render_pass.set_vertex_buffer(0, self.bomb_vertex_buffer.slice(..));
+                render_pass.set_index_buffer(self.bomb_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed(0..self.bomb_index_count, 0, 0..1);
+            }
+
             // Render dropped items
             if self.dropped_item_index_count > 0 {
                 render_pass.set_vertex_buffer(0, self.dropped_item_vertex_buffer.slice(..));
@@ -3037,21 +3103,24 @@ impl Renderer {
                 render_pass.draw_indexed(0..72, 0, 0..1);
             }
 
-            let opt_item = inventory.get_selected_item();
-            let vertices = Self::create_held_item_vertices(camera, opt_item, self.arm_swing_progress);
-            self.queue.write_buffer(&self.held_item_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+            // Only render held item when not piloting a plane
+            if !camera.is_piloting() {
+                let opt_item = inventory.get_selected_item();
+                let vertices = Self::create_held_item_vertices(camera, opt_item, self.arm_swing_progress);
+                self.queue.write_buffer(&self.held_item_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
 
-            // Calculate index count based on actual vertices (24 verts per cube, 36 indices per cube)
-            let num_cubes = vertices.len() / 24;
-            let actual_index_count = (num_cubes * 36) as u32;
+                // Calculate index count based on actual vertices (24 verts per cube, 36 indices per cube)
+                let num_cubes = vertices.len() / 24;
+                let actual_index_count = (num_cubes * 36) as u32;
 
-            // Render held item
-            render_pass.set_pipeline(&self.held_item_pipeline);
-            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
-            render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
-            render_pass.set_vertex_buffer(0, self.held_item_vertex_buffer.slice(..));
-            render_pass.set_index_buffer(self.held_item_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.draw_indexed(0..actual_index_count, 0, 0..1);
+                // Render held item
+                render_pass.set_pipeline(&self.held_item_pipeline);
+                render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+                render_pass.set_bind_group(1, &self.texture_bind_group, &[]);
+                render_pass.set_vertex_buffer(0, self.held_item_vertex_buffer.slice(..));
+                render_pass.set_index_buffer(self.held_item_index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+                render_pass.draw_indexed(0..actual_index_count, 0, 0..1);
+            }
         }
 
         // === BLOOM EXTRACT PASS ===
@@ -6635,10 +6704,8 @@ impl Renderer {
         let mut vertices: Vec<Vertex> = Vec::with_capacity(planes.len() * 10 * 24);
         let mut indices: Vec<u16> = Vec::with_capacity(planes.len() * 10 * 36);
 
-        // Color indices for plane parts
-        const FUSELAGE_COLOR: f32 = 52.0;  // Light gray (stone)
-        const COCKPIT_COLOR: f32 = 54.0;   // Blue tint (ice)
-        const WING_COLOR: f32 = 53.0;      // Dark gray (cobblestone)
+        // Constant colors
+        const COCKPIT_COLOR: f32 = 10.0;   // Blue tint (ice)
         const PROPELLER_COLOR: f32 = 5.0;  // Dark (wood planks)
 
         for plane in planes {
@@ -6648,6 +6715,9 @@ impl Renderer {
             let yaw = plane.yaw.to_radians();
             let pitch = plane.pitch.to_radians();
             let roll = plane.roll.to_radians();
+
+            // Get plane's colors
+            let (fuselage_color, wing_color) = plane.color.to_color_indices();
 
             let pivot = [x, y, z];
 
@@ -6746,7 +6816,7 @@ impl Renderer {
             add_plane_part(&mut vertices, &mut indices,
                 [0.0, 0.0, 0.0],
                 [0.8, 0.6, 4.0],
-                FUSELAGE_COLOR);
+                fuselage_color);
 
             // Cockpit (glass canopy) - forward and above
             add_plane_part(&mut vertices, &mut indices,
@@ -6758,25 +6828,25 @@ impl Renderer {
             add_plane_part(&mut vertices, &mut indices,
                 [-1.8, 0.0, 0.3],
                 [3.0, 0.15, 1.2],
-                WING_COLOR);
+                wing_color);
 
             // Right wing
             add_plane_part(&mut vertices, &mut indices,
                 [1.8, 0.0, 0.3],
                 [3.0, 0.15, 1.2],
-                WING_COLOR);
+                wing_color);
 
             // Tail vertical stabilizer
             add_plane_part(&mut vertices, &mut indices,
                 [0.0, 0.5, 1.8],
                 [0.1, 0.8, 0.6],
-                WING_COLOR);
+                wing_color);
 
             // Tail horizontal stabilizer
             add_plane_part(&mut vertices, &mut indices,
                 [0.0, 0.15, 1.8],
                 [1.5, 0.1, 0.5],
-                WING_COLOR);
+                wing_color);
 
             // Propeller (animated rotation)
             let prop_angle = plane.propeller_rotation.to_radians();
@@ -6811,6 +6881,171 @@ impl Renderer {
         if !vertices.is_empty() {
             self.queue.write_buffer(&self.plane_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
             self.queue.write_buffer(&self.plane_index_buffer, 0, bytemuck::cast_slice(&indices));
+        }
+    }
+
+    /// Update missile mesh for rendering
+    pub fn update_missile_mesh(&mut self, missiles: &[crate::entity::Missile]) {
+        let mut vertices: Vec<Vertex> = Vec::with_capacity(missiles.len() * 24);
+        let mut indices: Vec<u16> = Vec::with_capacity(missiles.len() * 36);
+
+        const MISSILE_COLOR: f32 = 7.0;  // Dark gray/black (bedrock-ish)
+        const MISSILE_TIP_COLOR: f32 = 1.0;  // Red (lava)
+
+        for missile in missiles {
+            if !missile.active {
+                continue;
+            }
+
+            let x = missile.position.x;
+            let y = missile.position.y;
+            let z = missile.position.z;
+
+            // Calculate missile orientation from velocity
+            let vel = missile.velocity;
+            let speed = (vel.x * vel.x + vel.y * vel.y + vel.z * vel.z).sqrt();
+            if speed < 0.01 {
+                continue;
+            }
+
+            let dir_x = vel.x / speed;
+            let dir_y = vel.y / speed;
+            let dir_z = vel.z / speed;
+
+            // Create a simple elongated missile shape (0.2 x 0.2 x 0.8)
+            let base_idx = vertices.len() as u16;
+
+            // Right vector (perpendicular to direction)
+            let right_x = dir_z;
+            let right_z = -dir_x;
+            let right_len = (right_x * right_x + right_z * right_z).sqrt().max(0.001);
+            let right_x = right_x / right_len * 0.1;
+            let right_z = right_z / right_len * 0.1;
+
+            // Up vector
+            let up_y = 0.1f32;
+
+            // Missile body vertices (elongated box along velocity direction)
+            let half_len = 0.4;
+            let front = [x + dir_x * half_len, y + dir_y * half_len, z + dir_z * half_len];
+            let back = [x - dir_x * half_len, y - dir_y * half_len, z - dir_z * half_len];
+
+            // 8 corners of the missile body
+            let corners = [
+                // Front face (4 corners)
+                [front[0] - right_x - up_y * dir_y, front[1] - up_y, front[2] - right_z],
+                [front[0] + right_x - up_y * dir_y, front[1] - up_y, front[2] + right_z],
+                [front[0] + right_x + up_y * dir_y, front[1] + up_y, front[2] + right_z],
+                [front[0] - right_x + up_y * dir_y, front[1] + up_y, front[2] - right_z],
+                // Back face (4 corners)
+                [back[0] - right_x - up_y * dir_y, back[1] - up_y, back[2] - right_z],
+                [back[0] + right_x - up_y * dir_y, back[1] - up_y, back[2] + right_z],
+                [back[0] + right_x + up_y * dir_y, back[1] + up_y, back[2] + right_z],
+                [back[0] - right_x + up_y * dir_y, back[1] + up_y, back[2] - right_z],
+            ];
+
+            // Add vertices for all 6 faces
+            let face_indices = [
+                ([0, 1, 2, 3], [dir_x, dir_y, dir_z], MISSILE_TIP_COLOR),     // Front (red tip)
+                ([5, 4, 7, 6], [-dir_x, -dir_y, -dir_z], MISSILE_COLOR),      // Back
+                ([4, 0, 3, 7], [-right_x, 0.0, -right_z], MISSILE_COLOR),     // Left
+                ([1, 5, 6, 2], [right_x, 0.0, right_z], MISSILE_COLOR),       // Right
+                ([3, 2, 6, 7], [0.0, 1.0, 0.0], MISSILE_COLOR),               // Top
+                ([4, 5, 1, 0], [0.0, -1.0, 0.0], MISSILE_COLOR),              // Bottom
+            ];
+
+            for (corner_idx, normal, color) in face_indices.iter() {
+                let face_base = vertices.len() as u16;
+                for &ci in corner_idx {
+                    vertices.push(Vertex {
+                        position: corners[ci],
+                        tex_coords: [0.0, 0.0],
+                        normal: [normal[0], normal[1], normal[2]],
+                        block_type: *color,
+                        damage: 0.0,
+                    });
+                }
+                indices.extend_from_slice(&[
+                    face_base, face_base + 1, face_base + 2,
+                    face_base, face_base + 2, face_base + 3,
+                ]);
+            }
+        }
+
+        self.missile_index_count = indices.len() as u32;
+
+        if !vertices.is_empty() {
+            self.queue.write_buffer(&self.missile_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+            self.queue.write_buffer(&self.missile_index_buffer, 0, bytemuck::cast_slice(&indices));
+        }
+    }
+
+    /// Update bomb mesh for rendering (bombs are round/oval shaped)
+    pub fn update_bomb_mesh(&mut self, bombs: &[crate::entity::Bomb]) {
+        let mut vertices: Vec<Vertex> = Vec::with_capacity(bombs.len() * 24);
+        let mut indices: Vec<u16> = Vec::with_capacity(bombs.len() * 36);
+
+        const BOMB_COLOR: f32 = 7.0;   // Dark (like coal/obsidian)
+        const BOMB_NOSE_COLOR: f32 = 1.0;  // Red tip
+
+        for bomb in bombs {
+            if !bomb.active {
+                continue;
+            }
+
+            let x = bomb.position.x;
+            let y = bomb.position.y;
+            let z = bomb.position.z;
+
+            // Bomb is a simple box shape (0.4 x 0.4 x 0.6) - taller than wide
+            let half_w = 0.2;
+            let half_h = 0.3;
+
+            // 8 corners of the bomb
+            let corners = [
+                [x - half_w, y - half_h, z - half_w],  // 0: bottom back left
+                [x + half_w, y - half_h, z - half_w],  // 1: bottom back right
+                [x + half_w, y - half_h, z + half_w],  // 2: bottom front right
+                [x - half_w, y - half_h, z + half_w],  // 3: bottom front left
+                [x - half_w, y + half_h, z - half_w],  // 4: top back left
+                [x + half_w, y + half_h, z - half_w],  // 5: top back right
+                [x + half_w, y + half_h, z + half_w],  // 6: top front right
+                [x - half_w, y + half_h, z + half_w],  // 7: top front left
+            ];
+
+            // 6 faces with normals and colors
+            let faces = [
+                ([0, 1, 2, 3], [0.0, -1.0, 0.0], BOMB_NOSE_COLOR),  // Bottom (red - nose)
+                ([4, 7, 6, 5], [0.0, 1.0, 0.0], BOMB_COLOR),        // Top
+                ([0, 4, 5, 1], [0.0, 0.0, -1.0], BOMB_COLOR),       // Back
+                ([2, 6, 7, 3], [0.0, 0.0, 1.0], BOMB_COLOR),        // Front
+                ([0, 3, 7, 4], [-1.0, 0.0, 0.0], BOMB_COLOR),       // Left
+                ([1, 5, 6, 2], [1.0, 0.0, 0.0], BOMB_COLOR),        // Right
+            ];
+
+            for (corner_idx, normal, color) in faces.iter() {
+                let face_base = vertices.len() as u16;
+                for &ci in corner_idx {
+                    vertices.push(Vertex {
+                        position: corners[ci],
+                        tex_coords: [0.0, 0.0],
+                        normal: *normal,
+                        block_type: *color,
+                        damage: 0.0,
+                    });
+                }
+                indices.extend_from_slice(&[
+                    face_base, face_base + 1, face_base + 2,
+                    face_base, face_base + 2, face_base + 3,
+                ]);
+            }
+        }
+
+        self.bomb_index_count = indices.len() as u32;
+
+        if !vertices.is_empty() {
+            self.queue.write_buffer(&self.bomb_vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+            self.queue.write_buffer(&self.bomb_index_buffer, 0, bytemuck::cast_slice(&indices));
         }
     }
 

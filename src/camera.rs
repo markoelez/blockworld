@@ -1147,14 +1147,22 @@ impl Camera {
         let offset_dist = 12.0;
         let offset_height = 4.0;
 
-        // Calculate camera position behind the plane
+        // Calculate ideal camera position behind the plane
         let behind_x = plane_yaw_rad.sin() * offset_dist;
         let behind_z = plane_yaw_rad.cos() * offset_dist;
 
-        let cam_pos = Point3::new(
+        let target_cam_pos = Point3::new(
             plane_pos.x + behind_x,
             plane_pos.y + offset_height + offset_dist * plane_pitch_rad.sin(),
             plane_pos.z + behind_z,
+        );
+
+        // Smooth camera follow (lerp from current to target)
+        let cam_lerp = 0.08; // Lower = smoother/slower, Higher = snappier
+        let cam_pos = Point3::new(
+            self.position.x + (target_cam_pos.x - self.position.x) * cam_lerp,
+            self.position.y + (target_cam_pos.y - self.position.y) * cam_lerp,
+            self.position.z + (target_cam_pos.z - self.position.z) * cam_lerp,
         );
 
         // Look at point ahead of plane

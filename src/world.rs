@@ -2163,6 +2163,42 @@ impl World {
             .copied()
     }
 
+    /// Create an explosion that destroys blocks in a spherical radius
+    pub fn explode(&mut self, center_x: i32, center_y: i32, center_z: i32, radius: i32) {
+        let radius_sq = (radius * radius) as f32;
+
+        for dx in -radius..=radius {
+            for dy in -radius..=radius {
+                for dz in -radius..=radius {
+                    let dist_sq = (dx * dx + dy * dy + dz * dz) as f32;
+
+                    // Spherical explosion with some randomness at edges
+                    if dist_sq <= radius_sq {
+                        let x = center_x + dx;
+                        let y = center_y + dy;
+                        let z = center_z + dz;
+
+                        // Don't destroy bedrock or go below y=1
+                        if y < 1 {
+                            continue;
+                        }
+
+                        if let Some(block) = self.get_block(x, y, z) {
+                            // Destroy most blocks except bedrock
+                            if block != BlockType::Air && block != BlockType::Barrier {
+                                // Blocks at the edge have a chance to survive
+                                let edge_factor = dist_sq / radius_sq;
+                                if edge_factor < 0.7 || rand::random::<f32>() > edge_factor {
+                                    self.set_block(x, y, z, BlockType::Air);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Check if a fence at (x, y, z) connects in a given direction
     pub fn fence_connects(&self, x: i32, y: i32, z: i32, dir: BlockFacing) -> bool {
         let (nx, nz) = match dir {

@@ -364,10 +364,10 @@ fn main() {
                                     VirtualKeyCode::E => {
                                         // First check for plane enter/exit
                                         if camera.is_piloting() {
-                                            // Try to exit plane if landed and slow
+                                            // Exit plane if grounded
                                             if let Some(plane_id) = camera.piloted_plane_id {
                                                 if let Some(plane) = entity_manager.get_plane_mut(plane_id) {
-                                                    if plane.on_ground && plane.speed < 5.0 {
+                                                    if plane.is_grounded() {
                                                         let exit_pos = plane.position;
                                                         camera.exit_plane(exit_pos);
                                                     }
@@ -662,6 +662,42 @@ fn main() {
                                         // Give player a diamond sword for testing
                                         inventory.add_tool(Tool::new(ToolType::Sword, ToolMaterial::Diamond));
                                     },
+                                    VirtualKeyCode::P => {
+                                        // Spawn a plane right in front of the player using camera's look direction
+                                        let look_dir = camera.get_look_direction();
+                                        let spawn_x = camera.position.x + look_dir.x * 10.0;
+                                        let spawn_z = camera.position.z + look_dir.z * 10.0;
+                                        // Spawn at ground level (player feet)
+                                        let spawn_y = camera.position.y - 1.5;
+                                        let spawn_pos = cgmath::Point3::new(spawn_x, spawn_y, spawn_z);
+                                        entity_manager.spawn_plane(spawn_pos);
+                                    },
+                                    VirtualKeyCode::F => {
+                                        // Fire missile from plane (if piloting)
+                                        if camera.is_piloting() {
+                                            if let Some(plane_id) = camera.piloted_plane_id {
+                                                if let Some(plane) = entity_manager.get_plane_mut(plane_id) {
+                                                    if !plane.is_crashed() {
+                                                        let plane_copy = plane.clone();
+                                                        entity_manager.fire_missile(&plane_copy);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    },
+                                    VirtualKeyCode::V => {
+                                        // Drop bomb from plane (if piloting)
+                                        if camera.is_piloting() {
+                                            if let Some(plane_id) = camera.piloted_plane_id {
+                                                if let Some(plane) = entity_manager.get_plane_mut(plane_id) {
+                                                    if !plane.is_crashed() {
+                                                        let plane_copy = plane.clone();
+                                                        entity_manager.drop_bomb(&plane_copy);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    },
                                     VirtualKeyCode::I => {
                                         // Open inventory crafting (2x2)
                                         crafting_ui.open_inventory_crafting();
@@ -837,23 +873,51 @@ fn main() {
                     // Handle plane piloting
                     if camera.is_piloting() {
                         if let Some(plane_id) = camera.piloted_plane_id {
-                            // Apply pilot inputs to the plane
-                            if let Some(plane) = entity_manager.get_plane_mut(plane_id) {
-                                plane.apply_pilot_input(
-                                    camera.throttle_up,
-                                    camera.throttle_down,
-                                    camera.moving_left,
-                                    camera.moving_right,
-                                    camera.pitch_up,
-                                    camera.pitch_down,
-                                    dt,
-                                );
-                                // Update plane physics
-                                plane.update(dt, &world);
-                                // Update flight camera to follow plane
-                                camera.update_flight_view(plane.yaw, plane.pitch, plane.roll, plane.position);
+                            // Check if plane still exists and isn't crashed
+                            let plane_state = entity_manager.get_plane_mut(plane_id).map(|p| (p.is_crashed(), p.position));
+
+                            match plane_state {
+                                Some((true, pos)) => {
+                                    // Plane crashed - eject player
+                                    camera.exit_plane(pos);
+                                    camera.take_damage(30.0, None);
+                                }
+                                Some((false, _)) => {
+                                    // Plane is fine - fly it
+                                    if let Some(plane) = entity_manager.get_plane_mut(plane_id) {
+                                        plane.fly(
+                                            dt,
+                                            camera.throttle_up,
+                                            camera.moving_left,
+                                            camera.moving_right,
+                                            camera.pitch_up,
+                                            camera.pitch_down,
+                                            &world,
+                                        );
+                                        camera.update_flight_view(plane.yaw, plane.pitch, plane.roll, plane.position);
+                                    }
+                                }
+                                None => {
+                                    // Plane doesn't exist anymore - eject player
+                                    camera.exit_plane(camera.position);
+                                }
                             }
                         }
+                    }
+
+                    // Clean up crashed planes
+                    entity_manager.cleanup_crashed_planes();
+
+                    // Update missiles and handle explosions
+                    let explosions = entity_manager.update_missiles(dt, &world);
+                    for (ex, ey, ez) in explosions {
+                        world.explode(ex, ey, ez, crate::entity::EXPLOSION_RADIUS);
+                    }
+
+                    // Update bombs and handle explosions (bigger than missiles)
+                    let bomb_explosions = entity_manager.update_bombs(dt, &world);
+                    for (ex, ey, ez) in bomb_explosions {
+                        world.explode(ex, ey, ez, crate::entity::BOMB_EXPLOSION_RADIUS);
                     }
 
                     // Check for hostile mob attacks on player
