@@ -1,7 +1,7 @@
 use cgmath::{Matrix4, Vector3, Point3, Deg, perspective, InnerSpace};
 use winit::event::VirtualKeyCode;
 use wgpu::SurfaceConfiguration;
-use crate::world::{World, BlockType, TorchFace};
+use crate::world::{World, BlockType, TorchFace, CollisionShape, BlockFacing};
 
 const PLAYER_HEIGHT: f32 = 1.8;
 const PLAYER_WIDTH: f32 = 0.6;
@@ -151,6 +151,56 @@ impl Camera {
         self.pitch = self.pitch.clamp(-89.0, 89.0);
 
         self.update_view_proj();
+    }
+
+    /// Check if a block at (bx, by, bz) would collide with a player checking from player_y
+    /// Returns true if the block would block horizontal movement at the given Y level
+    fn block_collides_horizontal(block: BlockType, by: i32, player_y: f32) -> bool {
+        match block.collision_shape() {
+            CollisionShape::None => false,
+            CollisionShape::FullBlock => true,
+            CollisionShape::SlabBottom => {
+                // Bottom slab: collides at y range [by, by+0.5]
+                let feet_y = player_y - PLAYER_HEIGHT;
+                feet_y < (by as f32 + 0.5)
+            }
+            CollisionShape::SlabTop => {
+                // Top slab: collides at y range [by+0.5, by+1.0]
+                let feet_y = player_y - PLAYER_HEIGHT;
+                feet_y >= (by as f32 + 0.5) || player_y > (by as f32 + 0.5)
+            }
+            CollisionShape::Fence => {
+                // Fence: 1.5 block height, collides if player overlaps
+                let feet_y = player_y - PLAYER_HEIGHT;
+                feet_y < (by as f32 + 1.5)
+            }
+        }
+    }
+
+    /// Check if a block would stop vertical movement (for ground collision)
+    fn block_collides_ground(block: BlockType, by: i32, player_feet_y: f32) -> Option<f32> {
+        match block.collision_shape() {
+            CollisionShape::None => None,
+            CollisionShape::FullBlock => Some(by as f32 + 1.0 + PLAYER_HEIGHT),
+            CollisionShape::SlabBottom => {
+                // Bottom slab top surface at by + 0.5
+                if player_feet_y >= by as f32 && player_feet_y < by as f32 + 0.5 {
+                    Some(by as f32 + 0.5 + PLAYER_HEIGHT)
+                } else if player_feet_y < by as f32 {
+                    Some(by as f32 + 0.5 + PLAYER_HEIGHT)
+                } else {
+                    None
+                }
+            }
+            CollisionShape::SlabTop => {
+                // Top slab top surface at by + 1.0
+                Some(by as f32 + 1.0 + PLAYER_HEIGHT)
+            }
+            CollisionShape::Fence => {
+                // Fence acts as full block for ground
+                Some(by as f32 + 1.0 + PLAYER_HEIGHT)
+            }
+        }
     }
 
     // Sound event methods
@@ -376,6 +426,29 @@ impl Camera {
         self.moving_forward || self.moving_backward || self.moving_left || self.moving_right || self.jump_pressed
     }
 
+    /// Check if player is currently on a ladder
+    fn is_on_ladder(&self, world: &World) -> bool {
+        // Check if player's body overlaps with a ladder block
+        let check_positions = [
+            (self.position.x, self.position.y - PLAYER_HEIGHT * 0.5),  // Lower body
+            (self.position.x, self.position.y - PLAYER_HEIGHT * 0.25), // Mid body
+            (self.position.x, self.position.y),                        // Upper body
+        ];
+
+        for (px, py) in check_positions {
+            let block_x = px.floor() as i32;
+            let block_y = py.floor() as i32;
+            let block_z = self.position.z.floor() as i32;
+
+            if let Some(block) = world.get_block(block_x, block_y, block_z) {
+                if block == BlockType::Ladder {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     pub fn update(&mut self, dt: f32, world: &World) {
         // Unlock spawn lock when player tries to move
         if self.spawn_locked {
@@ -448,27 +521,49 @@ impl Camera {
             }
         }
         
-        let move_speed = if is_in_water { 2.0 } else { 4.3 };
+        // Check if on ladder
+        let is_on_ladder = self.is_on_ladder(world);
+
+        let move_speed = if is_in_water { 2.0 } else if is_on_ladder { 2.5 } else { 4.3 };
         let mut horizontal_velocity = Vector3::new(0.0, 0.0, 0.0);
         if move_dir.magnitude() > 0.0 {
             horizontal_velocity = move_dir.normalize() * move_speed;
         }
-        
-        // Apply gravity
-        self.velocity.y -= GRAVITY * dt;
 
-        // Clamp to terminal velocity
-        self.velocity.y = self.velocity.y.clamp(-TERMINAL_VELOCITY, TERMINAL_VELOCITY);
+        // Ladder climbing
+        if is_on_ladder {
+            // On ladder: disable gravity, W/S to climb
+            self.velocity.y = 0.0;
 
-        if is_in_water {
-            self.velocity.y += GRAVITY * 0.9 * dt;
-            self.velocity.y *= 0.95;
-            self.velocity.y += (self.bob_time * 3.0).sin() * 0.05;
-        }
+            if self.moving_forward {
+                self.velocity.y = 4.0;  // Climb up
+            } else if self.moving_backward {
+                self.velocity.y = -4.0; // Climb down
+            }
 
-        // Jump if on ground or in water
-        if self.jump_pressed && (self.on_ground || is_in_water) {
-            self.velocity.y = if is_in_water { 5.0 } else { JUMP_VELOCITY };
+            // Space to jump off ladder
+            if self.jump_pressed {
+                self.velocity.y = JUMP_VELOCITY * 0.8;
+                // Also add horizontal velocity away from ladder
+                horizontal_velocity = horizontal_velocity * 1.5;
+            }
+        } else {
+            // Normal gravity
+            self.velocity.y -= GRAVITY * dt;
+
+            // Clamp to terminal velocity
+            self.velocity.y = self.velocity.y.clamp(-TERMINAL_VELOCITY, TERMINAL_VELOCITY);
+
+            if is_in_water {
+                self.velocity.y += GRAVITY * 0.9 * dt;
+                self.velocity.y *= 0.95;
+                self.velocity.y += (self.bob_time * 3.0).sin() * 0.05;
+            }
+
+            // Jump if on ground or in water
+            if self.jump_pressed && (self.on_ground || is_in_water) {
+                self.velocity.y = if is_in_water { 5.0 } else { JUMP_VELOCITY };
+            }
         }
 
         // Apply movement with collision detection
@@ -477,9 +572,9 @@ impl Camera {
         // Check X movement collision
         let test_x = self.position.x + horizontal_velocity.x * dt;
         let mut can_move_x = true;
-        
-        for dy in 0..2 { // Check collision for player height
-            let check_y = (self.position.y - PLAYER_HEIGHT + dy as f32).floor() as i32;
+
+        for dy in 0..3 { // Check collision for player height (3 levels to catch fences)
+            let check_y = (self.position.y - PLAYER_HEIGHT + dy as f32 * 0.6).floor() as i32;
             for dz in [-1, 0, 1] { // Check around player width
                 let check_z = (self.position.z + dz as f32 * PLAYER_WIDTH * 0.5).floor() as i32;
                 let check_x = if horizontal_velocity.x > 0.0 {
@@ -487,9 +582,9 @@ impl Camera {
                 } else {
                     (test_x - PLAYER_WIDTH * 0.5).floor() as i32
                 };
-                
+
                 if let Some(block) = world.get_block(check_x, check_y, check_z) {
-                    if block != BlockType::Air && block != BlockType::Water {
+                    if block != BlockType::Water && Self::block_collides_horizontal(block, check_y, self.position.y) {
                         can_move_x = false;
                         break;
                     }
@@ -497,17 +592,17 @@ impl Camera {
             }
             if !can_move_x { break; }
         }
-        
+
         if can_move_x {
             new_position.x = test_x;
         }
-        
+
         // Check Z movement collision
         let test_z = self.position.z + horizontal_velocity.z * dt;
         let mut can_move_z = true;
-        
-        for dy in 0..2 { // Check collision for player height
-            let check_y = (self.position.y - PLAYER_HEIGHT + dy as f32).floor() as i32;
+
+        for dy in 0..3 { // Check collision for player height (3 levels to catch fences)
+            let check_y = (self.position.y - PLAYER_HEIGHT + dy as f32 * 0.6).floor() as i32;
             for dx in [-1, 0, 1] { // Check around player width
                 let check_x = (new_position.x + dx as f32 * PLAYER_WIDTH * 0.5).floor() as i32;
                 let check_z = if horizontal_velocity.z > 0.0 {
@@ -515,9 +610,9 @@ impl Camera {
                 } else {
                     (test_z - PLAYER_WIDTH * 0.5).floor() as i32
                 };
-                
+
                 if let Some(block) = world.get_block(check_x, check_y, check_z) {
-                    if block != BlockType::Air && block != BlockType::Water {
+                    if block != BlockType::Water && Self::block_collides_horizontal(block, check_y, self.position.y) {
                         can_move_z = false;
                         break;
                     }
@@ -525,44 +620,47 @@ impl Camera {
             }
             if !can_move_z { break; }
         }
-        
+
         if can_move_z {
             new_position.z = test_z;
         }
-        
+
         // Apply Y movement and check vertical collisions
         new_position.y += self.velocity.y * dt;
-        
+
         // Check ground collision
         self.on_ground = false;
-        let feet_y = (new_position.y - PLAYER_HEIGHT).floor() as i32;
-        
+        let feet_y = new_position.y - PLAYER_HEIGHT;
+        let check_block_y = feet_y.floor() as i32;
+
         for dx in [-1, 0, 1] {
             for dz in [-1, 0, 1] {
                 let check_x = (new_position.x + dx as f32 * PLAYER_WIDTH * 0.3).floor() as i32;
                 let check_z = (new_position.z + dz as f32 * PLAYER_WIDTH * 0.3).floor() as i32;
-                
-                if let Some(block) = world.get_block(check_x, feet_y, check_z) {
-                    if block != BlockType::Air && block != BlockType::Water {
-                        if self.velocity.y <= 0.0 {
-                            new_position.y = feet_y as f32 + PLAYER_HEIGHT + 1.0;
-                            self.velocity.y = 0.0;
-                            self.on_ground = true;
+
+                if let Some(block) = world.get_block(check_x, check_block_y, check_z) {
+                    if block != BlockType::Water {
+                        if let Some(new_y) = Self::block_collides_ground(block, check_block_y, feet_y) {
+                            if self.velocity.y <= 0.0 {
+                                new_position.y = new_y;
+                                self.velocity.y = 0.0;
+                                self.on_ground = true;
+                            }
                         }
                     }
                 }
             }
         }
-        
+
         // Check ceiling collision
         let head_y = (new_position.y + 0.1).floor() as i32;
         for dx in [-1, 0, 1] {
             for dz in [-1, 0, 1] {
                 let check_x = (new_position.x + dx as f32 * PLAYER_WIDTH * 0.3).floor() as i32;
                 let check_z = (new_position.z + dz as f32 * PLAYER_WIDTH * 0.3).floor() as i32;
-                
+
                 if let Some(block) = world.get_block(check_x, head_y, check_z) {
-                    if block != BlockType::Air && block != BlockType::Water && self.velocity.y > 0.0 {
+                    if block != BlockType::Water && block.collision_shape() != CollisionShape::None && self.velocity.y > 0.0 {
                         self.velocity.y = 0.0;
                     }
                 }
@@ -783,6 +881,56 @@ impl Camera {
 
         None
     }
+
+    /// Get slab placement position and whether it should be top or bottom slab
+    /// Returns (placement_pos, is_top_slab, hit_block_pos, hit_block_type)
+    pub fn get_slab_placement(&self, world: &World, max_distance: f32) -> Option<((i32, i32, i32), bool, (i32, i32, i32), BlockType)> {
+        let direction = self.get_look_direction();
+        let step_size = 0.02; // Very small steps for precise slab placement
+        let steps = (max_distance / step_size) as i32;
+
+        let mut last_air_pos: Option<(i32, i32, i32)> = None;
+        let mut hit_y_frac: f32 = 0.5; // Fractional Y position where we hit
+
+        for i in 0..steps {
+            let distance = i as f32 * step_size;
+            let check_pos = self.position + direction * distance;
+
+            let block_x = check_pos.x.floor() as i32;
+            let block_y = check_pos.y.floor() as i32;
+            let block_z = check_pos.z.floor() as i32;
+
+            if let Some(block) = world.get_block(block_x, block_y, block_z) {
+                if block != BlockType::Air && block != BlockType::Barrier && block != BlockType::Water {
+                    // Hit a solid block
+                    hit_y_frac = check_pos.y - check_pos.y.floor();
+
+                    if let Some(air_pos) = last_air_pos {
+                        let dy = air_pos.1 - block_y;
+
+                        // Determine if top or bottom slab based on hit position
+                        let is_top_slab = if dy > 0 {
+                            // Placing on top of a block - check where we're looking on the top face
+                            false // Default to bottom slab when placing on top
+                        } else if dy < 0 {
+                            // Placing on bottom of a block
+                            true // Default to top slab when placing underneath
+                        } else {
+                            // Placing on side - use Y fraction of hit point
+                            hit_y_frac >= 0.5
+                        };
+
+                        return Some((air_pos, is_top_slab, (block_x, block_y, block_z), block));
+                    }
+                    return None;
+                } else if block == BlockType::Air {
+                    last_air_pos = Some((block_x, block_y, block_z));
+                }
+            }
+        }
+
+        None
+    }
     
     pub fn get_facing_direction(&self) -> &'static str {
         // Normalize yaw to 0-360 range
@@ -805,6 +953,73 @@ impl Camera {
         } else {
             "North (-Z)"
         }
+    }
+
+    /// Get the player's horizontal facing direction as BlockFacing
+    /// Stairs should face TOWARD the player (low side toward player)
+    pub fn get_block_facing(&self) -> BlockFacing {
+        let mut yaw_deg = self.yaw % 360.0;
+        if yaw_deg < 0.0 {
+            yaw_deg += 360.0;
+        }
+
+        // Player is looking toward this direction, so stairs should face opposite
+        // (stairs low side faces the player)
+        if yaw_deg >= 315.0 || yaw_deg < 45.0 {
+            BlockFacing::West   // Looking East, stairs face West (toward player)
+        } else if yaw_deg >= 45.0 && yaw_deg < 135.0 {
+            BlockFacing::North  // Looking South, stairs face North
+        } else if yaw_deg >= 135.0 && yaw_deg < 225.0 {
+            BlockFacing::East   // Looking West, stairs face East
+        } else {
+            BlockFacing::South  // Looking North, stairs face South
+        }
+    }
+
+    /// Get stair placement info: (position, facing, upside_down)
+    pub fn get_stair_placement(&self, world: &World, max_distance: f32) -> Option<((i32, i32, i32), BlockFacing, bool)> {
+        let direction = self.get_look_direction();
+        let step_size = 0.02;
+        let steps = (max_distance / step_size) as i32;
+
+        let mut last_air_pos: Option<(i32, i32, i32)> = None;
+        let mut hit_y_frac: f32 = 0.5;
+
+        for i in 0..steps {
+            let distance = i as f32 * step_size;
+            let check_pos = self.position + direction * distance;
+
+            let block_x = check_pos.x.floor() as i32;
+            let block_y = check_pos.y.floor() as i32;
+            let block_z = check_pos.z.floor() as i32;
+
+            if let Some(block) = world.get_block(block_x, block_y, block_z) {
+                if block != BlockType::Air && block != BlockType::Barrier && block != BlockType::Water {
+                    hit_y_frac = check_pos.y - check_pos.y.floor();
+
+                    if let Some(air_pos) = last_air_pos {
+                        let dy = air_pos.1 - block_y;
+
+                        // Upside-down if hitting bottom of block or upper half of side
+                        let upside_down = if dy < 0 {
+                            true  // Hitting bottom of block above
+                        } else if dy > 0 {
+                            false // Hitting top of block below
+                        } else {
+                            hit_y_frac >= 0.5 // Side hit - check Y position
+                        };
+
+                        let facing = self.get_block_facing();
+                        return Some((air_pos, facing, upside_down));
+                    }
+                    return None;
+                } else if block == BlockType::Air {
+                    last_air_pos = Some((block_x, block_y, block_z));
+                }
+            }
+        }
+
+        None
     }
 
     fn update_view_proj(&mut self) {

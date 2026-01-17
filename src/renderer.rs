@@ -2643,7 +2643,15 @@ impl Renderer {
         self.time_of_day
     }
 
-    pub fn render(&mut self, camera: &Camera, world: &mut World, inventory: &Inventory, targeted_block: Option<(i32, i32, i32)>, entity_manager: &EntityManager, particle_system: &ParticleSystem, underwater: bool, debug_info: &DebugInfo, pause_menu: &PauseMenu, chest_ui: &ChestUI, crafting_ui: &CraftingUI, recipe_registry: &RecipeRegistry, lightning_system: &LightningSystem, weather_state: &WeatherState) {
+    /// Set time of day (0.0 = midnight, 0.25 = dawn, 0.5 = noon, 0.75 = dusk)
+    pub fn set_time_of_day(&mut self, time: f32) {
+        // Adjust time_offset to achieve the desired time
+        let elapsed = (Instant::now() - self.start_time).as_secs_f32();
+        self.time_offset = time - elapsed / 600.0;
+        self.time_of_day = time.fract();
+    }
+
+    pub fn render(&mut self, camera: &Camera, world: &mut World, inventory: &Inventory, targeted_block: Option<(i32, i32, i32)>, entity_manager: &EntityManager, particle_system: &ParticleSystem, underwater: bool, debug_info: &DebugInfo, pause_menu: &PauseMenu, chest_ui: &ChestUI, crafting_ui: &CraftingUI, furnace_ui: &crate::ui::FurnaceUI, recipe_registry: &RecipeRegistry, lightning_system: &LightningSystem, weather_state: &WeatherState) {
         let now = Instant::now();
         let dt = (now - self.last_render).as_secs_f32();
         self.last_render = now;
@@ -2699,8 +2707,8 @@ impl Renderer {
         // Update animal mesh
         self.update_animal_mesh(entity_manager.get_animals());
 
-        // Update hostile mob mesh
-        self.update_hostile_mob_mesh(entity_manager.get_hostile_mobs());
+        // Update hostile mob mesh (including projectiles)
+        self.update_hostile_mob_mesh(entity_manager.get_hostile_mobs(), entity_manager.get_projectiles());
 
         // Update dropped item mesh
         self.update_dropped_items(entity_manager.get_dropped_items());
@@ -3199,6 +3207,23 @@ impl Renderer {
             );
         }
 
+        // Render furnace UI
+        if furnace_ui.open {
+            if let Some(furnace_pos) = furnace_ui.furnace_pos {
+                if let Some(furnace_data) = world.get_furnace(furnace_pos.0, furnace_pos.1, furnace_pos.2) {
+                    self.ui_renderer.render_furnace_ui(
+                        &self.device,
+                        &self.queue,
+                        &view,
+                        &self.texture_bind_group,
+                        furnace_ui,
+                        furnace_data,
+                        inventory,
+                    );
+                }
+            }
+        }
+
         // Render survival UI (health, hunger, air)
         if !pause_menu.visible && !chest_ui.open && !crafting_ui.open {
             self.ui_renderer.render_survival_ui(
@@ -3595,6 +3620,42 @@ impl Renderer {
             &mut opaque_vertices, &mut opaque_indices,
         );
 
+        // Render slabs with half-height geometry
+        Self::render_slabs(
+            world, chunk, chunk_x_offset, chunk_z_offset,
+            &mut opaque_vertices, &mut opaque_indices,
+        );
+
+        // Render stairs with L-shaped geometry
+        Self::render_stairs(
+            world, chunk, chunk_x_offset, chunk_z_offset,
+            &mut opaque_vertices, &mut opaque_indices,
+        );
+
+        // Render ladders with flat panel geometry
+        Self::render_ladders(
+            world, chunk, chunk_x_offset, chunk_z_offset,
+            &mut opaque_vertices, &mut opaque_indices,
+        );
+
+        // Render trapdoors with horizontal/vertical slab geometry
+        Self::render_trapdoors(
+            world, chunk, chunk_x_offset, chunk_z_offset,
+            &mut opaque_vertices, &mut opaque_indices,
+        );
+
+        // Render fences with center post and connecting bars
+        Self::render_fences(
+            world, chunk, chunk_x_offset, chunk_z_offset,
+            &mut opaque_vertices, &mut opaque_indices,
+        );
+
+        // Render glass panes with thin connecting panels (transparent)
+        Self::render_glass_panes(
+            world, chunk, chunk_x_offset, chunk_z_offset,
+            &mut trans_vertices, &mut trans_indices,
+        );
+
         (opaque_vertices, opaque_indices, trans_vertices, trans_indices)
     }
 
@@ -3613,8 +3674,10 @@ impl Renderer {
             for y in 0..World::CHUNK_HEIGHT {
                 for z in 0..World::CHUNK_SIZE {
                     let block_type = chunk.blocks[x][y][z];
-                    if block_type == BlockType::Air || block_type == BlockType::Barrier || block_type == BlockType::Torch {
-                        continue;  // Torches are rendered separately with special geometry
+                    if block_type == BlockType::Air || block_type == BlockType::Barrier || block_type == BlockType::Torch
+                       || block_type == BlockType::Ladder || block_type.is_trapdoor() || block_type.is_fence() || block_type == BlockType::GlassPane
+                       || block_type.is_bottom_slab() || block_type.is_top_slab() || block_type.is_stairs() {
+                        continue;  // Torches, slabs, stairs, ladders, and trapdoors are rendered separately with special geometry
                     }
 
                     let world_x = chunk_x_offset + x as i32;
@@ -3876,6 +3939,1226 @@ impl Renderer {
         indices.push(base + 3);
     }
 
+    // Render slabs with half-height geometry
+    fn render_slabs(
+        world: &World,
+        chunk: &crate::world::Chunk,
+        chunk_x_offset: i32,
+        chunk_z_offset: i32,
+        opaque_vertices: &mut Vec<Vertex>,
+        opaque_indices: &mut Vec<u16>,
+    ) {
+        for x in 0..World::CHUNK_SIZE {
+            for y in 0..World::CHUNK_HEIGHT {
+                for z in 0..World::CHUNK_SIZE {
+                    let block_type = chunk.blocks[x][y][z];
+
+                    let (is_bottom_slab, is_top_slab) = match block_type {
+                        BlockType::StoneSlabBottom | BlockType::WoodSlabBottom | BlockType::CobblestoneSlabBottom => (true, false),
+                        BlockType::StoneSlabTop | BlockType::WoodSlabTop | BlockType::CobblestoneSlabTop => (false, true),
+                        _ => continue,
+                    };
+
+                    let world_x = chunk_x_offset + x as i32;
+                    let world_y = y as i32;
+                    let world_z = chunk_z_offset + z as i32;
+
+                    let block_type_f = Self::block_type_to_float(block_type);
+
+                    // Y offset for slab position
+                    let (y_min, y_max) = if is_bottom_slab {
+                        (0.0, 0.5)
+                    } else {
+                        (0.5, 1.0)
+                    };
+
+                    let base_x = world_x as f32;
+                    let base_y = world_y as f32;
+                    let base_z = world_z as f32;
+
+                    // Add top face
+                    let top_exposed = if is_top_slab {
+                        Self::is_face_exposed(world, world_x, world_y + 1, world_z, block_type)
+                    } else {
+                        // Bottom slab top at y+0.5 is exposed if block above is air or top slab
+                        world.get_block(world_x, world_y, world_z)
+                            .map(|b| b == BlockType::Air || b.is_top_slab())
+                            .unwrap_or(true) || Self::is_face_exposed(world, world_x, world_y + 1, world_z, block_type)
+                    };
+                    if top_exposed {
+                        Self::add_slab_face(opaque_vertices, opaque_indices,
+                            base_x, base_y + y_max, base_z, Face::Top, block_type_f);
+                    }
+
+                    // Add bottom face
+                    let bottom_exposed = if is_bottom_slab {
+                        Self::is_face_exposed(world, world_x, world_y - 1, world_z, block_type)
+                    } else {
+                        // Top slab bottom at y+0.5 is exposed if block is air or bottom slab
+                        world.get_block(world_x, world_y, world_z)
+                            .map(|b| b == BlockType::Air || b.is_bottom_slab())
+                            .unwrap_or(true) || Self::is_face_exposed(world, world_x, world_y - 1, world_z, block_type)
+                    };
+                    if bottom_exposed {
+                        Self::add_slab_face(opaque_vertices, opaque_indices,
+                            base_x, base_y + y_min, base_z, Face::Bottom, block_type_f);
+                    }
+
+                    // Add side faces (half height)
+                    // Right (+X)
+                    if Self::is_face_exposed(world, world_x + 1, world_y, world_z, block_type) {
+                        Self::add_slab_side_face(opaque_vertices, opaque_indices,
+                            base_x + 1.0, base_y + y_min, base_z, 0.5, Face::Right, block_type_f);
+                    }
+                    // Left (-X)
+                    if Self::is_face_exposed(world, world_x - 1, world_y, world_z, block_type) {
+                        Self::add_slab_side_face(opaque_vertices, opaque_indices,
+                            base_x, base_y + y_min, base_z, 0.5, Face::Left, block_type_f);
+                    }
+                    // Front (+Z)
+                    if Self::is_face_exposed(world, world_x, world_y, world_z + 1, block_type) {
+                        Self::add_slab_side_face(opaque_vertices, opaque_indices,
+                            base_x, base_y + y_min, base_z + 1.0, 0.5, Face::Front, block_type_f);
+                    }
+                    // Back (-Z)
+                    if Self::is_face_exposed(world, world_x, world_y, world_z - 1, block_type) {
+                        Self::add_slab_side_face(opaque_vertices, opaque_indices,
+                            base_x, base_y + y_min, base_z, 0.5, Face::Back, block_type_f);
+                    }
+                }
+            }
+        }
+    }
+
+    // Add a horizontal slab face (top or bottom)
+    fn add_slab_face(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        x: f32, y: f32, z: f32,
+        face: Face,
+        block_type: f32,
+    ) {
+        let base_index = vertices.len() as u16;
+        let (positions, normal) = match face {
+            Face::Top => (
+                [[x, y, z], [x + 1.0, y, z], [x + 1.0, y, z + 1.0], [x, y, z + 1.0]],
+                [0.0, 1.0, 0.0]
+            ),
+            Face::Bottom => (
+                [[x, y, z], [x, y, z + 1.0], [x + 1.0, y, z + 1.0], [x + 1.0, y, z]],
+                [0.0, -1.0, 0.0]
+            ),
+            _ => return,
+        };
+
+        let tex_coords = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+
+        for i in 0..4 {
+            vertices.push(Vertex {
+                position: positions[i],
+                tex_coords: tex_coords[i],
+                normal,
+                block_type,
+                damage: 0.0,
+            });
+        }
+
+        indices.extend_from_slice(&[
+            base_index, base_index + 1, base_index + 2,
+            base_index + 2, base_index + 3, base_index,
+        ]);
+    }
+
+    // Add a vertical slab side face with specified height
+    fn add_slab_side_face(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        x: f32, y: f32, z: f32,  // Base position
+        height: f32,
+        face: Face,
+        block_type: f32,
+    ) {
+        let base_index = vertices.len() as u16;
+        let (positions, normal) = match face {
+            Face::Right => (  // +X face
+                [[x, y, z], [x, y, z + 1.0], [x, y + height, z + 1.0], [x, y + height, z]],
+                [1.0, 0.0, 0.0]
+            ),
+            Face::Left => (   // -X face
+                [[x, y, z], [x, y + height, z], [x, y + height, z + 1.0], [x, y, z + 1.0]],
+                [-1.0, 0.0, 0.0]
+            ),
+            Face::Front => (  // +Z face
+                [[x, y, z], [x, y + height, z], [x + 1.0, y + height, z], [x + 1.0, y, z]],
+                [0.0, 0.0, 1.0]
+            ),
+            Face::Back => (   // -Z face
+                [[x, y, z], [x + 1.0, y, z], [x + 1.0, y + height, z], [x, y + height, z]],
+                [0.0, 0.0, -1.0]
+            ),
+            _ => return,
+        };
+
+        // Tex coords: bottom half of texture for half-height slab
+        let tex_coords = [[0.0, 1.0], [0.0, 0.5], [1.0, 0.5], [1.0, 1.0]];
+
+        for i in 0..4 {
+            vertices.push(Vertex {
+                position: positions[i],
+                tex_coords: tex_coords[i],
+                normal,
+                block_type,
+                damage: 0.0,
+            });
+        }
+
+        indices.extend_from_slice(&[
+            base_index, base_index + 1, base_index + 2,
+            base_index + 2, base_index + 3, base_index,
+        ]);
+    }
+
+    // Render stairs with L-shaped geometry
+    fn render_stairs(
+        world: &World,
+        chunk: &crate::world::Chunk,
+        chunk_x_offset: i32,
+        chunk_z_offset: i32,
+        opaque_vertices: &mut Vec<Vertex>,
+        opaque_indices: &mut Vec<u16>,
+    ) {
+        use crate::world::BlockFacing;
+
+        for x in 0..World::CHUNK_SIZE {
+            for y in 0..World::CHUNK_HEIGHT {
+                for z in 0..World::CHUNK_SIZE {
+                    let block_type = chunk.blocks[x][y][z];
+
+                    if !block_type.is_stairs() {
+                        continue;
+                    }
+
+                    let world_x = chunk_x_offset + x as i32;
+                    let world_y = y as i32;
+                    let world_z = chunk_z_offset + z as i32;
+
+                    let block_type_f = Self::block_type_to_float(block_type);
+
+                    // Get stair data (default: facing north, not upside down)
+                    let stair_data = world.get_stair_data(world_x, world_y, world_z);
+                    let facing = stair_data.map(|d| d.facing).unwrap_or(BlockFacing::North);
+                    let upside_down = stair_data.map(|d| d.upside_down).unwrap_or(false);
+
+                    let base_x = world_x as f32;
+                    let base_y = world_y as f32;
+                    let base_z = world_z as f32;
+
+                    // Stair geometry: bottom half (full) + back half (half height)
+                    // For normal stairs (not upside down):
+                    //   Bottom part: y=0 to y=0.5, full XZ
+                    //   Top part: y=0.5 to y=1.0, back half (depends on facing)
+                    // For upside down:
+                    //   Top part: y=0.5 to y=1.0, full XZ
+                    //   Bottom part: y=0 to y=0.5, back half
+
+                    if !upside_down {
+                        // Normal stairs
+                        Self::add_stair_normal(opaque_vertices, opaque_indices,
+                            base_x, base_y, base_z, facing, block_type_f, world, world_x, world_y, world_z);
+                    } else {
+                        // Upside down stairs
+                        Self::add_stair_upside_down(opaque_vertices, opaque_indices,
+                            base_x, base_y, base_z, facing, block_type_f, world, world_x, world_y, world_z);
+                    }
+                }
+            }
+        }
+    }
+
+    fn add_stair_normal(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        x: f32, y: f32, z: f32,
+        facing: crate::world::BlockFacing,
+        block_type: f32,
+        world: &World,
+        world_x: i32, world_y: i32, world_z: i32,
+    ) {
+        use crate::world::BlockFacing;
+
+        // Bottom half (y=0 to y=0.5) - always full width
+        // Top face of bottom half at y+0.5 (partially exposed based on facing)
+        // This is the step surface
+
+        // Bottom face at y=0
+        if Self::is_face_exposed(world, world_x, world_y - 1, world_z, BlockType::Stone) {
+            Self::add_slab_face(vertices, indices, x, y, z, Face::Bottom, block_type);
+        }
+
+        // Step surface (top of bottom half) - full width
+        Self::add_slab_face(vertices, indices, x, y + 0.5, z, Face::Top, block_type);
+
+        // Top of upper half
+        if Self::is_face_exposed(world, world_x, world_y + 1, world_z, BlockType::Stone) {
+            // Partial top based on facing
+            Self::add_stair_partial_top(vertices, indices, x, y + 1.0, z, facing, block_type);
+        }
+
+        // Side faces for bottom half (0-0.5) and upper half (0.5-1.0)
+        Self::add_stair_side_faces(vertices, indices, x, y, z, facing, block_type, world, world_x, world_y, world_z, false);
+    }
+
+    fn add_stair_upside_down(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        x: f32, y: f32, z: f32,
+        facing: crate::world::BlockFacing,
+        block_type: f32,
+        world: &World,
+        world_x: i32, world_y: i32, world_z: i32,
+    ) {
+        use crate::world::BlockFacing;
+
+        // Top half (y=0.5 to y=1.0) - always full width
+        // Bottom face of top half at y+0.5 (the step surface)
+
+        // Top face at y=1.0
+        if Self::is_face_exposed(world, world_x, world_y + 1, world_z, BlockType::Stone) {
+            Self::add_slab_face(vertices, indices, x, y + 1.0, z, Face::Top, block_type);
+        }
+
+        // Step surface (bottom of top half) - full width
+        Self::add_slab_face(vertices, indices, x, y + 0.5, z, Face::Bottom, block_type);
+
+        // Bottom of lower half
+        if Self::is_face_exposed(world, world_x, world_y - 1, world_z, BlockType::Stone) {
+            Self::add_stair_partial_bottom(vertices, indices, x, y, z, facing, block_type);
+        }
+
+        // Side faces
+        Self::add_stair_side_faces(vertices, indices, x, y, z, facing, block_type, world, world_x, world_y, world_z, true);
+    }
+
+    fn add_stair_partial_top(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        x: f32, y: f32, z: f32,
+        facing: crate::world::BlockFacing,
+        block_type: f32,
+    ) {
+        use crate::world::BlockFacing;
+        let base_index = vertices.len() as u16;
+
+        // Top face for back half only
+        let positions = match facing {
+            BlockFacing::North => [[x, y, z], [x + 1.0, y, z], [x + 1.0, y, z + 0.5], [x, y, z + 0.5]],
+            BlockFacing::South => [[x, y, z + 0.5], [x + 1.0, y, z + 0.5], [x + 1.0, y, z + 1.0], [x, y, z + 1.0]],
+            BlockFacing::East => [[x + 0.5, y, z], [x + 1.0, y, z], [x + 1.0, y, z + 1.0], [x + 0.5, y, z + 1.0]],
+            BlockFacing::West => [[x, y, z], [x + 0.5, y, z], [x + 0.5, y, z + 1.0], [x, y, z + 1.0]],
+        };
+
+        let tex_coords = [[0.0, 0.0], [1.0, 0.0], [1.0, 0.5], [0.0, 0.5]];
+
+        for i in 0..4 {
+            vertices.push(Vertex {
+                position: positions[i],
+                tex_coords: tex_coords[i],
+                normal: [0.0, 1.0, 0.0],
+                block_type,
+                damage: 0.0,
+            });
+        }
+
+        indices.extend_from_slice(&[
+            base_index, base_index + 1, base_index + 2,
+            base_index + 2, base_index + 3, base_index,
+        ]);
+    }
+
+    fn add_stair_partial_bottom(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        x: f32, y: f32, z: f32,
+        facing: crate::world::BlockFacing,
+        block_type: f32,
+    ) {
+        use crate::world::BlockFacing;
+        let base_index = vertices.len() as u16;
+
+        // Bottom face for back half only
+        let positions = match facing {
+            BlockFacing::North => [[x, y, z], [x, y, z + 0.5], [x + 1.0, y, z + 0.5], [x + 1.0, y, z]],
+            BlockFacing::South => [[x, y, z + 0.5], [x, y, z + 1.0], [x + 1.0, y, z + 1.0], [x + 1.0, y, z + 0.5]],
+            BlockFacing::East => [[x + 0.5, y, z], [x + 0.5, y, z + 1.0], [x + 1.0, y, z + 1.0], [x + 1.0, y, z]],
+            BlockFacing::West => [[x, y, z], [x, y, z + 1.0], [x + 0.5, y, z + 1.0], [x + 0.5, y, z]],
+        };
+
+        let tex_coords = [[0.0, 0.0], [0.0, 0.5], [1.0, 0.5], [1.0, 0.0]];
+
+        for i in 0..4 {
+            vertices.push(Vertex {
+                position: positions[i],
+                tex_coords: tex_coords[i],
+                normal: [0.0, -1.0, 0.0],
+                block_type,
+                damage: 0.0,
+            });
+        }
+
+        indices.extend_from_slice(&[
+            base_index, base_index + 1, base_index + 2,
+            base_index + 2, base_index + 3, base_index,
+        ]);
+    }
+
+    fn add_stair_side_faces(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        x: f32, y: f32, z: f32,
+        facing: crate::world::BlockFacing,
+        block_type: f32,
+        world: &World,
+        world_x: i32, world_y: i32, world_z: i32,
+        upside_down: bool,
+    ) {
+        use crate::world::BlockFacing;
+
+        // Full height side faces
+        if Self::is_face_exposed(world, world_x + 1, world_y, world_z, BlockType::Stone) {
+            Self::add_stair_side(vertices, indices, x, y, z, facing, Face::Right, block_type, upside_down);
+        }
+        if Self::is_face_exposed(world, world_x - 1, world_y, world_z, BlockType::Stone) {
+            Self::add_stair_side(vertices, indices, x, y, z, facing, Face::Left, block_type, upside_down);
+        }
+        if Self::is_face_exposed(world, world_x, world_y, world_z + 1, BlockType::Stone) {
+            Self::add_stair_side(vertices, indices, x, y, z, facing, Face::Front, block_type, upside_down);
+        }
+        if Self::is_face_exposed(world, world_x, world_y, world_z - 1, BlockType::Stone) {
+            Self::add_stair_side(vertices, indices, x, y, z, facing, Face::Back, block_type, upside_down);
+        }
+
+        // Inner step face (vertical face of the step)
+        Self::add_stair_step_face(vertices, indices, x, y, z, facing, block_type, upside_down);
+    }
+
+    fn add_stair_side(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        x: f32, y: f32, z: f32,
+        stair_facing: crate::world::BlockFacing,
+        side_face: Face,
+        block_type: f32,
+        upside_down: bool,
+    ) {
+        use crate::world::BlockFacing;
+
+        // Determine if this side needs an L-shaped cutout based on stair facing
+        let needs_cutout = match (stair_facing, side_face) {
+            (BlockFacing::North, Face::Right | Face::Left) => true,
+            (BlockFacing::South, Face::Right | Face::Left) => true,
+            (BlockFacing::East, Face::Front | Face::Back) => true,
+            (BlockFacing::West, Face::Front | Face::Back) => true,
+            _ => false,
+        };
+
+        if needs_cutout {
+            // L-shaped side face - render as two quads
+            Self::add_stair_l_side(vertices, indices, x, y, z, stair_facing, side_face, block_type, upside_down);
+        } else {
+            // Full rectangle side face
+            Self::add_slab_side_face(vertices, indices,
+                match side_face {
+                    Face::Right => x + 1.0,
+                    _ => x,
+                },
+                y,
+                match side_face {
+                    Face::Front => z + 1.0,
+                    _ => z,
+                },
+                1.0, side_face, block_type);
+        }
+    }
+
+    fn add_stair_l_side(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        x: f32, y: f32, z: f32,
+        stair_facing: crate::world::BlockFacing,
+        side_face: Face,
+        block_type: f32,
+        upside_down: bool,
+    ) {
+        use crate::world::BlockFacing;
+
+        // For L-shaped sides, we need two rectangles
+        // Bottom part (full width, half height) and top part (half width, half height)
+
+        let (y_low, y_mid, y_high) = if upside_down {
+            (y, y + 0.5, y + 1.0)
+        } else {
+            (y, y + 0.5, y + 1.0)
+        };
+
+        let base_index = vertices.len() as u16;
+
+        // Simplified L-shape: just render full side for now (can be refined later)
+        let (positions, normal): ([[f32; 3]; 4], [f32; 3]) = match side_face {
+            Face::Right => (
+                [[x + 1.0, y_low, z], [x + 1.0, y_low, z + 1.0], [x + 1.0, y_high, z + 1.0], [x + 1.0, y_high, z]],
+                [1.0, 0.0, 0.0]
+            ),
+            Face::Left => (
+                [[x, y_low, z], [x, y_high, z], [x, y_high, z + 1.0], [x, y_low, z + 1.0]],
+                [-1.0, 0.0, 0.0]
+            ),
+            Face::Front => (
+                [[x, y_low, z + 1.0], [x, y_high, z + 1.0], [x + 1.0, y_high, z + 1.0], [x + 1.0, y_low, z + 1.0]],
+                [0.0, 0.0, 1.0]
+            ),
+            Face::Back => (
+                [[x, y_low, z], [x + 1.0, y_low, z], [x + 1.0, y_high, z], [x, y_high, z]],
+                [0.0, 0.0, -1.0]
+            ),
+            _ => return,
+        };
+
+        let tex_coords = [[0.0, 1.0], [0.0, 0.0], [1.0, 0.0], [1.0, 1.0]];
+
+        for i in 0..4 {
+            vertices.push(Vertex {
+                position: positions[i],
+                tex_coords: tex_coords[i],
+                normal,
+                block_type,
+                damage: 0.0,
+            });
+        }
+
+        indices.extend_from_slice(&[
+            base_index, base_index + 1, base_index + 2,
+            base_index + 2, base_index + 3, base_index,
+        ]);
+    }
+
+    fn add_stair_step_face(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        x: f32, y: f32, z: f32,
+        facing: crate::world::BlockFacing,
+        block_type: f32,
+        upside_down: bool,
+    ) {
+        use crate::world::BlockFacing;
+        let base_index = vertices.len() as u16;
+
+        let step_y = if upside_down { y + 0.5 } else { y + 0.5 };
+
+        // Vertical face at the step edge
+        let (positions, normal): ([[f32; 3]; 4], [f32; 3]) = match facing {
+            BlockFacing::North => (
+                [[x, step_y, z + 0.5], [x + 1.0, step_y, z + 0.5],
+                 [x + 1.0, step_y + 0.5, z + 0.5], [x, step_y + 0.5, z + 0.5]],
+                [0.0, 0.0, 1.0]
+            ),
+            BlockFacing::South => (
+                [[x, step_y, z + 0.5], [x, step_y + 0.5, z + 0.5],
+                 [x + 1.0, step_y + 0.5, z + 0.5], [x + 1.0, step_y, z + 0.5]],
+                [0.0, 0.0, -1.0]
+            ),
+            BlockFacing::East => (
+                [[x + 0.5, step_y, z], [x + 0.5, step_y + 0.5, z],
+                 [x + 0.5, step_y + 0.5, z + 1.0], [x + 0.5, step_y, z + 1.0]],
+                [-1.0, 0.0, 0.0]
+            ),
+            BlockFacing::West => (
+                [[x + 0.5, step_y, z], [x + 0.5, step_y, z + 1.0],
+                 [x + 0.5, step_y + 0.5, z + 1.0], [x + 0.5, step_y + 0.5, z]],
+                [1.0, 0.0, 0.0]
+            ),
+        };
+
+        let tex_coords = [[0.0, 0.5], [1.0, 0.5], [1.0, 0.0], [0.0, 0.0]];
+
+        for i in 0..4 {
+            vertices.push(Vertex {
+                position: positions[i],
+                tex_coords: tex_coords[i],
+                normal,
+                block_type,
+                damage: 0.0,
+            });
+        }
+
+        indices.extend_from_slice(&[
+            base_index, base_index + 1, base_index + 2,
+            base_index + 2, base_index + 3, base_index,
+        ]);
+    }
+
+    // Render ladders as flat panels against walls
+    fn render_ladders(
+        world: &World,
+        chunk: &crate::world::Chunk,
+        chunk_x_offset: i32,
+        chunk_z_offset: i32,
+        opaque_vertices: &mut Vec<Vertex>,
+        opaque_indices: &mut Vec<u16>,
+    ) {
+        for x in 0..World::CHUNK_SIZE {
+            for y in 0..World::CHUNK_HEIGHT {
+                for z in 0..World::CHUNK_SIZE {
+                    if chunk.blocks[x][y][z] != BlockType::Ladder {
+                        continue;
+                    }
+
+                    let world_x = chunk_x_offset + x as i32;
+                    let world_y = y as i32;
+                    let world_z = chunk_z_offset + z as i32;
+
+                    let block_type_f = Self::block_type_to_float(BlockType::Ladder);
+
+                    // Get ladder facing from torch_orientations
+                    let face = world.get_torch_face(world_x, world_y, world_z)
+                        .unwrap_or(TorchFace::North);
+
+                    let base_x = world_x as f32;
+                    let base_y = world_y as f32;
+                    let base_z = world_z as f32;
+
+                    // Ladder is a thin panel 0.125 blocks from the wall
+                    let offset = 0.125;
+
+                    Self::add_ladder_panel(opaque_vertices, opaque_indices,
+                        base_x, base_y, base_z, face, offset, block_type_f);
+                }
+            }
+        }
+    }
+
+    fn add_ladder_panel(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        x: f32, y: f32, z: f32,
+        face: TorchFace,
+        offset: f32,
+        block_type: f32,
+    ) {
+        let base_index = vertices.len() as u16;
+
+        // Position the ladder panel slightly away from the wall
+        let (positions, normal): ([[f32; 3]; 4], [f32; 3]) = match face {
+            TorchFace::North => (
+                // Ladder on +Z wall, facing -Z
+                [[x, y, z + 1.0 - offset], [x + 1.0, y, z + 1.0 - offset],
+                 [x + 1.0, y + 1.0, z + 1.0 - offset], [x, y + 1.0, z + 1.0 - offset]],
+                [0.0, 0.0, -1.0]
+            ),
+            TorchFace::South => (
+                // Ladder on -Z wall, facing +Z
+                [[x, y, z + offset], [x, y + 1.0, z + offset],
+                 [x + 1.0, y + 1.0, z + offset], [x + 1.0, y, z + offset]],
+                [0.0, 0.0, 1.0]
+            ),
+            TorchFace::East => (
+                // Ladder on -X wall, facing +X
+                [[x + offset, y, z], [x + offset, y + 1.0, z],
+                 [x + offset, y + 1.0, z + 1.0], [x + offset, y, z + 1.0]],
+                [1.0, 0.0, 0.0]
+            ),
+            TorchFace::West => (
+                // Ladder on +X wall, facing -X
+                [[x + 1.0 - offset, y, z], [x + 1.0 - offset, y, z + 1.0],
+                 [x + 1.0 - offset, y + 1.0, z + 1.0], [x + 1.0 - offset, y + 1.0, z]],
+                [-1.0, 0.0, 0.0]
+            ),
+            TorchFace::Top => return, // Ladders don't have a top placement
+        };
+
+        let tex_coords = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+
+        for i in 0..4 {
+            vertices.push(Vertex {
+                position: positions[i],
+                tex_coords: tex_coords[i],
+                normal,
+                block_type,
+                damage: 0.0,
+            });
+        }
+
+        indices.extend_from_slice(&[
+            base_index, base_index + 1, base_index + 2,
+            base_index + 2, base_index + 3, base_index,
+        ]);
+
+        // Add back face as well (so ladder is visible from both sides)
+        let back_base = vertices.len() as u16;
+        let back_normal = [-normal[0], -normal[1], -normal[2]];
+
+        for i in (0..4).rev() {
+            vertices.push(Vertex {
+                position: positions[i],
+                tex_coords: tex_coords[3 - i],
+                normal: back_normal,
+                block_type,
+                damage: 0.0,
+            });
+        }
+
+        indices.extend_from_slice(&[
+            back_base, back_base + 1, back_base + 2,
+            back_base + 2, back_base + 3, back_base,
+        ]);
+    }
+
+    // Render trapdoors as horizontal slabs (closed) or vertical panels (open)
+    fn render_trapdoors(
+        world: &World,
+        chunk: &crate::world::Chunk,
+        chunk_x_offset: i32,
+        chunk_z_offset: i32,
+        opaque_vertices: &mut Vec<Vertex>,
+        opaque_indices: &mut Vec<u16>,
+    ) {
+        use crate::world::BlockFacing;
+
+        for x in 0..World::CHUNK_SIZE {
+            for y in 0..World::CHUNK_HEIGHT {
+                for z in 0..World::CHUNK_SIZE {
+                    let block_type = chunk.blocks[x][y][z];
+                    if !block_type.is_trapdoor() {
+                        continue;
+                    }
+
+                    let world_x = chunk_x_offset + x as i32;
+                    let world_y = y as i32;
+                    let world_z = chunk_z_offset + z as i32;
+
+                    let block_type_f = Self::block_type_to_float(block_type);
+
+                    // Get trapdoor data (open state, facing, top/bottom)
+                    let trapdoor_data = world.get_trapdoor_data(world_x, world_y, world_z);
+                    let (open, facing, top_half) = if let Some(data) = trapdoor_data {
+                        (data.open, data.facing, data.top_half)
+                    } else {
+                        (false, BlockFacing::North, false)
+                    };
+
+                    let base_x = world_x as f32;
+                    let base_y = world_y as f32;
+                    let base_z = world_z as f32;
+
+                    // Trapdoor thickness
+                    let thickness = 0.1875;
+
+                    if open {
+                        // Open trapdoor: vertical panel against hinge side
+                        Self::add_trapdoor_open(opaque_vertices, opaque_indices,
+                            base_x, base_y, base_z, facing, top_half, thickness, block_type_f);
+                    } else {
+                        // Closed trapdoor: horizontal slab
+                        Self::add_trapdoor_closed(opaque_vertices, opaque_indices,
+                            base_x, base_y, base_z, top_half, thickness, block_type_f);
+                    }
+                }
+            }
+        }
+    }
+
+    // Add closed trapdoor mesh (horizontal slab)
+    fn add_trapdoor_closed(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        x: f32, y: f32, z: f32,
+        top_half: bool,
+        thickness: f32,
+        block_type: f32,
+    ) {
+        let (y_min, y_max) = if top_half {
+            (y + 1.0 - thickness, y + 1.0)
+        } else {
+            (y, y + thickness)
+        };
+
+        let base_index = vertices.len() as u16;
+
+        // Top face
+        let top_positions = [
+            [x, y_max, z], [x, y_max, z + 1.0],
+            [x + 1.0, y_max, z + 1.0], [x + 1.0, y_max, z],
+        ];
+        let tex_coords = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+        for i in 0..4 {
+            vertices.push(Vertex {
+                position: top_positions[i],
+                tex_coords: tex_coords[i],
+                normal: [0.0, 1.0, 0.0],
+                block_type,
+                damage: 0.0,
+            });
+        }
+        indices.extend_from_slice(&[
+            base_index, base_index + 1, base_index + 2,
+            base_index + 2, base_index + 3, base_index,
+        ]);
+
+        // Bottom face
+        let bottom_base = vertices.len() as u16;
+        let bottom_positions = [
+            [x, y_min, z], [x + 1.0, y_min, z],
+            [x + 1.0, y_min, z + 1.0], [x, y_min, z + 1.0],
+        ];
+        for i in 0..4 {
+            vertices.push(Vertex {
+                position: bottom_positions[i],
+                tex_coords: tex_coords[i],
+                normal: [0.0, -1.0, 0.0],
+                block_type,
+                damage: 0.0,
+            });
+        }
+        indices.extend_from_slice(&[
+            bottom_base, bottom_base + 1, bottom_base + 2,
+            bottom_base + 2, bottom_base + 3, bottom_base,
+        ]);
+
+        // Side faces (4 sides)
+        // North face (-Z)
+        let north_base = vertices.len() as u16;
+        let north_positions = [
+            [x, y_min, z], [x, y_max, z],
+            [x + 1.0, y_max, z], [x + 1.0, y_min, z],
+        ];
+        let side_tex = [[0.0, 1.0], [0.0, 0.0], [1.0, 0.0], [1.0, 1.0]];
+        for i in 0..4 {
+            vertices.push(Vertex {
+                position: north_positions[i],
+                tex_coords: side_tex[i],
+                normal: [0.0, 0.0, -1.0],
+                block_type,
+                damage: 0.0,
+            });
+        }
+        indices.extend_from_slice(&[
+            north_base, north_base + 1, north_base + 2,
+            north_base + 2, north_base + 3, north_base,
+        ]);
+
+        // South face (+Z)
+        let south_base = vertices.len() as u16;
+        let south_positions = [
+            [x, y_min, z + 1.0], [x + 1.0, y_min, z + 1.0],
+            [x + 1.0, y_max, z + 1.0], [x, y_max, z + 1.0],
+        ];
+        for i in 0..4 {
+            vertices.push(Vertex {
+                position: south_positions[i],
+                tex_coords: side_tex[i],
+                normal: [0.0, 0.0, 1.0],
+                block_type,
+                damage: 0.0,
+            });
+        }
+        indices.extend_from_slice(&[
+            south_base, south_base + 1, south_base + 2,
+            south_base + 2, south_base + 3, south_base,
+        ]);
+
+        // West face (-X)
+        let west_base = vertices.len() as u16;
+        let west_positions = [
+            [x, y_min, z], [x, y_min, z + 1.0],
+            [x, y_max, z + 1.0], [x, y_max, z],
+        ];
+        for i in 0..4 {
+            vertices.push(Vertex {
+                position: west_positions[i],
+                tex_coords: side_tex[i],
+                normal: [-1.0, 0.0, 0.0],
+                block_type,
+                damage: 0.0,
+            });
+        }
+        indices.extend_from_slice(&[
+            west_base, west_base + 1, west_base + 2,
+            west_base + 2, west_base + 3, west_base,
+        ]);
+
+        // East face (+X)
+        let east_base = vertices.len() as u16;
+        let east_positions = [
+            [x + 1.0, y_min, z], [x + 1.0, y_max, z],
+            [x + 1.0, y_max, z + 1.0], [x + 1.0, y_min, z + 1.0],
+        ];
+        for i in 0..4 {
+            vertices.push(Vertex {
+                position: east_positions[i],
+                tex_coords: side_tex[i],
+                normal: [1.0, 0.0, 0.0],
+                block_type,
+                damage: 0.0,
+            });
+        }
+        indices.extend_from_slice(&[
+            east_base, east_base + 1, east_base + 2,
+            east_base + 2, east_base + 3, east_base,
+        ]);
+    }
+
+    // Add open trapdoor mesh (vertical panel against hinge side)
+    fn add_trapdoor_open(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        x: f32, y: f32, z: f32,
+        facing: crate::world::BlockFacing,
+        top_half: bool,
+        thickness: f32,
+        block_type: f32,
+    ) {
+        use crate::world::BlockFacing;
+
+        // Open trapdoor is a vertical panel against the hinge side
+        // If top_half, it opens upward from top; if bottom_half, it opens downward from bottom
+        let (positions, normal): ([[f32; 3]; 8], [f32; 3]) = match facing {
+            BlockFacing::North => {
+                // Hinge on +Z side, opens toward -Z
+                let z_pos = z + 1.0 - thickness;
+                ([
+                    // Front face
+                    [x, y, z_pos], [x + 1.0, y, z_pos], [x + 1.0, y + 1.0, z_pos], [x, y + 1.0, z_pos],
+                    // Back face
+                    [x, y, z + 1.0], [x, y + 1.0, z + 1.0], [x + 1.0, y + 1.0, z + 1.0], [x + 1.0, y, z + 1.0],
+                ], [0.0, 0.0, -1.0])
+            }
+            BlockFacing::South => {
+                // Hinge on -Z side, opens toward +Z
+                let z_pos = z + thickness;
+                ([
+                    // Front face
+                    [x, y, z_pos], [x, y + 1.0, z_pos], [x + 1.0, y + 1.0, z_pos], [x + 1.0, y, z_pos],
+                    // Back face
+                    [x, y, z], [x + 1.0, y, z], [x + 1.0, y + 1.0, z], [x, y + 1.0, z],
+                ], [0.0, 0.0, 1.0])
+            }
+            BlockFacing::East => {
+                // Hinge on -X side, opens toward +X
+                let x_pos = x + thickness;
+                ([
+                    // Front face
+                    [x_pos, y, z], [x_pos, y + 1.0, z], [x_pos, y + 1.0, z + 1.0], [x_pos, y, z + 1.0],
+                    // Back face
+                    [x, y, z], [x, y, z + 1.0], [x, y + 1.0, z + 1.0], [x, y + 1.0, z],
+                ], [1.0, 0.0, 0.0])
+            }
+            BlockFacing::West => {
+                // Hinge on +X side, opens toward -X
+                let x_pos = x + 1.0 - thickness;
+                ([
+                    // Front face
+                    [x_pos, y, z], [x_pos, y, z + 1.0], [x_pos, y + 1.0, z + 1.0], [x_pos, y + 1.0, z],
+                    // Back face
+                    [x + 1.0, y, z], [x + 1.0, y + 1.0, z], [x + 1.0, y + 1.0, z + 1.0], [x + 1.0, y, z + 1.0],
+                ], [-1.0, 0.0, 0.0])
+            }
+        };
+
+        // Suppress unused variable warning
+        let _ = top_half;
+
+        let base_index = vertices.len() as u16;
+        let tex_coords = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+
+        // Front face (first 4 vertices)
+        for i in 0..4 {
+            vertices.push(Vertex {
+                position: positions[i],
+                tex_coords: tex_coords[i],
+                normal,
+                block_type,
+                damage: 0.0,
+            });
+        }
+        indices.extend_from_slice(&[
+            base_index, base_index + 1, base_index + 2,
+            base_index + 2, base_index + 3, base_index,
+        ]);
+
+        // Back face (vertices 4-7)
+        let back_base = vertices.len() as u16;
+        let back_normal = [-normal[0], -normal[1], -normal[2]];
+        for i in 4..8 {
+            vertices.push(Vertex {
+                position: positions[i],
+                tex_coords: tex_coords[i - 4],
+                normal: back_normal,
+                block_type,
+                damage: 0.0,
+            });
+        }
+        indices.extend_from_slice(&[
+            back_base, back_base + 1, back_base + 2,
+            back_base + 2, back_base + 3, back_base,
+        ]);
+    }
+
+    // Render fences with center post and connecting bars
+    fn render_fences(
+        world: &World,
+        chunk: &crate::world::Chunk,
+        chunk_x_offset: i32,
+        chunk_z_offset: i32,
+        opaque_vertices: &mut Vec<Vertex>,
+        opaque_indices: &mut Vec<u16>,
+    ) {
+        use crate::world::BlockFacing;
+
+        for x in 0..World::CHUNK_SIZE {
+            for y in 0..World::CHUNK_HEIGHT {
+                for z in 0..World::CHUNK_SIZE {
+                    let block_type = chunk.blocks[x][y][z];
+                    if !block_type.is_fence() {
+                        continue;
+                    }
+
+                    let world_x = chunk_x_offset + x as i32;
+                    let world_y = y as i32;
+                    let world_z = chunk_z_offset + z as i32;
+
+                    let block_type_f = Self::block_type_to_float(block_type);
+
+                    let base_x = world_x as f32;
+                    let base_y = world_y as f32;
+                    let base_z = world_z as f32;
+
+                    // Center post dimensions: 0.25 x 1.0 x 0.25
+                    let post_min = 0.375;
+                    let post_max = 0.625;
+
+                    // Add center post (always present)
+                    Self::add_fence_post(opaque_vertices, opaque_indices,
+                        base_x + post_min, base_y, base_z + post_min,
+                        post_max - post_min, 1.0, post_max - post_min,
+                        block_type_f);
+
+                    // Check connections in each direction and add bars
+                    let connects_north = world.fence_connects(world_x, world_y, world_z, BlockFacing::North);
+                    let connects_south = world.fence_connects(world_x, world_y, world_z, BlockFacing::South);
+                    let connects_east = world.fence_connects(world_x, world_y, world_z, BlockFacing::East);
+                    let connects_west = world.fence_connects(world_x, world_y, world_z, BlockFacing::West);
+
+                    // Add connecting bars at y=0.375 (lower) and y=0.75 (upper)
+                    let bar_height = 0.125;
+                    let bar_width = 0.125;
+                    let bar_y_positions = [0.375, 0.75];
+
+                    for &bar_y in &bar_y_positions {
+                        // North connection (+Z)
+                        if connects_north {
+                            Self::add_fence_bar(opaque_vertices, opaque_indices,
+                                base_x + post_min, base_y + bar_y, base_z + post_max,
+                                bar_width, bar_height, 1.0 - post_max,
+                                block_type_f);
+                        }
+
+                        // South connection (-Z)
+                        if connects_south {
+                            Self::add_fence_bar(opaque_vertices, opaque_indices,
+                                base_x + post_min, base_y + bar_y, base_z,
+                                bar_width, bar_height, post_min,
+                                block_type_f);
+                        }
+
+                        // East connection (+X)
+                        if connects_east {
+                            Self::add_fence_bar(opaque_vertices, opaque_indices,
+                                base_x + post_max, base_y + bar_y, base_z + post_min,
+                                1.0 - post_max, bar_height, bar_width,
+                                block_type_f);
+                        }
+
+                        // West connection (-X)
+                        if connects_west {
+                            Self::add_fence_bar(opaque_vertices, opaque_indices,
+                                base_x, base_y + bar_y, base_z + post_min,
+                                post_min, bar_height, bar_width,
+                                block_type_f);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Add a fence post (vertical beam)
+    fn add_fence_post(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        x: f32, y: f32, z: f32,
+        width: f32, height: f32, depth: f32,
+        block_type: f32,
+    ) {
+        let base_index = vertices.len() as u16;
+
+        // Define the 8 corners
+        let corners = [
+            [x, y, z],                             // 0: bottom-front-left
+            [x + width, y, z],                     // 1: bottom-front-right
+            [x + width, y, z + depth],             // 2: bottom-back-right
+            [x, y, z + depth],                     // 3: bottom-back-left
+            [x, y + height, z],                    // 4: top-front-left
+            [x + width, y + height, z],            // 5: top-front-right
+            [x + width, y + height, z + depth],    // 6: top-back-right
+            [x, y + height, z + depth],            // 7: top-back-left
+        ];
+
+        // 6 faces: top, bottom, front, back, left, right
+        let faces = [
+            // (corner indices, normal)
+            ([4, 5, 6, 7], [0.0f32, 1.0, 0.0]),   // top
+            ([0, 3, 2, 1], [0.0, -1.0, 0.0]),     // bottom
+            ([0, 1, 5, 4], [0.0, 0.0, -1.0]),     // front (-Z)
+            ([2, 3, 7, 6], [0.0, 0.0, 1.0]),      // back (+Z)
+            ([3, 0, 4, 7], [-1.0, 0.0, 0.0]),     // left (-X)
+            ([1, 2, 6, 5], [1.0, 0.0, 0.0]),      // right (+X)
+        ];
+
+        let tex_coords = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+
+        for (corner_indices, normal) in &faces {
+            let face_base = vertices.len() as u16;
+            for (i, &ci) in corner_indices.iter().enumerate() {
+                vertices.push(Vertex {
+                    position: corners[ci],
+                    tex_coords: tex_coords[i],
+                    normal: *normal,
+                    block_type,
+                    damage: 0.0,
+                });
+            }
+            indices.extend_from_slice(&[
+                face_base, face_base + 1, face_base + 2,
+                face_base + 2, face_base + 3, face_base,
+            ]);
+        }
+    }
+
+    // Add a fence bar (horizontal beam connecting to neighbor)
+    fn add_fence_bar(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        x: f32, y: f32, z: f32,
+        width: f32, height: f32, depth: f32,
+        block_type: f32,
+    ) {
+        // Reuse post function - they're the same geometry
+        Self::add_fence_post(vertices, indices, x, y, z, width, height, depth, block_type);
+    }
+
+    // Render glass panes with thin connecting panels
+    fn render_glass_panes(
+        world: &World,
+        chunk: &crate::world::Chunk,
+        chunk_x_offset: i32,
+        chunk_z_offset: i32,
+        trans_vertices: &mut Vec<Vertex>,
+        trans_indices: &mut Vec<u16>,
+    ) {
+        for x in 0..World::CHUNK_SIZE {
+            for y in 0..World::CHUNK_HEIGHT {
+                for z in 0..World::CHUNK_SIZE {
+                    if chunk.blocks[x][y][z] != BlockType::GlassPane {
+                        continue;
+                    }
+
+                    let world_x = chunk_x_offset + x as i32;
+                    let world_y = y as i32;
+                    let world_z = chunk_z_offset + z as i32;
+
+                    let block_type_f = Self::block_type_to_float(BlockType::GlassPane);
+
+                    let base_x = world_x as f32;
+                    let base_y = world_y as f32;
+                    let base_z = world_z as f32;
+
+                    // Get connections in each direction
+                    let (north, south, east, west) = world.pane_connections(world_x, world_y, world_z);
+
+                    // Pane thickness
+                    let thickness = 0.125;
+                    let half_thick = thickness / 2.0;
+                    let center = 0.5;
+
+                    // If only 0-1 connections, add center post
+                    let connection_count = [north, south, east, west].iter().filter(|&&c| c).count();
+                    if connection_count <= 1 {
+                        // Center post
+                        Self::add_glass_pane_panel(trans_vertices, trans_indices,
+                            base_x + center - half_thick, base_y, base_z + center - half_thick,
+                            thickness, 1.0, thickness,
+                            block_type_f);
+                    }
+
+                    // Add panels to connected sides
+                    if north {
+                        // Extend toward +Z
+                        Self::add_glass_pane_panel(trans_vertices, trans_indices,
+                            base_x + center - half_thick, base_y, base_z + center,
+                            thickness, 1.0, 0.5,
+                            block_type_f);
+                    }
+
+                    if south {
+                        // Extend toward -Z
+                        Self::add_glass_pane_panel(trans_vertices, trans_indices,
+                            base_x + center - half_thick, base_y, base_z,
+                            thickness, 1.0, center,
+                            block_type_f);
+                    }
+
+                    if east {
+                        // Extend toward +X
+                        Self::add_glass_pane_panel(trans_vertices, trans_indices,
+                            base_x + center, base_y, base_z + center - half_thick,
+                            0.5, 1.0, thickness,
+                            block_type_f);
+                    }
+
+                    if west {
+                        // Extend toward -X
+                        Self::add_glass_pane_panel(trans_vertices, trans_indices,
+                            base_x, base_y, base_z + center - half_thick,
+                            center, 1.0, thickness,
+                            block_type_f);
+                    }
+
+                    // If connected on opposite sides (N-S or E-W), fill in center
+                    if (north && south) || (east && west) {
+                        // Don't need center post, panels already connect
+                    } else if connection_count == 2 && !((north && south) || (east && west)) {
+                        // L-shaped connection, need center connection
+                        Self::add_glass_pane_panel(trans_vertices, trans_indices,
+                            base_x + center - half_thick, base_y, base_z + center - half_thick,
+                            thickness, 1.0, thickness,
+                            block_type_f);
+                    }
+                }
+            }
+        }
+    }
+
+    // Add a glass pane panel (thin box)
+    fn add_glass_pane_panel(
+        vertices: &mut Vec<Vertex>,
+        indices: &mut Vec<u16>,
+        x: f32, y: f32, z: f32,
+        width: f32, height: f32, depth: f32,
+        block_type: f32,
+    ) {
+        // Reuse fence post geometry for the thin box
+        Self::add_fence_post(vertices, indices, x, y, z, width, height, depth, block_type);
+    }
+
     // Greedy mesh for horizontal faces (top/bottom) - iterates Y layers, merges in XZ plane
     fn greedy_mesh_horizontal<F>(
         world: &World,
@@ -3899,8 +5182,10 @@ impl Renderer {
             for x in 0..size {
                 for z in 0..size {
                     let block_type = chunk.blocks[x][y][z];
-                    if block_type == BlockType::Air || block_type == BlockType::Barrier || block_type == BlockType::Torch {
-                        continue;  // Torches are rendered separately with special geometry
+                    if block_type == BlockType::Air || block_type == BlockType::Barrier || block_type == BlockType::Torch
+                       || block_type == BlockType::Ladder || block_type.is_trapdoor() || block_type.is_fence() || block_type == BlockType::GlassPane
+                       || block_type.is_bottom_slab() || block_type.is_top_slab() || block_type.is_stairs() {
+                        continue;  // Torches, slabs, stairs, ladders, and trapdoors are rendered separately with special geometry
                     }
 
                     let world_x = chunk_x_offset + x as i32;
@@ -4020,8 +5305,10 @@ impl Renderer {
             for y in 0..height {
                 for z in 0..size {
                     let block_type = chunk.blocks[x][y][z];
-                    if block_type == BlockType::Air || block_type == BlockType::Barrier || block_type == BlockType::Torch {
-                        continue;  // Torches are rendered separately with special geometry
+                    if block_type == BlockType::Air || block_type == BlockType::Barrier || block_type == BlockType::Torch
+                       || block_type == BlockType::Ladder || block_type.is_trapdoor() || block_type.is_fence() || block_type == BlockType::GlassPane
+                       || block_type.is_bottom_slab() || block_type.is_top_slab() || block_type.is_stairs() {
+                        continue;  // Torches, slabs, stairs, ladders, and trapdoors are rendered separately with special geometry
                     }
 
                     let world_x = chunk_x_offset + x as i32;
@@ -4127,8 +5414,10 @@ impl Renderer {
             for y in 0..height {
                 for x in 0..size {
                     let block_type = chunk.blocks[x][y][z];
-                    if block_type == BlockType::Air || block_type == BlockType::Barrier || block_type == BlockType::Torch {
-                        continue;  // Torches are rendered separately with special geometry
+                    if block_type == BlockType::Air || block_type == BlockType::Barrier || block_type == BlockType::Torch
+                       || block_type == BlockType::Ladder || block_type.is_trapdoor() || block_type.is_fence() || block_type == BlockType::GlassPane
+                       || block_type.is_bottom_slab() || block_type.is_top_slab() || block_type.is_stairs() {
+                        continue;  // Torches, slabs, stairs, ladders, and trapdoors are rendered separately with special geometry
                     }
 
                     let world_x = chunk_x_offset + x as i32;
@@ -4662,6 +5951,24 @@ impl Renderer {
             BlockType::Fence => 45.0,            // Wood fence
             BlockType::Brick => 46.0,            // Stone brick
             BlockType::MossyCobblestone => 47.0, // Mossy green cobblestone
+            // Slabs use their base block textures
+            BlockType::StoneSlabBottom | BlockType::StoneSlabTop => 2.0, // Stone texture
+            BlockType::WoodSlabBottom | BlockType::WoodSlabTop => 44.0,  // Planks texture
+            BlockType::CobblestoneSlabBottom | BlockType::CobblestoneSlabTop => 10.0, // Cobblestone texture
+            // Stairs use their base block textures
+            BlockType::StoneStairs => 2.0,
+            BlockType::WoodStairs => 44.0,
+            BlockType::CobblestoneStairs => 10.0,
+            BlockType::BrickStairs => 46.0,
+            // Other building blocks
+            BlockType::Ladder => 44.0,        // Wood-like
+            BlockType::WoodTrapdoor => 44.0,  // Wood texture
+            BlockType::IronTrapdoor => 12.0,  // Iron texture
+            BlockType::SignPost | BlockType::WallSign => 44.0, // Wood texture
+            BlockType::WoodFence => 44.0,     // Wood texture
+            BlockType::StoneFence => 2.0,     // Stone texture
+            BlockType::FenceGate => 44.0,     // Wood texture
+            BlockType::GlassPane => 9.0,      // Ice/glass-like
             _ => 0.0,
         }
     }
@@ -5077,9 +6384,9 @@ impl Renderer {
         }
     }
 
-    /// Update the hostile mob mesh (zombies, etc.)
-    pub fn update_hostile_mob_mesh(&mut self, hostile_mobs: &[crate::entity::HostileMob]) {
-        use crate::entity::HostileMobState;
+    /// Update the hostile mob mesh (zombies, skeletons, spiders, creepers) and projectiles
+    pub fn update_hostile_mob_mesh(&mut self, hostile_mobs: &[crate::entity::HostileMob], projectiles: &[crate::entity::Projectile]) {
+        use crate::entity::{HostileMobState, HostileMobType};
 
         let mut vertices: Vec<Vertex> = Vec::with_capacity(hostile_mobs.len() * 8 * 24);
         let mut indices: Vec<u16> = Vec::with_capacity(hostile_mobs.len() * 8 * 36);
@@ -5090,9 +6397,8 @@ impl Renderer {
             let z = mob.position.z;
             let yaw = mob.yaw.to_radians();
 
-            // Green-gray color for zombies (using a custom block type index)
-            // We use 48.0 for zombie color - will need to add this to the texture atlas
-            let color = if mob.damage_flash > 0.0 { 99.0 } else { 48.0 }; // Flash red when hit
+            // Use mob-specific color, flash red when hit
+            let color = if mob.damage_flash > 0.0 { 99.0 } else { mob.mob_type.color_index() };
 
             let (width, height) = mob.mob_type.dimensions();
             let pivot = [x, y, z];
@@ -5101,100 +6407,239 @@ impl Renderer {
             let swing = if mob.state == HostileMobState::Chasing || mob.state == HostileMobState::Wandering {
                 (mob.animation_time * 4.0).sin() * 0.3
             } else if mob.state == HostileMobState::Attacking {
-                (mob.animation_time * 8.0).sin() * 0.5 // Faster attack animation
+                (mob.animation_time * 8.0).sin() * 0.5
+            } else if mob.state == HostileMobState::Fusing {
+                // Creeper fuse - pulsing/expanding effect
+                (mob.animation_time * 16.0).sin() * 0.1
             } else {
                 0.0
             };
 
-            // Body (torso)
-            let body_y = y - height * 0.4;
-            Self::generate_villager_cube(
-                &mut vertices,
-                &mut indices,
-                [x, body_y, z],
-                [width * 0.6, height * 0.4, width * 0.4],
-                color,
-                yaw,
-                pivot,
-            );
+            match mob.mob_type {
+                HostileMobType::Spider => {
+                    // Spider: wide flat body with 8 legs
+                    // Body
+                    let body_y = y - height * 0.5;
+                    Self::generate_villager_cube(
+                        &mut vertices, &mut indices,
+                        [x, body_y, z],
+                        [width * 0.5, height * 0.6, width * 0.4],
+                        color, yaw, pivot,
+                    );
+                    // Head (smaller, in front)
+                    let head_forward = -width * 0.3;
+                    let head_x = x - yaw.sin() * head_forward;
+                    let head_z = z - yaw.cos() * head_forward;
+                    Self::generate_villager_cube(
+                        &mut vertices, &mut indices,
+                        [head_x, body_y + 0.1, head_z],
+                        [width * 0.3, height * 0.4, width * 0.3],
+                        color, yaw, pivot,
+                    );
+                    // 8 legs (4 per side)
+                    let leg_positions = [
+                        (0.25, -0.3, 1.0), (0.35, 0.0, 0.5), (0.35, 0.25, -0.5), (0.25, 0.45, -1.0),
+                        (-0.25, -0.3, -1.0), (-0.35, 0.0, -0.5), (-0.35, 0.25, 0.5), (-0.25, 0.45, 1.0),
+                    ];
+                    for (dx_mult, dz_mult, phase) in leg_positions {
+                        let dx = width * dx_mult;
+                        let dz = width * dz_mult;
+                        let leg_swing = swing * phase;
+                        let rot_dx = dx * yaw.cos() - dz * yaw.sin();
+                        let rot_dz = dx * yaw.sin() + dz * yaw.cos();
+                        Self::generate_villager_cube(
+                            &mut vertices, &mut indices,
+                            [x + rot_dx, body_y - height * 0.3 + leg_swing * 0.1, z + rot_dz],
+                            [0.08, height * 0.4, 0.08],
+                            color, yaw, pivot,
+                        );
+                    }
+                }
+                HostileMobType::Creeper => {
+                    // Creeper: tall body, small head, 4 short legs, no arms
+                    let fuse_expand = if mob.state == HostileMobState::Fusing {
+                        1.0 + swing.abs() * 0.3
+                    } else {
+                        1.0
+                    };
+                    // Body (tall rectangle)
+                    let body_y = y - height * 0.4;
+                    Self::generate_villager_cube(
+                        &mut vertices, &mut indices,
+                        [x, body_y, z],
+                        [width * 0.5 * fuse_expand, height * 0.5 * fuse_expand, width * 0.4 * fuse_expand],
+                        color, yaw, pivot,
+                    );
+                    // Head
+                    let head_y = y - height * 0.1;
+                    Self::generate_villager_cube(
+                        &mut vertices, &mut indices,
+                        [x, head_y, z],
+                        [width * 0.45 * fuse_expand, width * 0.45 * fuse_expand, width * 0.35 * fuse_expand],
+                        color, yaw, pivot,
+                    );
+                    // 4 short legs
+                    let leg_height = height * 0.25;
+                    let leg_y = y - height + leg_height * 0.5;
+                    let leg_offsets = [
+                        (width * 0.15, width * 0.1, 1.0),
+                        (-width * 0.15, width * 0.1, -1.0),
+                        (width * 0.15, -width * 0.1, -0.5),
+                        (-width * 0.15, -width * 0.1, 0.5),
+                    ];
+                    for (dx, dz, phase) in leg_offsets {
+                        let rot_dx = dx * yaw.cos() - dz * yaw.sin();
+                        let rot_dz = dx * yaw.sin() + dz * yaw.cos();
+                        let leg_swing = swing * phase;
+                        let swing_x = -yaw.sin() * leg_swing * 0.15;
+                        let swing_z = -yaw.cos() * leg_swing * 0.15;
+                        Self::generate_villager_cube(
+                            &mut vertices, &mut indices,
+                            [x + rot_dx + swing_x, leg_y, z + rot_dz + swing_z],
+                            [0.12, leg_height, 0.12],
+                            color, yaw, pivot,
+                        );
+                    }
+                }
+                HostileMobType::Zombie | HostileMobType::Skeleton => {
+                    // Zombie and Skeleton: humanoid shape
+                    // Skeleton is thinner
+                    let thickness_mult = if mob.mob_type == HostileMobType::Skeleton { 0.6 } else { 1.0 };
 
-            // Head
-            let head_forward = 0.0;
-            let head_x = x - yaw.sin() * head_forward;
-            let head_z = z - yaw.cos() * head_forward;
-            let head_y = y - height * 0.15;
-            Self::generate_villager_cube(
-                &mut vertices,
-                &mut indices,
-                [head_x, head_y, head_z],
-                [width * 0.4, width * 0.4, width * 0.4],
-                color,
-                yaw,
-                pivot,
-            );
+                    // Body (torso)
+                    let body_y = y - height * 0.4;
+                    Self::generate_villager_cube(
+                        &mut vertices, &mut indices,
+                        [x, body_y, z],
+                        [width * 0.6 * thickness_mult, height * 0.4, width * 0.4 * thickness_mult],
+                        color, yaw, pivot,
+                    );
 
-            // Arms (extended forward like zombie)
-            let arm_length = 0.5;
-            let arm_swing = swing * 0.5;
+                    // Head
+                    let head_y = y - height * 0.15;
+                    Self::generate_villager_cube(
+                        &mut vertices, &mut indices,
+                        [x, head_y, z],
+                        [width * 0.4, width * 0.4, width * 0.4],
+                        color, yaw, pivot,
+                    );
 
-            // Left arm
-            let left_arm_dx = width * 0.4;
-            let arm_forward = 0.4 + arm_swing;
-            let left_rot_dx = left_arm_dx * yaw.cos() - arm_forward * yaw.sin();
-            let left_rot_dz = left_arm_dx * yaw.sin() + arm_forward * yaw.cos();
-            Self::generate_villager_cube(
-                &mut vertices,
-                &mut indices,
-                [x + left_rot_dx, body_y + 0.1, z + left_rot_dz],
-                [0.12, arm_length, 0.12],
-                color,
-                yaw,
-                pivot,
-            );
+                    // Arms
+                    let arm_length = 0.5;
+                    let arm_swing = swing * 0.5;
+                    let arm_forward = if mob.mob_type == HostileMobType::Zombie {
+                        0.4 + arm_swing // Zombie arms extended forward
+                    } else {
+                        arm_swing * 0.3 // Skeleton arms at sides (slight swing)
+                    };
 
-            // Right arm
-            let right_arm_dx = -width * 0.4;
-            let right_rot_dx = right_arm_dx * yaw.cos() - arm_forward * yaw.sin();
-            let right_rot_dz = right_arm_dx * yaw.sin() + arm_forward * yaw.cos();
-            Self::generate_villager_cube(
-                &mut vertices,
-                &mut indices,
-                [x + right_rot_dx, body_y + 0.1, z + right_rot_dz],
-                [0.12, arm_length, 0.12],
-                color,
-                yaw,
-                pivot,
-            );
+                    // Left arm
+                    let left_arm_dx = width * 0.4;
+                    let left_rot_dx = left_arm_dx * yaw.cos() - arm_forward * yaw.sin();
+                    let left_rot_dz = left_arm_dx * yaw.sin() + arm_forward * yaw.cos();
+                    Self::generate_villager_cube(
+                        &mut vertices, &mut indices,
+                        [x + left_rot_dx, body_y + 0.1, z + left_rot_dz],
+                        [0.1 * thickness_mult, arm_length, 0.1 * thickness_mult],
+                        color, yaw, pivot,
+                    );
 
-            // Legs (walking animation)
-            let leg_height = height * 0.4;
-            let leg_y = y - height + leg_height * 0.5;
-            let leg_offsets = [
-                (width * 0.15, width * 0.05, 1.0),   // Left leg
-                (-width * 0.15, -width * 0.05, -1.0), // Right leg
-            ];
+                    // Right arm
+                    let right_arm_dx = -width * 0.4;
+                    let right_rot_dx = right_arm_dx * yaw.cos() - arm_forward * yaw.sin();
+                    let right_rot_dz = right_arm_dx * yaw.sin() + arm_forward * yaw.cos();
+                    Self::generate_villager_cube(
+                        &mut vertices, &mut indices,
+                        [x + right_rot_dx, body_y + 0.1, z + right_rot_dz],
+                        [0.1 * thickness_mult, arm_length, 0.1 * thickness_mult],
+                        color, yaw, pivot,
+                    );
 
-            for (dx, dz, phase) in leg_offsets {
-                let rot_dx = dx * yaw.cos() - dz * yaw.sin();
-                let rot_dz = dx * yaw.sin() + dz * yaw.cos();
-                let leg_swing = swing * phase;
-                let swing_x = -yaw.sin() * leg_swing * 0.3;
-                let swing_z = -yaw.cos() * leg_swing * 0.3;
+                    // Legs
+                    let leg_height = height * 0.4;
+                    let leg_y = y - height + leg_height * 0.5;
+                    let leg_offsets = [
+                        (width * 0.15, width * 0.05, 1.0),
+                        (-width * 0.15, -width * 0.05, -1.0),
+                    ];
 
-                Self::generate_villager_cube(
-                    &mut vertices,
-                    &mut indices,
-                    [x + rot_dx + swing_x, leg_y, z + rot_dz + swing_z],
-                    [0.14, leg_height, 0.14],
-                    color,
-                    yaw,
-                    pivot,
-                );
+                    for (dx, dz, phase) in leg_offsets {
+                        let rot_dx = dx * yaw.cos() - dz * yaw.sin();
+                        let rot_dz = dx * yaw.sin() + dz * yaw.cos();
+                        let leg_swing = swing * phase;
+                        let swing_x = -yaw.sin() * leg_swing * 0.3;
+                        let swing_z = -yaw.cos() * leg_swing * 0.3;
+
+                        Self::generate_villager_cube(
+                            &mut vertices, &mut indices,
+                            [x + rot_dx + swing_x, leg_y, z + rot_dz + swing_z],
+                            [0.12 * thickness_mult, leg_height, 0.12 * thickness_mult],
+                            color, yaw, pivot,
+                        );
+                    }
+                }
             }
         }
 
-        // Hostile mobs use the same buffer as villagers for now
-        // We'll append to the villager draw call
+        // Render projectiles (arrows)
+        for proj in projectiles {
+            let x = proj.position.x;
+            let y = proj.position.y;
+            let z = proj.position.z;
+
+            // Calculate arrow direction from velocity
+            let vlen = (proj.velocity.x.powi(2) + proj.velocity.y.powi(2) + proj.velocity.z.powi(2)).sqrt();
+            let yaw = if vlen > 0.01 {
+                (-proj.velocity.x).atan2(-proj.velocity.z)
+            } else {
+                0.0
+            };
+            let pitch = if vlen > 0.01 {
+                (proj.velocity.y / vlen).asin()
+            } else {
+                0.0
+            };
+
+            // Arrow color (brown/wood color, using sand block index as approximation)
+            let arrow_color = 4.0; // Wood/planks color
+
+            let pivot = [x, y, z];
+
+            // Arrow shaft (thin long rectangle)
+            let shaft_length = 0.5;
+            let shaft_thickness = 0.05;
+
+            // Calculate rotated shaft positions
+            let forward_x = -yaw.sin() * pitch.cos();
+            let forward_y = pitch.sin();
+            let forward_z = -yaw.cos() * pitch.cos();
+
+            // Shaft end points
+            let front_x = x + forward_x * shaft_length * 0.5;
+            let front_y = y + forward_y * shaft_length * 0.5;
+            let front_z = z + forward_z * shaft_length * 0.5;
+
+            Self::generate_villager_cube(
+                &mut vertices, &mut indices,
+                [front_x, front_y, front_z],
+                [shaft_thickness, shaft_thickness, shaft_length],
+                arrow_color, yaw, pivot,
+            );
+
+            // Arrowhead (small pyramid approximated as a cube)
+            let head_x = x + forward_x * shaft_length * 0.7;
+            let head_y = y + forward_y * shaft_length * 0.7;
+            let head_z = z + forward_z * shaft_length * 0.7;
+            Self::generate_villager_cube(
+                &mut vertices, &mut indices,
+                [head_x, head_y, head_z],
+                [0.08, 0.08, 0.1],
+                17.0, // Gray stone color for arrowhead
+                yaw, pivot,
+            );
+        }
+
+        // Hostile mobs and projectiles share the same buffer
         self.hostile_mob_index_count = indices.len() as u32;
 
         if !vertices.is_empty() {

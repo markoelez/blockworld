@@ -1,4 +1,4 @@
-use cgmath::{Point3, Vector3};
+use cgmath::{Point3, Vector3, InnerSpace};
 use rand::Rng;
 
 use crate::world::{World, BlockType, ItemStack, Tool};
@@ -1038,55 +1038,127 @@ pub const ZOMBIE_DETECTION_RANGE: f32 = 40.0;
 pub const ZOMBIE_ATTACK_RANGE: f32 = 2.0;
 pub const ZOMBIE_DAMAGE: f32 = 3.0;
 pub const ZOMBIE_HEALTH: f32 = 20.0;
+
+// Skeleton constants
+pub const SKELETON_HEIGHT: f32 = 1.9;
+pub const SKELETON_WIDTH: f32 = 0.6;
+pub const SKELETON_SPEED: f32 = 2.0;
+pub const SKELETON_DETECTION_RANGE: f32 = 16.0;
+pub const SKELETON_ATTACK_RANGE: f32 = 15.0;  // Ranged attack
+pub const SKELETON_DAMAGE: f32 = 2.0;
+pub const SKELETON_HEALTH: f32 = 20.0;
+pub const SKELETON_SHOOT_COOLDOWN: f32 = 2.0;
+pub const ARROW_SPEED: f32 = 20.0;
+
+// Spider constants
+pub const SPIDER_HEIGHT: f32 = 0.9;
+pub const SPIDER_WIDTH: f32 = 1.4;
+pub const SPIDER_SPEED: f32 = 3.5;
+pub const SPIDER_DETECTION_RANGE: f32 = 12.0;
+pub const SPIDER_ATTACK_RANGE: f32 = 2.0;
+pub const SPIDER_DAMAGE: f32 = 2.0;
+pub const SPIDER_HEALTH: f32 = 16.0;
+
+// Creeper constants
+pub const CREEPER_HEIGHT: f32 = 1.7;
+pub const CREEPER_WIDTH: f32 = 0.6;
+pub const CREEPER_SPEED: f32 = 1.8;
+pub const CREEPER_DETECTION_RANGE: f32 = 16.0;
+pub const CREEPER_FUSE_RANGE: f32 = 3.0;
+pub const CREEPER_ABORT_RANGE: f32 = 7.0;
+pub const CREEPER_FUSE_TIME: f32 = 1.5;
+pub const CREEPER_EXPLOSION_RADIUS: f32 = 3.0;
+pub const CREEPER_EXPLOSION_DAMAGE: f32 = 25.0;
+pub const CREEPER_HEALTH: f32 = 20.0;
+
 pub const MAX_HOSTILE_MOBS: usize = 30;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum HostileMobType {
     Zombie,
+    Skeleton,
+    Spider,
+    Creeper,
 }
 
 impl HostileMobType {
     pub fn health(&self) -> f32 {
         match self {
             HostileMobType::Zombie => ZOMBIE_HEALTH,
+            HostileMobType::Skeleton => SKELETON_HEALTH,
+            HostileMobType::Spider => SPIDER_HEALTH,
+            HostileMobType::Creeper => CREEPER_HEALTH,
         }
     }
 
     pub fn damage(&self) -> f32 {
         match self {
             HostileMobType::Zombie => ZOMBIE_DAMAGE,
+            HostileMobType::Skeleton => SKELETON_DAMAGE,
+            HostileMobType::Spider => SPIDER_DAMAGE,
+            HostileMobType::Creeper => CREEPER_EXPLOSION_DAMAGE,
         }
     }
 
     pub fn speed(&self) -> f32 {
         match self {
             HostileMobType::Zombie => ZOMBIE_SPEED,
+            HostileMobType::Skeleton => SKELETON_SPEED,
+            HostileMobType::Spider => SPIDER_SPEED,
+            HostileMobType::Creeper => CREEPER_SPEED,
         }
     }
 
     pub fn detection_range(&self) -> f32 {
         match self {
             HostileMobType::Zombie => ZOMBIE_DETECTION_RANGE,
+            HostileMobType::Skeleton => SKELETON_DETECTION_RANGE,
+            HostileMobType::Spider => SPIDER_DETECTION_RANGE,
+            HostileMobType::Creeper => CREEPER_DETECTION_RANGE,
         }
     }
 
     pub fn attack_range(&self) -> f32 {
         match self {
             HostileMobType::Zombie => ZOMBIE_ATTACK_RANGE,
+            HostileMobType::Skeleton => SKELETON_ATTACK_RANGE,
+            HostileMobType::Spider => SPIDER_ATTACK_RANGE,
+            HostileMobType::Creeper => CREEPER_FUSE_RANGE,
         }
     }
 
     pub fn dimensions(&self) -> (f32, f32) {
         match self {
             HostileMobType::Zombie => (ZOMBIE_WIDTH, ZOMBIE_HEIGHT),
+            HostileMobType::Skeleton => (SKELETON_WIDTH, SKELETON_HEIGHT),
+            HostileMobType::Spider => (SPIDER_WIDTH, SPIDER_HEIGHT),
+            HostileMobType::Creeper => (CREEPER_WIDTH, CREEPER_HEIGHT),
         }
     }
 
     /// Color index for rendering
     pub fn color_index(&self) -> f32 {
         match self {
-            HostileMobType::Zombie => 48.0, // New texture index for zombies
+            HostileMobType::Zombie => 48.0,
+            HostileMobType::Skeleton => 49.0,
+            HostileMobType::Spider => 50.0,
+            HostileMobType::Creeper => 51.0,
         }
+    }
+
+    /// Whether this mob is ranged
+    pub fn is_ranged(&self) -> bool {
+        matches!(self, HostileMobType::Skeleton)
+    }
+
+    /// Whether this mob can climb walls
+    pub fn can_climb(&self) -> bool {
+        matches!(self, HostileMobType::Spider)
+    }
+
+    /// Whether this mob explodes
+    pub fn explodes(&self) -> bool {
+        matches!(self, HostileMobType::Creeper)
     }
 }
 
@@ -1096,6 +1168,63 @@ pub enum HostileMobState {
     Wandering,
     Chasing,
     Attacking,
+    Fusing,  // Creeper about to explode
+}
+
+/// Actions that mobs can trigger
+#[derive(Debug)]
+pub enum MobAction {
+    ShootArrow(Vector3<f32>),  // Direction to shoot
+    Explode,                    // Creeper explosion
+}
+
+/// Projectile (arrows shot by skeletons)
+pub struct Projectile {
+    pub id: u32,
+    pub position: Point3<f32>,
+    pub velocity: Vector3<f32>,
+    pub damage: f32,
+    pub lifetime: f32,
+}
+
+impl Projectile {
+    pub fn new(id: u32, position: Point3<f32>, direction: Vector3<f32>) -> Self {
+        Self {
+            id,
+            position,
+            velocity: direction * ARROW_SPEED,
+            damage: SKELETON_DAMAGE,
+            lifetime: 5.0,  // 5 seconds before despawn
+        }
+    }
+
+    /// Update projectile, returns true if still alive
+    pub fn update(&mut self, dt: f32, world: &World) -> bool {
+        self.lifetime -= dt;
+        if self.lifetime <= 0.0 {
+            return false;
+        }
+
+        // Apply gravity
+        self.velocity.y -= GRAVITY * 0.5 * dt;
+
+        // Move
+        let new_pos = self.position + self.velocity * dt;
+
+        // Check for block collision
+        let block_x = new_pos.x.floor() as i32;
+        let block_y = new_pos.y.floor() as i32;
+        let block_z = new_pos.z.floor() as i32;
+
+        if let Some(block) = world.get_block(block_x, block_y, block_z) {
+            if block != BlockType::Air && block != BlockType::Water {
+                return false;  // Hit a block
+            }
+        }
+
+        self.position = new_pos;
+        true
+    }
 }
 
 pub struct HostileMob {
@@ -1112,6 +1241,11 @@ pub struct HostileMob {
     pub animation_time: f32,
     pub on_ground: bool,
     state_timer: f32,
+    // Mob-specific fields
+    pub fuse_timer: f32,        // Creeper explosion countdown
+    pub shoot_cooldown: f32,    // Skeleton arrow cooldown
+    pub is_climbing: bool,      // Spider wall climbing
+    pub was_attacked: bool,     // Spider becomes hostile if attacked during day
 }
 
 impl HostileMob {
@@ -1131,6 +1265,10 @@ impl HostileMob {
             animation_time: 0.0,
             on_ground: false,
             state_timer: rng.gen_range(1.0..3.0),
+            fuse_timer: 0.0,
+            shoot_cooldown: 0.0,
+            is_climbing: false,
+            was_attacked: false,
         }
     }
 
@@ -1143,6 +1281,9 @@ impl HostileMob {
         }
         if self.damage_flash > 0.0 {
             self.damage_flash = (self.damage_flash - dt).max(0.0);
+        }
+        if self.shoot_cooldown > 0.0 {
+            self.shoot_cooldown = (self.shoot_cooldown - dt).max(0.0);
         }
 
         self.update_physics(dt, world);
@@ -1249,7 +1390,8 @@ impl HostileMob {
         self.position.y = new_y;
     }
 
-    pub fn update_ai(&mut self, dt: f32, world: &World, player_pos: Point3<f32>, rng: &mut impl Rng) {
+    /// Returns special action: None, Some(MobAction::ShootArrow(direction)), or Some(MobAction::Explode)
+    pub fn update_ai(&mut self, dt: f32, world: &World, player_pos: Point3<f32>, time_of_day: f32, rng: &mut impl Rng) -> Option<MobAction> {
         self.state_timer -= dt;
 
         let distance_to_player = ((self.position.x - player_pos.x).powi(2)
@@ -1258,6 +1400,14 @@ impl HostileMob {
 
         let detection_range = self.mob_type.detection_range();
         let attack_range = self.mob_type.attack_range();
+
+        // Spider day/night behavior
+        let is_day = time_of_day > 0.25 && time_of_day < 0.75;
+        if self.mob_type == HostileMobType::Spider && is_day && !self.was_attacked {
+            // Neutral during day - just wander
+            self.update_neutral_ai(dt, world, rng);
+            return None;
+        }
 
         match self.state {
             HostileMobState::Idle | HostileMobState::Wandering => {
@@ -1277,8 +1427,14 @@ impl HostileMob {
                 } else if self.state == HostileMobState::Wandering {
                     // Check for obstacles
                     if self.is_blocked(world) || self.is_cliff_ahead(world) {
-                        self.yaw += 90.0 + rng.gen::<f32>() * 90.0;
-                        if self.yaw >= 360.0 { self.yaw -= 360.0; }
+                        // Spider can climb walls
+                        if self.mob_type.can_climb() && self.is_blocked(world) && self.on_ground {
+                            self.is_climbing = true;
+                            self.velocity.y = 4.0;
+                        } else {
+                            self.yaw += 90.0 + rng.gen::<f32>() * 90.0;
+                            if self.yaw >= 360.0 { self.yaw -= 360.0; }
+                        }
                     }
                     if self.state_timer <= 0.0 {
                         self.state = HostileMobState::Idle;
@@ -1287,19 +1443,55 @@ impl HostileMob {
                 }
             }
             HostileMobState::Chasing => {
-                // Update facing direction towards player
                 self.face_player(player_pos);
 
-                // Jump if blocked
-                if self.is_blocked(world) && self.on_ground {
-                    self.velocity.y = 8.0; // Jump
+                // Mob-specific chasing behavior
+                match self.mob_type {
+                    HostileMobType::Skeleton => {
+                        // Skeleton maintains distance and shoots
+                        if distance_to_player < 8.0 {
+                            // Too close, back away
+                            self.yaw += 180.0;
+                            if self.yaw >= 360.0 { self.yaw -= 360.0; }
+                        } else if distance_to_player < attack_range && self.shoot_cooldown <= 0.0 {
+                            // In range, shoot arrow
+                            self.state = HostileMobState::Attacking;
+                        }
+                        // Strafe while in combat
+                        if distance_to_player < attack_range {
+                            let strafe = if rng.gen::<bool>() { 30.0 } else { -30.0 };
+                            self.yaw += strafe * dt;
+                        }
+                    }
+                    HostileMobType::Creeper => {
+                        // Creeper starts fuse when close
+                        if distance_to_player < attack_range {
+                            self.state = HostileMobState::Fusing;
+                            self.fuse_timer = CREEPER_FUSE_TIME;
+                        }
+                    }
+                    HostileMobType::Spider => {
+                        // Spider can climb walls when blocked
+                        if self.is_blocked(world) && self.on_ground {
+                            self.is_climbing = true;
+                            self.velocity.y = 4.0;
+                        }
+                        if distance_to_player < attack_range {
+                            self.state = HostileMobState::Attacking;
+                        }
+                    }
+                    HostileMobType::Zombie => {
+                        // Jump if blocked
+                        if self.is_blocked(world) && self.on_ground {
+                            self.velocity.y = 8.0;
+                        }
+                        if distance_to_player < attack_range {
+                            self.state = HostileMobState::Attacking;
+                        }
+                    }
                 }
 
-                // Check if close enough to attack
-                if distance_to_player < attack_range {
-                    self.state = HostileMobState::Attacking;
-                } else if distance_to_player > detection_range * 1.5 {
-                    // Lost player, go back to idle
+                if distance_to_player > detection_range * 1.5 {
                     self.state = HostileMobState::Idle;
                     self.state_timer = rng.gen_range(2.0..4.0);
                 }
@@ -1307,10 +1499,61 @@ impl HostileMob {
             HostileMobState::Attacking => {
                 self.face_player(player_pos);
 
-                // Move back to chasing if player moved away
-                if distance_to_player > attack_range * 1.5 {
-                    self.state = HostileMobState::Chasing;
+                match self.mob_type {
+                    HostileMobType::Skeleton => {
+                        // Shoot arrow
+                        if self.shoot_cooldown <= 0.0 {
+                            self.shoot_cooldown = SKELETON_SHOOT_COOLDOWN;
+                            let direction = (player_pos - self.position).normalize();
+                            self.state = HostileMobState::Chasing;
+                            return Some(MobAction::ShootArrow(direction));
+                        }
+                        if distance_to_player > attack_range * 1.2 {
+                            self.state = HostileMobState::Chasing;
+                        }
+                    }
+                    _ => {
+                        // Melee attack handled elsewhere
+                        if distance_to_player > attack_range * 1.5 {
+                            self.state = HostileMobState::Chasing;
+                        }
+                    }
                 }
+            }
+            HostileMobState::Fusing => {
+                // Creeper fuse countdown
+                self.fuse_timer -= dt;
+                self.face_player(player_pos);
+
+                // Abort if player moved away
+                if distance_to_player > CREEPER_ABORT_RANGE {
+                    self.state = HostileMobState::Chasing;
+                    self.fuse_timer = 0.0;
+                } else if self.fuse_timer <= 0.0 {
+                    // EXPLODE
+                    return Some(MobAction::Explode);
+                }
+            }
+        }
+        None
+    }
+
+    /// Neutral AI for spiders during day
+    fn update_neutral_ai(&mut self, _dt: f32, world: &World, rng: &mut impl Rng) {
+        if self.state_timer <= 0.0 {
+            if rng.gen::<f32>() < 0.5 {
+                self.state = HostileMobState::Wandering;
+                self.yaw = rng.gen_range(0.0..360.0);
+                self.state_timer = rng.gen_range(3.0..6.0);
+            } else {
+                self.state = HostileMobState::Idle;
+                self.state_timer = rng.gen_range(2.0..5.0);
+            }
+        }
+        if self.state == HostileMobState::Wandering {
+            if self.is_blocked(world) || self.is_cliff_ahead(world) {
+                self.yaw += 90.0 + rng.gen::<f32>() * 90.0;
+                if self.yaw >= 360.0 { self.yaw -= 360.0; }
             }
         }
     }
@@ -1481,6 +1724,7 @@ pub struct EntityManager {
     pub dropped_items: Vec<DroppedItem>,
     pub animals: Vec<Animal>,
     pub hostile_mobs: Vec<HostileMob>,
+    pub projectiles: Vec<Projectile>,
     next_id: u32,
     rng: rand::rngs::ThreadRng,
     ai_update_timer: f32,
@@ -1496,6 +1740,7 @@ impl EntityManager {
             dropped_items: Vec::new(),
             animals: Vec::new(),
             hostile_mobs: Vec::new(),
+            projectiles: Vec::new(),
             next_id: 0,
             rng: rand::thread_rng(),
             ai_update_timer: 0.0,
@@ -1503,6 +1748,13 @@ impl EntityManager {
             animal_spawn_timer: 0.0,
             hostile_spawn_timer: 0.0,
         }
+    }
+
+    /// Spawn a projectile (arrow)
+    pub fn spawn_projectile(&mut self, position: Point3<f32>, direction: Vector3<f32>) {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.projectiles.push(Projectile::new(id, position, direction));
     }
 
     /// Spawn a dropped item at a position
@@ -1553,7 +1805,7 @@ impl EntityManager {
         collected
     }
 
-    pub fn update(&mut self, dt: f32, world: &World, player_pos: Point3<f32>) {
+    pub fn update(&mut self, dt: f32, world: &World, player_pos: Point3<f32>, time_of_day: f32) {
         // Update AI at reduced rate
         self.ai_update_timer += dt;
         let update_ai = self.ai_update_timer >= 0.1;
@@ -1612,7 +1864,8 @@ impl EntityManager {
             self.cleanup_distant_animals(player_pos);
         }
 
-        // Update hostile mobs
+        // Update hostile mobs - collect actions to process
+        let mut mob_actions: Vec<(u32, Point3<f32>, MobAction)> = Vec::new();
         for mob in &mut self.hostile_mobs {
             mob.update(dt, world);
 
@@ -1620,10 +1873,32 @@ impl EntityManager {
                 let dist_sq = (mob.position.x - player_pos.x).powi(2)
                     + (mob.position.z - player_pos.z).powi(2);
                 if dist_sq < 100.0 * 100.0 {
-                    mob.update_ai(ai_dt, world, player_pos, &mut self.rng);
+                    if let Some(action) = mob.update_ai(ai_dt, world, player_pos, time_of_day, &mut self.rng) {
+                        mob_actions.push((mob.id, mob.position, action));
+                    }
                 }
             }
         }
+
+        // Process mob actions
+        for (mob_id, pos, action) in mob_actions {
+            match action {
+                MobAction::ShootArrow(direction) => {
+                    // Spawn arrow at mob's eye level
+                    let arrow_pos = Point3::new(pos.x, pos.y - 0.5, pos.z);
+                    self.spawn_projectile(arrow_pos, direction);
+                }
+                MobAction::Explode => {
+                    // Mark creeper for removal (explosion handled in main.rs)
+                    if let Some(mob) = self.hostile_mobs.iter_mut().find(|m| m.id == mob_id) {
+                        mob.health = 0.0;  // Kill the creeper
+                    }
+                }
+            }
+        }
+
+        // Update projectiles
+        self.projectiles.retain_mut(|proj| proj.update(dt, world));
 
         // Remove dead hostile mobs
         self.hostile_mobs.retain(|mob| !mob.is_dead());
@@ -2100,7 +2375,15 @@ impl EntityManager {
                 let try_x = chunk_x * 16 + 8 + offset_x;
                 let try_z = chunk_z * 16 + 8 + offset_z;
 
-                if let Some(spawn_pos) = self.find_hostile_spawn_position(world, try_x, try_z) {
+                // Select mob type with weighted random
+                let mob_type = match self.rng.gen_range(0..100) {
+                    0..=49 => HostileMobType::Zombie,     // 50% zombies
+                    50..=74 => HostileMobType::Skeleton,  // 25% skeletons
+                    75..=89 => HostileMobType::Spider,    // 15% spiders
+                    _ => HostileMobType::Creeper,          // 10% creepers
+                };
+
+                if let Some(spawn_pos) = self.find_hostile_spawn_position(world, try_x, try_z, mob_type) {
                     // Check distance from player (must be at least 24 blocks)
                     let player_dist_sq = (spawn_pos.x - player_pos.x).powi(2)
                         + (spawn_pos.z - player_pos.z).powi(2);
@@ -2108,7 +2391,7 @@ impl EntityManager {
                         continue;
                     }
 
-                    let mob = HostileMob::new(self.next_id, HostileMobType::Zombie, spawn_pos);
+                    let mob = HostileMob::new(self.next_id, mob_type, spawn_pos);
                     self.next_id += 1;
                     self.hostile_mobs.push(mob);
 
@@ -2120,22 +2403,29 @@ impl EntityManager {
         }
     }
 
-    fn find_hostile_spawn_position(&self, world: &World, world_x: i32, world_z: i32) -> Option<Point3<f32>> {
+    fn find_hostile_spawn_position(&self, world: &World, world_x: i32, world_z: i32, mob_type: HostileMobType) -> Option<Point3<f32>> {
+        let (_, height) = mob_type.dimensions();
+        let required_clearance = (height.ceil() as i32).max(2);
+
         // Search for valid ground position
         for y in (30..90).rev() {
             if let Some(block) = world.get_block(world_x, y, world_z) {
                 // Can spawn on any solid block
                 if block != BlockType::Air && block != BlockType::Water && block != BlockType::Lava {
-                    let above1 = world.get_block(world_x, y + 1, world_z);
-                    let above2 = world.get_block(world_x, y + 2, world_z);
-                    let above3 = world.get_block(world_x, y + 3, world_z);
+                    // Check for sufficient clearance above based on mob height
+                    let mut has_clearance = true;
+                    for dy in 1..=required_clearance {
+                        let above = world.get_block(world_x, y + dy, world_z);
+                        if above != Some(BlockType::Air) {
+                            has_clearance = false;
+                            break;
+                        }
+                    }
 
-                    if above1 == Some(BlockType::Air)
-                        && above2 == Some(BlockType::Air)
-                        && above3 == Some(BlockType::Air) {
+                    if has_clearance {
                         return Some(Point3::new(
                             world_x as f32 + 0.5,
-                            (y + 1) as f32 + ZOMBIE_HEIGHT,
+                            (y + 1) as f32 + height,
                             world_z as f32 + 0.5,
                         ));
                     }
@@ -2209,6 +2499,32 @@ impl EntityManager {
 
     pub fn get_hostile_mobs(&self) -> &[HostileMob] {
         &self.hostile_mobs
+    }
+
+    pub fn get_projectiles(&self) -> &[Projectile] {
+        &self.projectiles
+    }
+
+    /// Check projectile collisions with player, returns list of damage amounts
+    pub fn check_projectile_player_collisions(&mut self, player_pos: Point3<f32>) -> Vec<f32> {
+        let mut damages = Vec::new();
+        let player_radius = 0.4;  // Player hitbox radius
+
+        self.projectiles.retain(|proj| {
+            let dx = proj.position.x - player_pos.x;
+            let dy = proj.position.y - player_pos.y;
+            let dz = proj.position.z - player_pos.z;
+            let dist_sq = dx * dx + dy * dy + dz * dz;
+
+            if dist_sq < player_radius * player_radius {
+                damages.push(proj.damage);
+                false  // Remove projectile
+            } else {
+                true   // Keep projectile
+            }
+        });
+
+        damages
     }
 
     /// Get the closest animal to a position within range, returns (animal_id, distance)

@@ -41,16 +41,62 @@ pub enum BlockType {
     // Crafting items
     Stick,             // Crafted from planks, used in tools
     CraftingTable,     // Enables 3x3 crafting grid
+    // Functional blocks
+    DoorBottom,        // Lower half of door
+    DoorTop,           // Upper half of door
+    Bed,               // Bed block (skip night)
+    Furnace,           // Smelting furnace (inactive)
+    FurnaceLit,        // Smelting furnace (active)
+    // Cooked food
+    CookedPork,        // Cooked from raw pork, +8 hunger
+    CookedBeef,        // Cooked from raw beef, +8 hunger
+    CookedChicken,     // Cooked from raw chicken, +6 hunger
+    CookedMutton,      // Cooked from raw mutton, +6 hunger
+    // Smelted materials
+    IronIngot,         // Smelted from iron ore
+    GoldIngot,         // Smelted from gold ore
+    Glass,             // Smelted from sand
+    // Building blocks - Slabs
+    StoneSlabBottom,
+    StoneSlabTop,
+    WoodSlabBottom,
+    WoodSlabTop,
+    CobblestoneSlabBottom,
+    CobblestoneSlabTop,
+    // Building blocks - Stairs
+    StoneStairs,
+    WoodStairs,
+    CobblestoneStairs,
+    BrickStairs,
+    // Building blocks - Ladders & Trapdoors
+    Ladder,
+    WoodTrapdoor,
+    IronTrapdoor,
+    // Building blocks - Signs
+    SignPost,
+    WallSign,
+    // Building blocks - Fences
+    WoodFence,
+    StoneFence,
+    FenceGate,
+    // Building blocks - Glass Panes
+    GlassPane,
 }
 
 impl BlockType {
     /// Returns (hunger_restore, saturation_restore) if this is a food item
     pub fn food_properties(&self) -> Option<(f32, f32)> {
         match self {
+            // Raw food
             BlockType::RawPork => Some((3.0, 1.8)),
             BlockType::RawBeef => Some((3.0, 1.8)),
             BlockType::RawChicken => Some((2.0, 1.2)),
             BlockType::RawMutton => Some((2.0, 1.2)),
+            // Cooked food (much better!)
+            BlockType::CookedPork => Some((8.0, 12.8)),
+            BlockType::CookedBeef => Some((8.0, 12.8)),
+            BlockType::CookedChicken => Some((6.0, 7.2)),
+            BlockType::CookedMutton => Some((6.0, 9.6)),
             _ => None,
         }
     }
@@ -116,6 +162,80 @@ impl BlockType {
             | BlockType::Gravel | BlockType::Clay | BlockType::Snow => Some(ToolType::Shovel),
             _ => None,
         }
+    }
+
+    /// Collision shape for this block type
+    pub fn collision_shape(&self) -> CollisionShape {
+        match self {
+            // No collision
+            BlockType::Air | BlockType::Water | BlockType::Lava | BlockType::Torch
+            | BlockType::SignPost | BlockType::WallSign => CollisionShape::None,
+            // Bottom slabs
+            BlockType::StoneSlabBottom | BlockType::WoodSlabBottom
+            | BlockType::CobblestoneSlabBottom => CollisionShape::SlabBottom,
+            // Top slabs
+            BlockType::StoneSlabTop | BlockType::WoodSlabTop
+            | BlockType::CobblestoneSlabTop => CollisionShape::SlabTop,
+            // Fences (1.5 block height)
+            BlockType::WoodFence | BlockType::StoneFence | BlockType::FenceGate => CollisionShape::Fence,
+            // Everything else is a full block
+            _ => CollisionShape::FullBlock,
+        }
+    }
+
+    /// Check if this block is a slab (bottom variant)
+    pub fn is_bottom_slab(&self) -> bool {
+        matches!(self, BlockType::StoneSlabBottom | BlockType::WoodSlabBottom | BlockType::CobblestoneSlabBottom)
+    }
+
+    /// Check if this block is a slab (top variant)
+    pub fn is_top_slab(&self) -> bool {
+        matches!(self, BlockType::StoneSlabTop | BlockType::WoodSlabTop | BlockType::CobblestoneSlabTop)
+    }
+
+    /// Get the full block version of a slab (for combining two slabs)
+    pub fn slab_to_full_block(&self) -> Option<BlockType> {
+        match self {
+            BlockType::StoneSlabBottom | BlockType::StoneSlabTop => Some(BlockType::Stone),
+            BlockType::WoodSlabBottom | BlockType::WoodSlabTop => Some(BlockType::Planks),
+            BlockType::CobblestoneSlabBottom | BlockType::CobblestoneSlabTop => Some(BlockType::Cobblestone),
+            _ => None,
+        }
+    }
+
+    /// Get the bottom slab variant for a material
+    pub fn to_bottom_slab(&self) -> Option<BlockType> {
+        match self {
+            BlockType::Stone | BlockType::StoneSlabBottom | BlockType::StoneSlabTop => Some(BlockType::StoneSlabBottom),
+            BlockType::Planks | BlockType::WoodSlabBottom | BlockType::WoodSlabTop => Some(BlockType::WoodSlabBottom),
+            BlockType::Cobblestone | BlockType::CobblestoneSlabBottom | BlockType::CobblestoneSlabTop => Some(BlockType::CobblestoneSlabBottom),
+            _ => None,
+        }
+    }
+
+    /// Get the top slab variant for a material
+    pub fn to_top_slab(&self) -> Option<BlockType> {
+        match self {
+            BlockType::Stone | BlockType::StoneSlabBottom | BlockType::StoneSlabTop => Some(BlockType::StoneSlabTop),
+            BlockType::Planks | BlockType::WoodSlabBottom | BlockType::WoodSlabTop => Some(BlockType::WoodSlabTop),
+            BlockType::Cobblestone | BlockType::CobblestoneSlabBottom | BlockType::CobblestoneSlabTop => Some(BlockType::CobblestoneSlabTop),
+            _ => None,
+        }
+    }
+
+    /// Check if this block is a stair block
+    pub fn is_stairs(&self) -> bool {
+        matches!(self, BlockType::StoneStairs | BlockType::WoodStairs | BlockType::CobblestoneStairs | BlockType::BrickStairs)
+    }
+
+    /// Check if this block is a fence
+    pub fn is_fence(&self) -> bool {
+        matches!(self, BlockType::WoodFence | BlockType::StoneFence | BlockType::FenceGate)
+    }
+
+    /// Check if this block is a trapdoor
+    pub fn is_trapdoor(&self) -> bool {
+        matches!(self, BlockType::WoodTrapdoor | BlockType::IronTrapdoor)
     }
 }
 
@@ -337,6 +457,125 @@ pub enum TorchFace {
     West,   // Torch tilts toward -X (placed on +X face of solid block)
 }
 
+/// Direction a door or bed faces
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BlockFacing {
+    North,
+    South,
+    East,
+    West,
+}
+
+/// Collision shape for blocks with non-standard collision
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CollisionShape {
+    FullBlock,    // 1.0 height, full width
+    SlabBottom,   // 0.0-0.5 height
+    SlabTop,      // 0.5-1.0 height
+    Fence,        // 1.5 height, 0.25 width center post
+    None,         // No collision (signs, open trapdoors, torches)
+}
+
+/// Door state (open/closed and facing direction)
+#[derive(Clone, Copy, Debug)]
+pub struct DoorState {
+    pub open: bool,
+    pub facing: BlockFacing,
+}
+
+/// Bed data (head/foot position and facing)
+#[derive(Clone, Copy, Debug)]
+pub struct BedData {
+    pub facing: BlockFacing,
+    pub is_head: bool,
+}
+
+/// Furnace data (smelting state)
+#[derive(Clone, Debug)]
+pub struct FurnaceData {
+    pub input: Option<(BlockType, u32)>,
+    pub fuel: Option<(BlockType, u32)>,
+    pub output: Option<(BlockType, u32)>,
+    pub burn_time: f32,      // Remaining fuel burn time
+    pub max_burn_time: f32,  // Total burn time for current fuel
+    pub cook_time: f32,      // Progress on current item
+}
+
+impl FurnaceData {
+    pub fn new() -> Self {
+        Self {
+            input: None,
+            fuel: None,
+            output: None,
+            burn_time: 0.0,
+            max_burn_time: 0.0,
+            cook_time: 0.0,
+        }
+    }
+
+    /// Get fuel burn time for a fuel item
+    pub fn fuel_burn_time(fuel: BlockType) -> Option<f32> {
+        match fuel {
+            BlockType::Coal => Some(80.0),
+            BlockType::Wood | BlockType::Planks => Some(15.0),
+            BlockType::Stick => Some(5.0),
+            _ => None,
+        }
+    }
+
+    /// Get smelting recipe output and cook time
+    pub fn smelting_recipe(input: BlockType) -> Option<(BlockType, f32)> {
+        match input {
+            BlockType::Iron => Some((BlockType::IronIngot, 10.0)),
+            BlockType::Gold => Some((BlockType::GoldIngot, 10.0)),
+            BlockType::Sand => Some((BlockType::Glass, 10.0)),
+            BlockType::RawPork => Some((BlockType::CookedPork, 5.0)),
+            BlockType::RawBeef => Some((BlockType::CookedBeef, 5.0)),
+            BlockType::RawChicken => Some((BlockType::CookedChicken, 5.0)),
+            BlockType::RawMutton => Some((BlockType::CookedMutton, 5.0)),
+            _ => None,
+        }
+    }
+}
+
+/// Stair orientation data
+#[derive(Clone, Copy, Debug)]
+pub struct StairData {
+    pub facing: BlockFacing,  // Direction of low side
+    pub upside_down: bool,    // Inverted stairs for ceilings
+}
+
+/// Trapdoor state data
+#[derive(Clone, Copy, Debug)]
+pub struct TrapdoorData {
+    pub open: bool,
+    pub facing: BlockFacing,  // Hinge side
+    pub top_half: bool,       // Attached to top or bottom of block space
+}
+
+/// Sign text data
+#[derive(Clone, Debug)]
+pub struct SignData {
+    pub lines: [String; 4],
+    pub facing: BlockFacing,
+}
+
+impl SignData {
+    pub fn new(facing: BlockFacing) -> Self {
+        Self {
+            lines: [String::new(), String::new(), String::new(), String::new()],
+            facing,
+        }
+    }
+}
+
+/// Fence gate state data
+#[derive(Clone, Copy, Debug)]
+pub struct FenceGateData {
+    pub open: bool,
+    pub facing: BlockFacing,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Biome {
     Plains,
@@ -387,6 +626,15 @@ pub struct World {
     pub water_levels: HashMap<(i32, i32, i32), u8>,
     water_update_queue: VecDeque<(i32, i32, i32)>,
     seed: u32,
+    // Functional block data
+    pub door_states: HashMap<(i32, i32, i32), DoorState>,
+    pub bed_positions: HashMap<(i32, i32, i32), BedData>,
+    pub furnace_data: HashMap<(i32, i32, i32), FurnaceData>,
+    // Building block state data
+    pub stair_data: HashMap<(i32, i32, i32), StairData>,
+    pub trapdoor_data: HashMap<(i32, i32, i32), TrapdoorData>,
+    pub sign_data: HashMap<(i32, i32, i32), SignData>,
+    pub fence_gate_data: HashMap<(i32, i32, i32), FenceGateData>,
 }
 
 impl World {
@@ -430,6 +678,13 @@ impl World {
             water_levels: HashMap::new(),
             water_update_queue: VecDeque::new(),
             seed,
+            door_states: HashMap::new(),
+            bed_positions: HashMap::new(),
+            furnace_data: HashMap::new(),
+            stair_data: HashMap::new(),
+            trapdoor_data: HashMap::new(),
+            sign_data: HashMap::new(),
+            fence_gate_data: HashMap::new(),
         };
 
         // Load initial chunks around spawn
@@ -1896,18 +2151,61 @@ impl World {
         let chunk_z = z.div_euclid(Self::CHUNK_SIZE as i32);
         let local_x = x.rem_euclid(Self::CHUNK_SIZE as i32) as usize;
         let local_z = z.rem_euclid(Self::CHUNK_SIZE as i32) as usize;
-        
+
         if y < 0 || y >= Self::CHUNK_HEIGHT as i32 {
             return None;
         }
-        
+
         self.chunks.get(&(chunk_x, chunk_z))
             .and_then(|chunk| chunk.blocks.get(local_x))
             .and_then(|yz| yz.get(y as usize))
             .and_then(|z_blocks| z_blocks.get(local_z))
             .copied()
     }
-    
+
+    /// Check if a fence at (x, y, z) connects in a given direction
+    pub fn fence_connects(&self, x: i32, y: i32, z: i32, dir: BlockFacing) -> bool {
+        let (nx, nz) = match dir {
+            BlockFacing::North => (x, z - 1),
+            BlockFacing::South => (x, z + 1),
+            BlockFacing::East => (x + 1, z),
+            BlockFacing::West => (x - 1, z),
+        };
+
+        if let Some(neighbor) = self.get_block(nx, y, nz) {
+            // Connects to fences, fence gates, or solid blocks
+            neighbor.is_fence() ||
+            (neighbor != BlockType::Air &&
+             neighbor != BlockType::Water &&
+             neighbor != BlockType::Torch &&
+             neighbor.collision_shape() == CollisionShape::FullBlock)
+        } else {
+            false
+        }
+    }
+
+    /// Get glass pane connections at (x, y, z) - returns (north, south, east, west)
+    pub fn pane_connections(&self, x: i32, y: i32, z: i32) -> (bool, bool, bool, bool) {
+        let connects_to = |nx: i32, nz: i32| -> bool {
+            if let Some(neighbor) = self.get_block(nx, y, nz) {
+                neighbor == BlockType::GlassPane ||
+                neighbor == BlockType::Glass ||
+                (neighbor != BlockType::Air &&
+                 neighbor != BlockType::Water &&
+                 neighbor.collision_shape() == CollisionShape::FullBlock)
+            } else {
+                false
+            }
+        };
+
+        (
+            connects_to(x, z - 1), // north
+            connects_to(x, z + 1), // south
+            connects_to(x + 1, z), // east
+            connects_to(x - 1, z), // west
+        )
+    }
+
     pub fn _has_terrain_at(&self, x: i32, z: i32) -> bool {
         // Check if there's any solid terrain at this x,z position
         for y in 0..Self::CHUNK_HEIGHT {
@@ -2027,6 +2325,94 @@ impl World {
 
             // Mark adjacent chunks as dirty since torch doesn't occlude faces
             // and neighboring blocks need their faces regenerated
+            self.mark_neighbors_dirty(x, y, z);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn place_stairs(&mut self, x: i32, y: i32, z: i32, block_type: BlockType, facing: BlockFacing, upside_down: bool) -> bool {
+        if !block_type.is_stairs() {
+            return false;
+        }
+        if self.can_place_block_at(x, y, z) {
+            self.set_block(x, y, z, block_type);
+            self.stair_data.insert((x, y, z), StairData { facing, upside_down });
+            self.mark_neighbors_dirty(x, y, z);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn get_stair_data(&self, x: i32, y: i32, z: i32) -> Option<&StairData> {
+        self.stair_data.get(&(x, y, z))
+    }
+
+    /// Place a trapdoor
+    pub fn place_trapdoor(&mut self, x: i32, y: i32, z: i32, block_type: BlockType, facing: BlockFacing, top_half: bool) -> bool {
+        if !block_type.is_trapdoor() {
+            return false;
+        }
+        if self.can_place_block_at(x, y, z) {
+            self.set_block(x, y, z, block_type);
+            self.trapdoor_data.insert((x, y, z), TrapdoorData {
+                open: false,
+                facing,
+                top_half,
+            });
+            self.mark_neighbors_dirty(x, y, z);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Toggle a trapdoor open/closed
+    pub fn toggle_trapdoor(&mut self, x: i32, y: i32, z: i32) -> bool {
+        if let Some(data) = self.trapdoor_data.get_mut(&(x, y, z)) {
+            data.open = !data.open;
+            self.mark_neighbors_dirty(x, y, z);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn get_trapdoor_data(&self, x: i32, y: i32, z: i32) -> Option<&TrapdoorData> {
+        self.trapdoor_data.get(&(x, y, z))
+    }
+
+    /// Place a ladder - requires a solid wall behind it
+    pub fn place_ladder(&mut self, x: i32, y: i32, z: i32, face: TorchFace) -> bool {
+        // Ladders can only be placed on wall faces (not top)
+        if face == TorchFace::Top {
+            return false;
+        }
+
+        // Check there's a solid block behind the ladder
+        let (wall_x, wall_z) = match face {
+            TorchFace::North => (x, z + 1),  // Wall at +Z
+            TorchFace::South => (x, z - 1),  // Wall at -Z
+            TorchFace::East => (x - 1, z),   // Wall at -X
+            TorchFace::West => (x + 1, z),   // Wall at +X
+            TorchFace::Top => return false,
+        };
+
+        // Check wall is solid
+        if let Some(wall_block) = self.get_block(wall_x, y, wall_z) {
+            if wall_block.collision_shape() != CollisionShape::FullBlock {
+                return false;
+            }
+        } else {
+            return false;
+        }
+
+        if self.can_place_block_at(x, y, z) {
+            self.set_block(x, y, z, BlockType::Ladder);
+            // Reuse torch_orientations for ladder facing
+            self.torch_orientations.insert((x, y, z), face);
             self.mark_neighbors_dirty(x, y, z);
             true
         } else {
@@ -2381,5 +2767,281 @@ impl World {
 
         // Fallback: spawn at a safe default position
         Point3::new(0.5, 60.0, 0.5)
+    }
+
+    /// Create an explosion that destroys blocks in a sphere
+    /// Returns list of destroyed block positions and their types
+    pub fn create_explosion(&mut self, center: cgmath::Point3<f32>, radius: f32) -> Vec<((i32, i32, i32), BlockType)> {
+        let mut destroyed = Vec::new();
+        let center_x = center.x.floor() as i32;
+        let center_y = center.y.floor() as i32;
+        let center_z = center.z.floor() as i32;
+        let radius_int = radius.ceil() as i32;
+        let radius_sq = radius * radius;
+
+        // Check blocks in a cube around the center
+        for dx in -radius_int..=radius_int {
+            for dy in -radius_int..=radius_int {
+                for dz in -radius_int..=radius_int {
+                    let x = center_x + dx;
+                    let y = center_y + dy;
+                    let z = center_z + dz;
+
+                    // Check if within sphere
+                    let dist_sq = (dx as f32).powi(2) + (dy as f32).powi(2) + (dz as f32).powi(2);
+                    if dist_sq > radius_sq {
+                        continue;
+                    }
+
+                    // Get current block
+                    if let Some(block) = self.get_block(x, y, z) {
+                        // Don't destroy air, and don't destroy below y=1 (pretend bedrock)
+                        if block == BlockType::Air || y < 1 {
+                            continue;
+                        }
+
+                        // Destroy the block
+                        self.set_block(x, y, z, BlockType::Air);
+                        destroyed.push(((x, y, z), block));
+                    }
+                }
+            }
+        }
+
+        destroyed
+    }
+
+    // ========== Door System ==========
+
+    /// Place a door at the given position (creates both bottom and top halves)
+    /// Returns true if door was placed successfully
+    pub fn place_door(&mut self, x: i32, y: i32, z: i32, facing: BlockFacing) -> bool {
+        // Check if both positions are air
+        let bottom_clear = self.get_block(x, y, z) == Some(BlockType::Air);
+        let top_clear = self.get_block(x, y + 1, z) == Some(BlockType::Air);
+
+        if !bottom_clear || !top_clear {
+            return false;
+        }
+
+        // Place door blocks
+        self.set_block(x, y, z, BlockType::DoorBottom);
+        self.set_block(x, y + 1, z, BlockType::DoorTop);
+
+        // Store door state (only for bottom position)
+        self.door_states.insert((x, y, z), DoorState { open: false, facing });
+
+        true
+    }
+
+    /// Toggle a door open/closed. Works with either top or bottom position.
+    /// Returns the new open state, or None if no door found.
+    pub fn toggle_door(&mut self, x: i32, y: i32, z: i32) -> Option<bool> {
+        // Find the bottom of the door
+        let bottom_pos = if self.get_block(x, y, z) == Some(BlockType::DoorTop) {
+            (x, y - 1, z)
+        } else if self.get_block(x, y, z) == Some(BlockType::DoorBottom) {
+            (x, y, z)
+        } else {
+            return None;
+        };
+
+        // Toggle the door state
+        if let Some(state) = self.door_states.get_mut(&bottom_pos) {
+            state.open = !state.open;
+            Some(state.open)
+        } else {
+            None
+        }
+    }
+
+    /// Check if a door at this position is open
+    pub fn is_door_open(&self, x: i32, y: i32, z: i32) -> bool {
+        // Find the bottom of the door
+        let bottom_pos = if self.get_block(x, y, z) == Some(BlockType::DoorTop) {
+            (x, y - 1, z)
+        } else {
+            (x, y, z)
+        };
+
+        self.door_states.get(&bottom_pos).map(|s| s.open).unwrap_or(false)
+    }
+
+    /// Remove a door (when broken)
+    pub fn remove_door(&mut self, x: i32, y: i32, z: i32) {
+        // Find the bottom of the door
+        let (bottom_x, bottom_y, bottom_z) = if self.get_block(x, y, z) == Some(BlockType::DoorTop) {
+            (x, y - 1, z)
+        } else {
+            (x, y, z)
+        };
+
+        self.set_block(bottom_x, bottom_y, bottom_z, BlockType::Air);
+        self.set_block(bottom_x, bottom_y + 1, bottom_z, BlockType::Air);
+        self.door_states.remove(&(bottom_x, bottom_y, bottom_z));
+    }
+
+    // ========== Bed System ==========
+
+    /// Place a bed at the given position (creates head and foot)
+    /// Returns true if bed was placed successfully
+    pub fn place_bed(&mut self, x: i32, y: i32, z: i32, facing: BlockFacing) -> bool {
+        // Calculate second position based on facing
+        let (dx, dz) = match facing {
+            BlockFacing::North => (0, -1),
+            BlockFacing::South => (0, 1),
+            BlockFacing::East => (1, 0),
+            BlockFacing::West => (-1, 0),
+        };
+
+        let (foot_x, foot_z) = (x, z);
+        let (head_x, head_z) = (x + dx, z + dz);
+
+        // Check if both positions are air
+        let foot_clear = self.get_block(foot_x, y, foot_z) == Some(BlockType::Air);
+        let head_clear = self.get_block(head_x, y, head_z) == Some(BlockType::Air);
+
+        // Check for solid ground below
+        let foot_ground = self.get_block(foot_x, y - 1, foot_z).map(|b| b != BlockType::Air).unwrap_or(false);
+        let head_ground = self.get_block(head_x, y - 1, head_z).map(|b| b != BlockType::Air).unwrap_or(false);
+
+        if !foot_clear || !head_clear || !foot_ground || !head_ground {
+            return false;
+        }
+
+        // Place bed blocks
+        self.set_block(foot_x, y, foot_z, BlockType::Bed);
+        self.set_block(head_x, y, head_z, BlockType::Bed);
+
+        // Store bed data
+        self.bed_positions.insert((foot_x, y, foot_z), BedData { facing, is_head: false });
+        self.bed_positions.insert((head_x, y, head_z), BedData { facing, is_head: true });
+
+        true
+    }
+
+    /// Remove a bed (when broken)
+    pub fn remove_bed(&mut self, x: i32, y: i32, z: i32) {
+        if let Some(bed_data) = self.bed_positions.get(&(x, y, z)).copied() {
+            let (dx, dz) = match bed_data.facing {
+                BlockFacing::North => (0, -1),
+                BlockFacing::South => (0, 1),
+                BlockFacing::East => (1, 0),
+                BlockFacing::West => (-1, 0),
+            };
+
+            // Find foot and head positions
+            let (foot_x, foot_z, head_x, head_z) = if bed_data.is_head {
+                (x - dx, z - dz, x, z)
+            } else {
+                (x, z, x + dx, z + dz)
+            };
+
+            self.set_block(foot_x, y, foot_z, BlockType::Air);
+            self.set_block(head_x, y, head_z, BlockType::Air);
+            self.bed_positions.remove(&(foot_x, y, foot_z));
+            self.bed_positions.remove(&(head_x, y, head_z));
+        }
+    }
+
+    // ========== Furnace System ==========
+
+    /// Place a furnace at the given position
+    pub fn place_furnace(&mut self, x: i32, y: i32, z: i32) -> bool {
+        if self.get_block(x, y, z) != Some(BlockType::Air) {
+            return false;
+        }
+
+        self.set_block(x, y, z, BlockType::Furnace);
+        self.furnace_data.insert((x, y, z), FurnaceData::new());
+        true
+    }
+
+    /// Remove a furnace and return its contents
+    pub fn remove_furnace(&mut self, x: i32, y: i32, z: i32) -> Option<FurnaceData> {
+        self.set_block(x, y, z, BlockType::Air);
+        self.furnace_data.remove(&(x, y, z))
+    }
+
+    /// Get mutable reference to furnace data at position
+    pub fn get_furnace_mut(&mut self, x: i32, y: i32, z: i32) -> Option<&mut FurnaceData> {
+        self.furnace_data.get_mut(&(x, y, z))
+    }
+
+    /// Get reference to furnace data at position
+    pub fn get_furnace(&self, x: i32, y: i32, z: i32) -> Option<&FurnaceData> {
+        self.furnace_data.get(&(x, y, z))
+    }
+
+    /// Update all furnaces (call each frame)
+    pub fn update_furnaces(&mut self, dt: f32) {
+        let mut updates: Vec<((i32, i32, i32), bool)> = Vec::new();
+
+        for (pos, data) in self.furnace_data.iter_mut() {
+            let was_burning = data.burn_time > 0.0;
+
+            // Process fuel consumption
+            if data.burn_time > 0.0 {
+                data.burn_time -= dt;
+            }
+
+            // Try to start burning fuel if we have input and no current burn
+            if data.burn_time <= 0.0 {
+                if let Some((fuel_type, fuel_qty)) = data.fuel.as_mut() {
+                    if let Some(burn_time) = FurnaceData::fuel_burn_time(*fuel_type) {
+                        // Check if we have something to smelt
+                        if data.input.is_some() {
+                            data.burn_time = burn_time;
+                            data.max_burn_time = burn_time;
+                            *fuel_qty -= 1;
+                            if *fuel_qty == 0 {
+                                data.fuel = None;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Process smelting if burning
+            if data.burn_time > 0.0 {
+                if let Some((input_type, input_qty)) = data.input.as_mut() {
+                    if let Some((output_type, cook_time)) = FurnaceData::smelting_recipe(*input_type) {
+                        data.cook_time += dt;
+
+                        // Item finished cooking
+                        if data.cook_time >= cook_time {
+                            data.cook_time = 0.0;
+                            *input_qty -= 1;
+                            if *input_qty == 0 {
+                                data.input = None;
+                            }
+
+                            // Add to output
+                            if let Some((_, output_qty)) = data.output.as_mut() {
+                                *output_qty += 1;
+                            } else {
+                                data.output = Some((output_type, 1));
+                            }
+                        }
+                    }
+                } else {
+                    data.cook_time = 0.0;
+                }
+            } else {
+                data.cook_time = 0.0;
+            }
+
+            // Track if burning state changed
+            let is_burning = data.burn_time > 0.0;
+            if was_burning != is_burning {
+                updates.push((*pos, is_burning));
+            }
+        }
+
+        // Update furnace block types based on burning state
+        for ((x, y, z), is_burning) in updates {
+            let new_type = if is_burning { BlockType::FurnaceLit } else { BlockType::Furnace };
+            self.set_block(x, y, z, new_type);
+        }
     }
 }

@@ -58,6 +58,7 @@ fn main() {
     let mut pause_menu = PauseMenu::new();
     let mut chest_ui = ChestUI::new();
     let mut crafting_ui = CraftingUI::new();
+    let mut furnace_ui = ui::FurnaceUI::new();
     let recipe_registry = RecipeRegistry::new();
     let mut entity_manager = EntityManager::new();
     let mut particle_system = ParticleSystem::new();
@@ -100,6 +101,11 @@ fn main() {
                             } else if chest_ui.open {
                                 // Close chest UI first
                                 chest_ui.close();
+                                mouse_captured = true;
+                                set_cursor_captured(&window, true);
+                            } else if furnace_ui.open {
+                                // Close furnace UI
+                                furnace_ui.close();
                                 mouse_captured = true;
                                 set_cursor_captured(&window, true);
                             } else if pause_menu.visible {
@@ -273,6 +279,79 @@ fn main() {
                                     _ => {}
                                 }
                             }
+                        } else if furnace_ui.open {
+                            // Handle furnace UI navigation
+                            if is_pressed {
+                                match keycode {
+                                    VirtualKeyCode::Up | VirtualKeyCode::W => furnace_ui.navigate(0, -1),
+                                    VirtualKeyCode::Down | VirtualKeyCode::S => furnace_ui.navigate(0, 1),
+                                    VirtualKeyCode::Left | VirtualKeyCode::A => furnace_ui.navigate(-1, 0),
+                                    VirtualKeyCode::Right | VirtualKeyCode::D => furnace_ui.navigate(1, 0),
+                                    VirtualKeyCode::Return => {
+                                        // Transfer items between furnace slots and inventory
+                                        if let Some(furnace_pos) = furnace_ui.furnace_pos {
+                                            if let Some(furnace_data) = world.get_furnace_mut(furnace_pos.0, furnace_pos.1, furnace_pos.2) {
+                                                match furnace_ui.selected_section {
+                                                    0 => {
+                                                        // Input slot - place smeltable item or take back
+                                                        if furnace_data.input.is_some() {
+                                                            // Take item back
+                                                            if let Some((bt, qty)) = furnace_data.input.take() {
+                                                                for _ in 0..qty {
+                                                                    inventory.add_block(bt);
+                                                                }
+                                                            }
+                                                        } else if let Some(block_type) = inventory.get_selected_block() {
+                                                            // Check if smeltable
+                                                            if world::FurnaceData::smelting_recipe(block_type).is_some() {
+                                                                furnace_data.input = Some((block_type, 1));
+                                                                inventory.decrement_selected();
+                                                            }
+                                                        }
+                                                    }
+                                                    1 => {
+                                                        // Fuel slot - place fuel or take back
+                                                        if furnace_data.fuel.is_some() {
+                                                            // Take fuel back
+                                                            if let Some((bt, qty)) = furnace_data.fuel.take() {
+                                                                for _ in 0..qty {
+                                                                    inventory.add_block(bt);
+                                                                }
+                                                            }
+                                                        } else if let Some(block_type) = inventory.get_selected_block() {
+                                                            // Check if fuel
+                                                            if world::FurnaceData::fuel_burn_time(block_type).is_some() {
+                                                                furnace_data.fuel = Some((block_type, 1));
+                                                                inventory.decrement_selected();
+                                                            }
+                                                        }
+                                                    }
+                                                    2 => {
+                                                        // Output slot - take smelted items
+                                                        if let Some((bt, qty)) = furnace_data.output.take() {
+                                                            for _ in 0..qty {
+                                                                inventory.add_block(bt);
+                                                            }
+                                                        }
+                                                    }
+                                                    3 => {
+                                                        // Inventory section - select hotbar slot
+                                                        inventory.select_slot(furnace_ui.selected_slot);
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+                                        }
+                                    }
+                                    VirtualKeyCode::Key1 => { furnace_ui.selected_section = 3; furnace_ui.selected_slot = 0; }
+                                    VirtualKeyCode::Key2 => { furnace_ui.selected_section = 3; furnace_ui.selected_slot = 1; }
+                                    VirtualKeyCode::Key3 => { furnace_ui.selected_section = 3; furnace_ui.selected_slot = 2; }
+                                    VirtualKeyCode::Key4 => { furnace_ui.selected_section = 3; furnace_ui.selected_slot = 3; }
+                                    VirtualKeyCode::Key5 => { furnace_ui.selected_section = 3; furnace_ui.selected_slot = 4; }
+                                    VirtualKeyCode::Key6 => { furnace_ui.selected_section = 3; furnace_ui.selected_slot = 5; }
+                                    _ => {}
+                                }
+                            }
                         } else {
                             if is_pressed {
                                 match keycode {
@@ -292,16 +371,136 @@ fn main() {
                                                 // Don't process further if we tried to eat
                                             } else if let Some((x, y, z)) = targeted_block {
                                                 // Check for interactable blocks first
-                                                if world.get_block(x, y, z) == Some(world::BlockType::CraftingTable) {
+                                                let target_block = world.get_block(x, y, z);
+                                                if target_block == Some(world::BlockType::CraftingTable) {
                                                     // Open crafting table UI
                                                     crafting_ui.open_crafting_table((x, y, z));
                                                     mouse_captured = false;
                                                     set_cursor_captured(&window, false);
-                                                } else if world.get_block(x, y, z) == Some(world::BlockType::Chest) {
+                                                } else if target_block == Some(world::BlockType::Chest) {
                                                     // Open chest UI
                                                     chest_ui.open_chest((x, y, z));
                                                     mouse_captured = false;
                                                     set_cursor_captured(&window, false);
+                                                } else if target_block == Some(world::BlockType::DoorBottom)
+                                                       || target_block == Some(world::BlockType::DoorTop) {
+                                                    // Toggle door open/closed
+                                                    if let Some(now_open) = world.toggle_door(x, y, z) {
+                                                        if let Some(ref audio) = audio_manager {
+                                                            if now_open {
+                                                                audio.play_block_break(world::BlockType::Planks);
+                                                            } else {
+                                                                audio.play_block_place(world::BlockType::Planks);
+                                                            }
+                                                        }
+                                                    }
+                                                } else if target_block == Some(world::BlockType::WoodTrapdoor)
+                                                       || target_block == Some(world::BlockType::IronTrapdoor) {
+                                                    // Toggle trapdoor open/closed
+                                                    if world.toggle_trapdoor(x, y, z) {
+                                                        if let Some(ref audio) = audio_manager {
+                                                            audio.play_block_place(world::BlockType::Planks);
+                                                        }
+                                                    }
+                                                } else if target_block == Some(world::BlockType::Bed) {
+                                                    // Try to sleep (only at night)
+                                                    let time_of_day = renderer.get_time_of_day();
+                                                    let is_night = time_of_day < 0.25 || time_of_day > 0.75;
+                                                    if is_night {
+                                                        // Skip to morning
+                                                        renderer.set_time_of_day(0.3);
+                                                        // TODO: Could set spawn point here
+                                                    }
+                                                } else if target_block == Some(world::BlockType::Furnace)
+                                                       || target_block == Some(world::BlockType::FurnaceLit) {
+                                                    // Open furnace UI
+                                                    furnace_ui.open_furnace((x, y, z));
+                                                    mouse_captured = false;
+                                                    set_cursor_captured(&window, false);
+                                                } else if block_type.is_bottom_slab() || block_type.is_top_slab() {
+                                                    // Slab placement with top/bottom detection
+                                                    if let Some((pos, is_top, hit_pos, hit_block)) = camera.get_slab_placement(&world, 5.0) {
+                                                        let (x, y, z) = pos;
+
+                                                        // Check if we can combine two slabs into a full block
+                                                        if let Some(existing) = world.get_block(x, y, z) {
+                                                            if existing.is_bottom_slab() && block_type.is_bottom_slab() {
+                                                                // Placing bottom slab on air that has bottom slab? This shouldn't happen
+                                                                // But if target block is a matching slab, combine them
+                                                            }
+                                                        }
+
+                                                        // Check if target block is a matching slab we can combine with
+                                                        if hit_block.is_bottom_slab() && block_type.to_bottom_slab() == hit_block.to_bottom_slab() {
+                                                            // Combine into full block
+                                                            if let Some(full_block) = hit_block.slab_to_full_block() {
+                                                                let (hx, hy, hz) = hit_pos;
+                                                                world.set_block(hx, hy, hz, full_block);
+                                                                inventory.decrement_selected();
+                                                                if let Some(ref audio) = audio_manager {
+                                                                    audio.play_block_place(full_block);
+                                                                }
+                                                            }
+                                                        } else if hit_block.is_top_slab() && block_type.to_top_slab() == hit_block.to_top_slab() {
+                                                            // Combine into full block
+                                                            if let Some(full_block) = hit_block.slab_to_full_block() {
+                                                                let (hx, hy, hz) = hit_pos;
+                                                                world.set_block(hx, hy, hz, full_block);
+                                                                inventory.decrement_selected();
+                                                                if let Some(ref audio) = audio_manager {
+                                                                    audio.play_block_place(full_block);
+                                                                }
+                                                            }
+                                                        } else {
+                                                            // Place the appropriate slab variant
+                                                            let slab_type = if is_top {
+                                                                block_type.to_top_slab().unwrap_or(block_type)
+                                                            } else {
+                                                                block_type.to_bottom_slab().unwrap_or(block_type)
+                                                            };
+
+                                                            if world.place_block(x, y, z, slab_type) {
+                                                                inventory.decrement_selected();
+                                                                if let Some(ref audio) = audio_manager {
+                                                                    audio.play_block_place(slab_type);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                } else if block_type.is_stairs() {
+                                                    // Stairs need facing direction and upside-down detection
+                                                    if let Some((pos, facing, upside_down)) = camera.get_stair_placement(&world, 5.0) {
+                                                        let (x, y, z) = pos;
+                                                        if world.place_stairs(x, y, z, block_type, facing, upside_down) {
+                                                            inventory.decrement_selected();
+                                                            if let Some(ref audio) = audio_manager {
+                                                                audio.play_block_place(block_type);
+                                                            }
+                                                        }
+                                                    }
+                                                } else if block_type == world::BlockType::Ladder {
+                                                    // Ladders need wall placement
+                                                    if let Some((pos, face)) = camera.get_block_placement_with_face(&world, 5.0) {
+                                                        let (x, y, z) = pos;
+                                                        if world.place_ladder(x, y, z, face) {
+                                                            inventory.decrement_selected();
+                                                            if let Some(ref audio) = audio_manager {
+                                                                audio.play_block_place(block_type);
+                                                            }
+                                                        }
+                                                    }
+                                                } else if block_type.is_trapdoor() {
+                                                    // Trapdoors need top/bottom detection
+                                                    if let Some((pos, is_top, _, _)) = camera.get_slab_placement(&world, 5.0) {
+                                                        let (x, y, z) = pos;
+                                                        let facing = camera.get_block_facing();
+                                                        if world.place_trapdoor(x, y, z, block_type, facing, is_top) {
+                                                            inventory.decrement_selected();
+                                                            if let Some(ref audio) = audio_manager {
+                                                                audio.play_block_place(block_type);
+                                                            }
+                                                        }
+                                                    }
                                                 } else if block_type == world::BlockType::Torch {
                                                     // Torches need special placement with face orientation
                                                     if let Some((pos, face)) = camera.get_block_placement_with_face(&world, 5.0) {
@@ -327,7 +526,78 @@ fn main() {
                                                 }
                                             } else {
                                                 // No targeted block, just try to place
-                                                if block_type == world::BlockType::Torch {
+                                                if block_type.is_bottom_slab() || block_type.is_top_slab() {
+                                                    // Slab placement
+                                                    if let Some((pos, is_top, hit_pos, hit_block)) = camera.get_slab_placement(&world, 5.0) {
+                                                        let (x, y, z) = pos;
+
+                                                        // Check if target block is a matching slab we can combine with
+                                                        if hit_block.is_bottom_slab() && block_type.to_bottom_slab() == hit_block.to_bottom_slab() {
+                                                            if let Some(full_block) = hit_block.slab_to_full_block() {
+                                                                let (hx, hy, hz) = hit_pos;
+                                                                world.set_block(hx, hy, hz, full_block);
+                                                                inventory.decrement_selected();
+                                                                if let Some(ref audio) = audio_manager {
+                                                                    audio.play_block_place(full_block);
+                                                                }
+                                                            }
+                                                        } else if hit_block.is_top_slab() && block_type.to_top_slab() == hit_block.to_top_slab() {
+                                                            if let Some(full_block) = hit_block.slab_to_full_block() {
+                                                                let (hx, hy, hz) = hit_pos;
+                                                                world.set_block(hx, hy, hz, full_block);
+                                                                inventory.decrement_selected();
+                                                                if let Some(ref audio) = audio_manager {
+                                                                    audio.play_block_place(full_block);
+                                                                }
+                                                            }
+                                                        } else {
+                                                            let slab_type = if is_top {
+                                                                block_type.to_top_slab().unwrap_or(block_type)
+                                                            } else {
+                                                                block_type.to_bottom_slab().unwrap_or(block_type)
+                                                            };
+                                                            if world.place_block(x, y, z, slab_type) {
+                                                                inventory.decrement_selected();
+                                                                if let Some(ref audio) = audio_manager {
+                                                                    audio.play_block_place(slab_type);
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                } else if block_type.is_stairs() {
+                                                    // Stair placement
+                                                    if let Some((pos, facing, upside_down)) = camera.get_stair_placement(&world, 5.0) {
+                                                        let (x, y, z) = pos;
+                                                        if world.place_stairs(x, y, z, block_type, facing, upside_down) {
+                                                            inventory.decrement_selected();
+                                                            if let Some(ref audio) = audio_manager {
+                                                                audio.play_block_place(block_type);
+                                                            }
+                                                        }
+                                                    }
+                                                } else if block_type == world::BlockType::Ladder {
+                                                    if let Some((pos, face)) = camera.get_block_placement_with_face(&world, 5.0) {
+                                                        let (x, y, z) = pos;
+                                                        if world.place_ladder(x, y, z, face) {
+                                                            inventory.decrement_selected();
+                                                            if let Some(ref audio) = audio_manager {
+                                                                audio.play_block_place(block_type);
+                                                            }
+                                                        }
+                                                    }
+                                                } else if block_type.is_trapdoor() {
+                                                    // Trapdoors need top/bottom detection
+                                                    if let Some((pos, is_top, _, _)) = camera.get_slab_placement(&world, 5.0) {
+                                                        let (x, y, z) = pos;
+                                                        let facing = camera.get_block_facing();
+                                                        if world.place_trapdoor(x, y, z, block_type, facing, is_top) {
+                                                            inventory.decrement_selected();
+                                                            if let Some(ref audio) = audio_manager {
+                                                                audio.play_block_place(block_type);
+                                                            }
+                                                        }
+                                                    }
+                                                } else if block_type == world::BlockType::Torch {
                                                     if let Some((pos, face)) = camera.get_block_placement_with_face(&world, 5.0) {
                                                         let (x, y, z) = pos;
                                                         if world.place_torch(x, y, z, face) {
@@ -537,13 +807,45 @@ fn main() {
                     world.update_loaded_chunks(camera.position);
                     // Process water flow updates (limit per frame for performance)
                     world.process_water_updates(50);
+                    // Update furnace smelting
+                    world.update_furnaces(dt);
                     camera.update(dt, &world);
                     camera.update_survival(dt, &world);
-                    entity_manager.update(dt, &world, camera.position);
+                    entity_manager.update(dt, &world, camera.position, renderer.get_time_of_day());
 
                     // Check for hostile mob attacks on player
                     if !camera.is_dead {
                         for (damage, knockback) in entity_manager.check_hostile_attacks(camera.position) {
+                            camera.take_damage(damage, Some(knockback));
+                        }
+                        // Check for projectile (arrow) hits on player
+                        for damage in entity_manager.check_projectile_player_collisions(camera.position) {
+                            camera.take_damage(damage, None);
+                        }
+                    }
+
+                    // Handle creeper explosions
+                    let exploding_creepers: Vec<_> = entity_manager.get_hostile_mobs().iter()
+                        .filter(|m| m.mob_type == entity::HostileMobType::Creeper && m.is_dead())
+                        .map(|m| m.position)
+                        .collect();
+                    for explosion_pos in exploding_creepers {
+                        // Create explosion in the world
+                        let _destroyed = world.create_explosion(explosion_pos, entity::CREEPER_EXPLOSION_RADIUS);
+
+                        // Damage player if within explosion radius
+                        let dist = ((camera.position.x - explosion_pos.x).powi(2)
+                            + (camera.position.y - explosion_pos.y).powi(2)
+                            + (camera.position.z - explosion_pos.z).powi(2)).sqrt();
+                        if dist < entity::CREEPER_EXPLOSION_RADIUS * 2.0 {
+                            // Damage falls off with distance
+                            let damage_factor = 1.0 - (dist / (entity::CREEPER_EXPLOSION_RADIUS * 2.0));
+                            let damage = entity::CREEPER_EXPLOSION_DAMAGE * damage_factor;
+                            let knockback = cgmath::Vector3::new(
+                                (camera.position.x - explosion_pos.x).signum() * 12.0,
+                                8.0,
+                                (camera.position.z - explosion_pos.z).signum() * 12.0,
+                            );
                             camera.take_damage(damage, Some(knockback));
                         }
                     }
@@ -628,7 +930,7 @@ fn main() {
             Event::RedrawRequested(_) => {
                 if is_loaded {
                     let is_underwater = camera.is_underwater(&world);
-                    renderer.render(&camera, &mut world, &inventory, targeted_block, &entity_manager, &particle_system, is_underwater, &debug_info, &pause_menu, &chest_ui, &crafting_ui, &recipe_registry, &lightning_system, &weather_state);
+                    renderer.render(&camera, &mut world, &inventory, targeted_block, &entity_manager, &particle_system, is_underwater, &debug_info, &pause_menu, &chest_ui, &crafting_ui, &furnace_ui, &recipe_registry, &lightning_system, &weather_state);
                 } else {
                     // Process loading stages
                     let (progress, message) = match loading_stage {

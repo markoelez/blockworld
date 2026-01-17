@@ -120,6 +120,63 @@ impl ChestUI {
     }
 }
 
+// ============ FURNACE UI ============
+
+pub struct FurnaceUI {
+    pub open: bool,
+    pub furnace_pos: Option<(i32, i32, i32)>,
+    pub selected_section: usize,  // 0=input, 1=fuel, 2=output, 3=inventory
+    pub selected_slot: usize,     // For inventory section
+}
+
+impl FurnaceUI {
+    pub fn new() -> Self {
+        Self {
+            open: false,
+            furnace_pos: None,
+            selected_section: 0,
+            selected_slot: 0,
+        }
+    }
+
+    pub fn open_furnace(&mut self, pos: (i32, i32, i32)) {
+        self.open = true;
+        self.furnace_pos = Some(pos);
+        self.selected_section = 0;
+        self.selected_slot = 0;
+    }
+
+    pub fn close(&mut self) {
+        self.open = false;
+        self.furnace_pos = None;
+    }
+
+    pub fn navigate(&mut self, dx: i32, dy: i32) {
+        if self.selected_section < 3 {
+            // In furnace slots section
+            if dy > 0 {
+                // Move down to inventory
+                self.selected_section = 3;
+                self.selected_slot = 4; // Middle of inventory
+            } else if dx != 0 {
+                // Move horizontally between input/fuel/output
+                let new_section = (self.selected_section as i32 + dx).clamp(0, 2) as usize;
+                self.selected_section = new_section;
+            }
+        } else {
+            // In inventory section
+            if dy < 0 {
+                // Move up to furnace slots
+                self.selected_section = 0; // Input
+            } else {
+                // Navigate inventory
+                let new_slot = (self.selected_slot as i32 + dx).clamp(0, 8) as usize;
+                self.selected_slot = new_slot;
+            }
+        }
+    }
+}
+
 // ============ CRAFTING SYSTEM ============
 
 /// Represents a crafting recipe
@@ -920,6 +977,41 @@ impl UIRenderer {
             // Crafting items
             BlockType::Stick => 53.0,
             BlockType::CraftingTable => 54.0,
+            // Functional blocks
+            BlockType::DoorBottom | BlockType::DoorTop => 55.0,
+            BlockType::Bed => 56.0,
+            BlockType::Furnace => 57.0,
+            BlockType::FurnaceLit => 58.0,
+            // Cooked food
+            BlockType::CookedPork => 80.0,
+            BlockType::CookedBeef => 81.0,
+            BlockType::CookedChicken => 82.0,
+            BlockType::CookedMutton => 83.0,
+            // Smelted materials
+            BlockType::IronIngot => 84.0,
+            BlockType::GoldIngot => 85.0,
+            BlockType::Glass => 86.0,
+            // Building blocks - Slabs
+            BlockType::StoneSlabBottom | BlockType::StoneSlabTop => 87.0,
+            BlockType::WoodSlabBottom | BlockType::WoodSlabTop => 88.0,
+            BlockType::CobblestoneSlabBottom | BlockType::CobblestoneSlabTop => 89.0,
+            // Building blocks - Stairs
+            BlockType::StoneStairs => 90.0,
+            BlockType::WoodStairs => 91.0,
+            BlockType::CobblestoneStairs => 92.0,
+            BlockType::BrickStairs => 93.0,
+            // Building blocks - Ladders & Trapdoors
+            BlockType::Ladder => 94.0,
+            BlockType::WoodTrapdoor => 95.0,
+            BlockType::IronTrapdoor => 96.0,
+            // Building blocks - Signs
+            BlockType::SignPost | BlockType::WallSign => 97.0,
+            // Building blocks - Fences
+            BlockType::WoodFence => 98.0,
+            BlockType::StoneFence => 99.0,
+            BlockType::FenceGate => 100.0,
+            // Building blocks - Glass Panes
+            BlockType::GlassPane => 101.0,
             BlockType::Air | BlockType::Barrier => 0.0,
         }
     }
@@ -2395,6 +2487,300 @@ impl UIRenderer {
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("Crafting UI Pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            render_pass.set_pipeline(&self.ui_render_pipeline);
+            render_pass.set_bind_group(0, texture_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+            render_pass.draw_indexed(0..indices.len() as u32, 0, 0..1);
+        }
+
+        queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    /// Render furnace UI overlay
+    pub fn render_furnace_ui(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        texture_bind_group: &wgpu::BindGroup,
+        furnace_ui: &FurnaceUI,
+        furnace_data: &crate::world::FurnaceData,
+        inventory: &Inventory,
+    ) {
+        let mut vertices: Vec<UIVertex> = Vec::new();
+        let mut indices: Vec<u16> = Vec::new();
+
+        // Full screen dark overlay
+        let overlay_color = [0.0, 0.0, 0.0, 0.6];
+        let base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [-1.0, -1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [1.0, -1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [1.0, 1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [-1.0, 1.0], tex_coords: [0.0, 0.0], color: overlay_color, use_texture: 0.0 });
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+
+        // Layout constants
+        let slot_size = 0.07;
+        let panel_border = 0.015;
+
+        // Main container panel
+        let panel_width = 0.6;
+        let panel_height = 0.65;
+        let panel_x = -panel_width / 2.0;
+        let panel_y = -0.35;
+
+        let (panel_verts, panel_inds) = Self::generate_nine_slice_panel(
+            panel_x, panel_y, panel_width, panel_height,
+            panel_border, [1.0, 1.0, 1.0, 0.95], vertices.len() as u16
+        );
+        vertices.extend(panel_verts);
+        indices.extend(panel_inds);
+
+        // Title "Furnace"
+        let (title_verts, title_inds) = Self::generate_centered_text(
+            "Furnace", 0.0, 0.22, 0.05, [1.0, 1.0, 1.0, 1.0], vertices.len() as u16
+        );
+        vertices.extend(title_verts);
+        indices.extend(title_inds);
+
+        // Input slot (top center)
+        let input_x = 0.0;
+        let input_y = 0.12;
+        let slot_type = if furnace_ui.selected_section == 0 { 1 } else { 0 };
+        let (slot_verts, slot_inds) = Self::generate_slot_vertices(
+            input_x, input_y, slot_size, slot_type,
+            [1.0, 1.0, 1.0, 1.0], vertices.len() as u16
+        );
+        vertices.extend(slot_verts);
+        indices.extend(slot_inds);
+
+        // Draw input item
+        if let Some((block_type, qty)) = furnace_data.input {
+            let block_type_val = Self::block_type_to_ui_index(block_type);
+            let icon_size = slot_size * 0.7;
+            let icon_base = vertices.len() as u16;
+            vertices.push(UIVertex { position: [input_x - icon_size, input_y - icon_size], tex_coords: [0.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
+            vertices.push(UIVertex { position: [input_x + icon_size, input_y - icon_size], tex_coords: [1.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
+            vertices.push(UIVertex { position: [input_x + icon_size, input_y + icon_size], tex_coords: [1.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
+            vertices.push(UIVertex { position: [input_x - icon_size, input_y + icon_size], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
+            indices.extend_from_slice(&[icon_base, icon_base + 1, icon_base + 2, icon_base, icon_base + 2, icon_base + 3]);
+            if qty > 1 {
+                let qty_str = qty.to_string();
+                let (qty_verts, qty_inds) = Self::generate_text_with_shadow(
+                    &qty_str, input_x - slot_size * 0.1, input_y - slot_size * 0.75, slot_size * 0.6,
+                    [1.0, 1.0, 1.0, 1.0], vertices.len() as u16
+                );
+                vertices.extend(qty_verts);
+                indices.extend(qty_inds);
+            }
+        }
+
+        // Fuel slot (below input, left side)
+        let fuel_x = -0.1;
+        let fuel_y = -0.02;
+        let slot_type = if furnace_ui.selected_section == 1 { 1 } else { 0 };
+        let (slot_verts, slot_inds) = Self::generate_slot_vertices(
+            fuel_x, fuel_y, slot_size, slot_type,
+            [1.0, 1.0, 1.0, 1.0], vertices.len() as u16
+        );
+        vertices.extend(slot_verts);
+        indices.extend(slot_inds);
+
+        // Draw fuel item
+        if let Some((block_type, qty)) = furnace_data.fuel {
+            let block_type_val = Self::block_type_to_ui_index(block_type);
+            let icon_size = slot_size * 0.7;
+            let icon_base = vertices.len() as u16;
+            vertices.push(UIVertex { position: [fuel_x - icon_size, fuel_y - icon_size], tex_coords: [0.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
+            vertices.push(UIVertex { position: [fuel_x + icon_size, fuel_y - icon_size], tex_coords: [1.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
+            vertices.push(UIVertex { position: [fuel_x + icon_size, fuel_y + icon_size], tex_coords: [1.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
+            vertices.push(UIVertex { position: [fuel_x - icon_size, fuel_y + icon_size], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
+            indices.extend_from_slice(&[icon_base, icon_base + 1, icon_base + 2, icon_base, icon_base + 2, icon_base + 3]);
+            if qty > 1 {
+                let qty_str = qty.to_string();
+                let (qty_verts, qty_inds) = Self::generate_text_with_shadow(
+                    &qty_str, fuel_x - slot_size * 0.1, fuel_y - slot_size * 0.75, slot_size * 0.6,
+                    [1.0, 1.0, 1.0, 1.0], vertices.len() as u16
+                );
+                vertices.extend(qty_verts);
+                indices.extend(qty_inds);
+            }
+        }
+
+        // Flame indicator (between fuel and progress)
+        let flame_progress = if furnace_data.max_burn_time > 0.0 {
+            furnace_data.burn_time / furnace_data.max_burn_time
+        } else {
+            0.0
+        };
+        let flame_color = if flame_progress > 0.0 {
+            [1.0, 0.5, 0.0, 1.0]  // Orange when burning
+        } else {
+            [0.3, 0.3, 0.3, 1.0]  // Gray when not burning
+        };
+        let flame_x = fuel_x;
+        let flame_y = fuel_y + 0.12;
+        let flame_size = 0.03;
+        let flame_base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [flame_x - flame_size, flame_y - flame_size], tex_coords: [0.0, 0.0], color: flame_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [flame_x + flame_size, flame_y - flame_size], tex_coords: [0.0, 0.0], color: flame_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [flame_x + flame_size, flame_y + flame_size], tex_coords: [0.0, 0.0], color: flame_color, use_texture: 0.0 });
+        vertices.push(UIVertex { position: [flame_x - flame_size, flame_y + flame_size], tex_coords: [0.0, 0.0], color: flame_color, use_texture: 0.0 });
+        indices.extend_from_slice(&[flame_base, flame_base + 1, flame_base + 2, flame_base, flame_base + 2, flame_base + 3]);
+
+        // Progress arrow (horizontal, in center)
+        let arrow_x = 0.05;
+        let arrow_y = 0.0;
+        let arrow_width = 0.08;
+        let arrow_height = 0.03;
+        // Background arrow (gray)
+        let arrow_bg_base = vertices.len() as u16;
+        vertices.push(UIVertex { position: [arrow_x - arrow_width, arrow_y - arrow_height], tex_coords: [0.0, 0.0], color: [0.3, 0.3, 0.3, 1.0], use_texture: 0.0 });
+        vertices.push(UIVertex { position: [arrow_x + arrow_width, arrow_y - arrow_height], tex_coords: [0.0, 0.0], color: [0.3, 0.3, 0.3, 1.0], use_texture: 0.0 });
+        vertices.push(UIVertex { position: [arrow_x + arrow_width, arrow_y + arrow_height], tex_coords: [0.0, 0.0], color: [0.3, 0.3, 0.3, 1.0], use_texture: 0.0 });
+        vertices.push(UIVertex { position: [arrow_x - arrow_width, arrow_y + arrow_height], tex_coords: [0.0, 0.0], color: [0.3, 0.3, 0.3, 1.0], use_texture: 0.0 });
+        indices.extend_from_slice(&[arrow_bg_base, arrow_bg_base + 1, arrow_bg_base + 2, arrow_bg_base, arrow_bg_base + 2, arrow_bg_base + 3]);
+
+        // Progress fill (white)
+        let cook_progress = if let Some((input_type, _)) = furnace_data.input {
+            if let Some((_, cook_time)) = crate::world::FurnaceData::smelting_recipe(input_type) {
+                furnace_data.cook_time / cook_time
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        if cook_progress > 0.0 {
+            let fill_width = arrow_width * 2.0 * cook_progress;
+            let fill_base = vertices.len() as u16;
+            vertices.push(UIVertex { position: [arrow_x - arrow_width, arrow_y - arrow_height * 0.8], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: 0.0 });
+            vertices.push(UIVertex { position: [arrow_x - arrow_width + fill_width, arrow_y - arrow_height * 0.8], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: 0.0 });
+            vertices.push(UIVertex { position: [arrow_x - arrow_width + fill_width, arrow_y + arrow_height * 0.8], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: 0.0 });
+            vertices.push(UIVertex { position: [arrow_x - arrow_width, arrow_y + arrow_height * 0.8], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: 0.0 });
+            indices.extend_from_slice(&[fill_base, fill_base + 1, fill_base + 2, fill_base, fill_base + 2, fill_base + 3]);
+        }
+
+        // Output slot (right side)
+        let output_x = 0.15;
+        let output_y = 0.0;
+        let slot_type = if furnace_ui.selected_section == 2 { 1 } else { 0 };
+        let (slot_verts, slot_inds) = Self::generate_slot_vertices(
+            output_x, output_y, slot_size, slot_type,
+            [1.0, 1.0, 1.0, 1.0], vertices.len() as u16
+        );
+        vertices.extend(slot_verts);
+        indices.extend(slot_inds);
+
+        // Draw output item
+        if let Some((block_type, qty)) = furnace_data.output {
+            let block_type_val = Self::block_type_to_ui_index(block_type);
+            let icon_size = slot_size * 0.7;
+            let icon_base = vertices.len() as u16;
+            vertices.push(UIVertex { position: [output_x - icon_size, output_y - icon_size], tex_coords: [0.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
+            vertices.push(UIVertex { position: [output_x + icon_size, output_y - icon_size], tex_coords: [1.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
+            vertices.push(UIVertex { position: [output_x + icon_size, output_y + icon_size], tex_coords: [1.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
+            vertices.push(UIVertex { position: [output_x - icon_size, output_y + icon_size], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: block_type_val });
+            indices.extend_from_slice(&[icon_base, icon_base + 1, icon_base + 2, icon_base, icon_base + 2, icon_base + 3]);
+            if qty > 1 {
+                let qty_str = qty.to_string();
+                let (qty_verts, qty_inds) = Self::generate_text_with_shadow(
+                    &qty_str, output_x - slot_size * 0.1, output_y - slot_size * 0.75, slot_size * 0.6,
+                    [1.0, 1.0, 1.0, 1.0], vertices.len() as u16
+                );
+                vertices.extend(qty_verts);
+                indices.extend(qty_inds);
+            }
+        }
+
+        // Inventory label
+        let (inv_label_verts, inv_label_inds) = Self::generate_centered_text(
+            "Inventory", 0.0, -0.12, 0.035, [0.9, 0.9, 0.9, 1.0], vertices.len() as u16
+        );
+        vertices.extend(inv_label_verts);
+        indices.extend(inv_label_inds);
+
+        // Player inventory (9 slots)
+        let inv_slot_spacing = 0.085;
+        let inv_row_y = -0.2;
+        let inv_start_x = -(9.0 * inv_slot_spacing) / 2.0 + inv_slot_spacing / 2.0;
+
+        for i in 0..9 {
+            let slot_x = inv_start_x + i as f32 * inv_slot_spacing;
+            let is_selected = furnace_ui.selected_section == 3 && furnace_ui.selected_slot == i;
+            let slot_type = if is_selected { 1 } else { 0 };
+
+            let (slot_verts, slot_inds) = Self::generate_slot_vertices(
+                slot_x, inv_row_y, slot_size * 0.9, slot_type,
+                [1.0, 1.0, 1.0, 1.0], vertices.len() as u16
+            );
+            vertices.extend(slot_verts);
+            indices.extend(slot_inds);
+
+            if let Some(ref item_stack) = inventory.slots[i] {
+                let (item_index, qty) = match item_stack {
+                    ItemStack::Block(block_type, qty) => (Self::block_type_to_ui_index(*block_type), *qty),
+                    ItemStack::Tool(tool) => (Self::tool_to_ui_index(tool), 1),
+                };
+                let icon_size = slot_size * 0.6;
+                let icon_base = vertices.len() as u16;
+                vertices.push(UIVertex { position: [slot_x - icon_size, inv_row_y - icon_size], tex_coords: [0.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: item_index });
+                vertices.push(UIVertex { position: [slot_x + icon_size, inv_row_y - icon_size], tex_coords: [1.0, 1.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: item_index });
+                vertices.push(UIVertex { position: [slot_x + icon_size, inv_row_y + icon_size], tex_coords: [1.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: item_index });
+                vertices.push(UIVertex { position: [slot_x - icon_size, inv_row_y + icon_size], tex_coords: [0.0, 0.0], color: [1.0, 1.0, 1.0, 1.0], use_texture: item_index });
+                indices.extend_from_slice(&[icon_base, icon_base + 1, icon_base + 2, icon_base, icon_base + 2, icon_base + 3]);
+                if qty > 1 {
+                    let qty_str = qty.to_string();
+                    let (qty_verts, qty_inds) = Self::generate_text_with_shadow(
+                        &qty_str, slot_x - slot_size * 0.1, inv_row_y - slot_size * 0.6, slot_size * 0.5,
+                        [1.0, 1.0, 1.0, 1.0], vertices.len() as u16
+                    );
+                    vertices.extend(qty_verts);
+                    indices.extend(qty_inds);
+                }
+            }
+        }
+
+        // Instructions
+        let (inst_verts, inst_inds) = Self::generate_centered_text(
+            "Arrows: Move  Enter: Transfer  Esc: Close",
+            0.0, -0.28, 0.022, [0.7, 0.7, 0.7, 1.0], vertices.len() as u16
+        );
+        vertices.extend(inst_verts);
+        indices.extend(inst_inds);
+
+        // Create buffers and render
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Furnace UI Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Furnace UI Index Buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Furnace UI Encoder"),
+        });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Furnace UI Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,
                     resolve_target: None,
